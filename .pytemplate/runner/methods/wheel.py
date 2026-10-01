@@ -24,7 +24,7 @@ from typing import Any
 
 from .. import envs, mypyc, proc, render, ui
 from ..cmd_build import BuildRequest, dist_path
-from ..config import Config, compiled_paths, toml_value
+from ..config import TOML_ERRORS, Config, compiled_paths, toml_error, toml_value
 from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, rel
 from ..ui import PytError
 from . import common
@@ -38,8 +38,8 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return tomllib.loads(path.read_text(encoding="utf-8-sig"))
     except OSError as e:
         raise PytError(f"wheel: cannot read {path.name}: {e.strerror or e}") from None
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
-        raise PytError(f"wheel: {path.name} is not valid TOML: {e}") from None
+    except TOML_ERRORS as e:  # an integer of 5000 digits, arrays nested a thousand deep: no TOMLDecodeError
+        raise PytError(f"wheel: {path.name} is not valid TOML: {toml_error(e)}") from None
 
 
 def _locked_version(package: str) -> str:

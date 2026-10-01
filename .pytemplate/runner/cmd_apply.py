@@ -55,7 +55,7 @@ from typing import Any
 
 from . import cmd_env, envs, hooks, presets, proc, render, rename, ui
 from .cmd_dev import only_flags
-from .config import Config, import_path
+from .config import TOML_ERRORS, Config, import_path, toml_error
 from .project import PYPROJECT, ROOT, STATE_FILE, rel, write_whole
 from .ui import PytError
 
@@ -126,8 +126,8 @@ def read_project(path: Path | None = None) -> Project:
         data = tomllib.loads(text)
     except OSError as e:
         raise PytError(f"pyproject.toml cannot be read: {e.strerror or e}") from None
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
-        raise PytError(f"pyproject.toml is not valid TOML: {e}") from None
+    except TOML_ERRORS as e:  # a TOMLDecodeError, an undecodable byte, an integer of 5000 digits...
+        raise PytError(f"pyproject.toml is not valid TOML: {toml_error(e)}") from None
     project = data.get("project") if isinstance(data.get("project"), dict) else {}
     groups = data.get("dependency-groups") if isinstance(data.get("dependency-groups"), dict) else {}
     name = project.get("name") if isinstance(project, dict) else None

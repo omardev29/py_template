@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import proc, ui
-from .config import Config
+from .config import TOML_ERRORS, Config
 from .project import ENV_SUFFIX, ROOT, venv_python
 from .ui import PytError
 
@@ -239,7 +239,7 @@ def left_out(env: PyEnv) -> list[tuple[str, str]]:
     leaves nothing out (uv then says what is wrong with it)."""
     try:
         data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+    except (OSError, *TOML_ERRORS):
         return []
     groups = data.get("dependency-groups")
     tool = data.get("tool")

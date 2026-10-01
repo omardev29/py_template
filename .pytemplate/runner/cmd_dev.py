@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import envs, lintc, mypyc, proc, render, ui
-from .config import BACKENDS, Config
+from .config import BACKENDS, TOML_ERRORS, Config
 from .project import BUILD, ROOT, SRC, code_dirs, rel
 from .ui import PytError
 
@@ -279,7 +279,7 @@ def pytest_pythonpath(root: Path = ROOT) -> list[str]:
             continue
         try:
             table = _pytest_table(path, kind)
-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, configparser.Error):
+        except (OSError, *TOML_ERRORS, configparser.Error):
             return []  # pytest itself reports the broken file
         if table is None:
             continue

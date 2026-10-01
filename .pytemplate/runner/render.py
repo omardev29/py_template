@@ -798,7 +798,7 @@ def managed_values(text: str) -> dict[str, Any]:
         return {}
     try:
         return tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1]))
-    except tomllib.TOMLDecodeError:
+    except config.TOML_ERRORS:
         return {}
 
 
@@ -806,7 +806,7 @@ def _adopted(cfg: Config, lines: list[str], bounds: tuple[int, int] | None) -> s
     """The additive keys of the block that the project's [tool.uv] defines outside the markers."""
     try:
         data = tomllib.loads("\n".join(_outside_block(lines, bounds)))
-    except tomllib.TOMLDecodeError:
+    except config.TOML_ERRORS:
         return set()  # _verify says what is wrong
     return set(_table(data, "tool", "uv")) & set(tomllib.loads(managed_block(cfg))) & ADDITIVE_KEYS
 
@@ -885,7 +885,7 @@ def _verify(cfg: Config, text: str, new: str) -> None:
     old_keys: set[str] = set()
     try:
         old = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
+    except config.TOML_ERRORS as e:  # a plain ValueError (an integer of 5000 digits) and a RecursionError too
         # Only one clash is repaired: the project's own list of an additive key next to the
         # block's (it added it while the block had it too), when both halves read on their own;
         # the rewrite leaves the key to the project. Anything else broken is the user's to fix.
@@ -894,16 +894,16 @@ def _verify(cfg: Config, text: str, new: str) -> None:
             try:
                 tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1]))
                 rest = tomllib.loads("\n".join(_outside_block(lines, bounds)))
-            except tomllib.TOMLDecodeError:
+            except config.TOML_ERRORS:
                 rest = None
         if rest is None:
-            raise PytError(f"pyproject.toml is not valid TOML ({e}).\n  Fix it, then run ./pyt lock") from None
+            raise PytError(f"pyproject.toml is not valid TOML ({config.toml_error(e)}).\n  Fix it, then run ./pyt lock") from None
         old = rest
     else:
         if bounds:
             try:
                 old_keys = set(tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1])))
-            except tomllib.TOMLDecodeError:
+            except config.TOML_ERRORS:
                 pass  # the comparison below reports it
             # Only the keys a block writes may go; any other key there is the user's and the
             # rewrite would drop it (an index-url, a constraint: gone without a word)
@@ -920,9 +920,9 @@ def _verify(cfg: Config, text: str, new: str) -> None:
     written = set(managed) - adopted
     try:
         data = tomllib.loads(new)
-    except tomllib.TOMLDecodeError as e:
+    except config.TOML_ERRORS as e:
         raise PytError(
-            f"pyproject.toml: writing the parts managed by pytemplate would give invalid TOML ({e}).\n"
+            f"pyproject.toml: writing the parts managed by pytemplate would give invalid TOML ({config.toml_error(e)}).\n"
             f"  Does [tool.uv] repeat a managed key ({', '.join(sorted(written))}) outside the markers? Delete it there\n"
             "  (./pyt lock writes the managed block again), or restore the markers"
         ) from None
@@ -968,7 +968,7 @@ def gains_pypy(cfg: Config) -> bool:
         return False
     try:
         return not resolves_pypy(tomllib.loads(_read_pyproject()))
-    except (PytError, tomllib.TOMLDecodeError):
+    except (PytError, *config.TOML_ERRORS):
         return True
 
 
@@ -991,7 +991,7 @@ def _same_meaning(text: str, new: str) -> bool:
         return True
     try:
         return tomllib.loads(text) == tomllib.loads(new)
-    except tomllib.TOMLDecodeError:
+    except config.TOML_ERRORS:
         return False
 
 

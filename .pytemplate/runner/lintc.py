@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import Config, compiled_paths
+from .config import TOML_ERRORS, Config, compiled_paths
 from .imports import PARSE_ERRORS, iter_runtime_nodes, module_name, parse, parse_error
 from .project import PYPROJECT, SRC
 
@@ -248,7 +248,7 @@ def _runtime_dependencies() -> set[str]:
     """Normalised names in pyproject.toml [project] dependencies (builds install no dev group)."""
     try:
         data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+    except (OSError, *TOML_ERRORS):
         return set()
     project = data.get("project")
     deps = project.get("dependencies") if isinstance(project, dict) else None

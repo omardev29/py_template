@@ -1524,8 +1524,8 @@ def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
         new = "\n".join(lines)
     try:
         tomllib.loads(new)
-    except tomllib.TOMLDecodeError as e:
-        raise PytError(f"rename: the new pyproject.toml would not be valid TOML ({e}); nothing was changed") from None
+    except config.TOML_ERRORS as e:  # an integer of 5000 digits, arrays nested a thousand deep: no TOMLDecodeError
+        raise PytError(f"rename: the new pyproject.toml would not be valid TOML ({config.toml_error(e)}); nothing was changed") from None
     # What is left (other tables: [tool.coverage] source = ["alpha"]...) is only reported
     rest = rewrite(new, names, only_pkg=True, toml=True)
     left = {n for n, _, _ in rest.changes} | {n for n, _ in rest.kept}

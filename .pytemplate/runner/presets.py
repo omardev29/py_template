@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import proc, ui
-from .config import APP_NAME, BACKENDS, NAME_RULE
+from .config import APP_NAME, BACKENDS, NAME_RULE, TOML_ERRORS, toml_error
 from .project import BUILD, INSTALL_RECORD, PRESETS, PYPROJECT, ROOT, TEMPLATE, rel, write_whole
 from .ui import PytError
 
@@ -255,8 +255,8 @@ def _read_text(path: Path, what: str) -> str:
 def _read_toml(path: Path, what: str) -> dict[str, Any]:
     try:
         return tomllib.loads(_read_text(path, what))
-    except tomllib.TOMLDecodeError as e:
-        raise PytError(f"{what} is not valid TOML: {e}") from None
+    except TOML_ERRORS as e:  # an integer of 5000 digits, arrays nested a thousand deep: no TOMLDecodeError
+        raise PytError(f"{what} is not valid TOML: {toml_error(e)}") from None
 
 
 def read_pyproject() -> dict[str, Any]:
@@ -652,7 +652,12 @@ def shadows_stdlib(pkg: str) -> bool:
 
 def set_project_name(text: str, name: str) -> str:
     """`text` (a pyproject.toml) with [project] name = `name` (_set_project_name). PytError when
-    the result does not say so, so no caller reports a change it did not make (apply, rename)."""
+    the result does not say so, so no caller reports a change it did not make (apply, rename). A
+    text that is no valid TOML is said to be so (it was "edit that line by hand")."""
+    try:
+        tomllib.loads(text.lstrip("﻿"))
+    except TOML_ERRORS as e:
+        raise PytError(f"pyproject.toml is not valid TOML: {toml_error(e)}") from None
     new = _set_project_name(text, name)
     if project_name(new) != name:
         raise PytError(f'could not set [project] name = "{name}" in pyproject.toml: edit that line by hand and try again')
@@ -663,7 +668,7 @@ def project_name(text: str) -> str | None:
     """Return [project] name of a pyproject.toml text (None: missing, not a string or not TOML)."""
     try:
         value = tomllib.loads(text.lstrip("\ufeff")).get("project", {}).get("name")
-    except (tomllib.TOMLDecodeError, AttributeError):
+    except (*TOML_ERRORS, AttributeError):
         return None
     return value if isinstance(value, str) else None
 
@@ -717,9 +722,9 @@ def pyproject_after_init(cfg: Config, preset: str, name: str) -> str:
         managed = render.pyproject_expected(cfg, _set_extra_tables(_set_project_name(text, name), ""))
         text = _set_extra_tables(managed, extra)
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
+    except TOML_ERRORS as e:
         raise PytError(
-            f"pyproject.toml would not be valid TOML with the tables of the '{preset}' preset ({e}).\n"
+            f"pyproject.toml would not be valid TOML with the tables of the '{preset}' preset ({toml_error(e)}).\n"
             f"  One of them is probably defined outside the markers: {hint}"
         ) from None
     project = data.get("project")
@@ -1351,7 +1356,7 @@ def _set_description(text: str, description: str) -> str:
     try:
         if not isinstance(tomllib.loads(text).get("project"), dict):
             return text
-    except tomllib.TOMLDecodeError:
+    except TOML_ERRORS:
         return text  # init says what is wrong with it
     try:
         return config.set_value(text, "project", "description", description)

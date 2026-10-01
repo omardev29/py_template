@@ -38,8 +38,9 @@ import pytest
 TEMPLATE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEMPLATE_DIR))
 
-from runner import cli, cmd_apply, cmd_dev, cmd_env, config, envs, hooks, presets, proc, render, rename  # noqa: E402
+from runner import cli, cmd_apply, cmd_dev, cmd_env, config, envs, hooks, lintc, presets, proc, render, rename  # noqa: E402
 from runner import project as project_module  # noqa: E402
+from runner.methods import wheel  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ROOT  # noqa: E402
 from runner.ui import PytError  # noqa: E402
@@ -875,6 +876,42 @@ def test_a_failed_add_restores_pyproject_too(tmp_path: Path, monkeypatch: pytest
     assert e.value.code == 1
     assert ["remove", "--frozen", "raylib"] in uv.calls
     assert (project.root / "pyproject.toml").read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("extra", "why"),
+    [("big = " + "9" * 5000, "Exceeds the limit"), ("deep = " + "[" * 2000 + "]" * 2000, "nested too deeply")],
+    ids=["an integer of 5000 digits", "arrays nested 2000 deep"],
+)
+def test_a_pyproject_tomllib_cannot_read_is_one_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: str, why: str) -> None:
+    """tomllib raises a plain ValueError for an integer over 4300 digits and a RecursionError for
+    arrays nested about a thousand deep, never its TOMLDecodeError, and the readers of
+    pyproject.toml caught only that one: apply, setup, doctor (and every command, through
+    render.auto), lock, mode, rename, sync, check, test mypyc and the wheel ended in an
+    internal-error traceback. Each says that pyproject.toml is not valid TOML, or reads it as a
+    file it cannot use, as for pytemplate.toml (config.TOML_ERRORS)."""
+    project, uv = _project(tmp_path, monkeypatch, "script", "alpha")
+    pyproject = project.root / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8") + f"\n[tool.mine]\n{extra}\n", encoding="utf-8", newline="\n")
+    cfg = project.cfg()
+    with pytest.raises(PytError, match="pyproject.toml is not valid TOML") as e:
+        _run(project)
+    assert why in str(e.value), str(e.value)
+    assert "pyproject.toml is not valid TOML" in cmd_apply.pending(cfg)[0][0]  # doctor and the hook
+    assert render.pyproject_outdated(cfg) and render.managed_values(pyproject.read_text(encoding="utf-8")) is not None
+    with pytest.raises(PytError, match="pyproject.toml is not valid TOML"):
+        render.write_pyproject(cfg)  # lock, mode, rename (ensure_lock)
+    with pytest.raises(PytError, match="pyproject.toml is not valid TOML"):
+        rename._plan_pyproject(project.root, rename.Names("alpha", "beta"))
+    assert presets.project_name(pyproject.read_text(encoding="utf-8")) is None
+    with pytest.raises(PytError, match="pyproject.toml is not valid TOML"):
+        presets.read_pyproject()
+    assert envs.left_out(envs.cpython_env(cfg)) == []  # sync: uv says what is wrong
+    monkeypatch.setattr(lintc, "PYPROJECT", pyproject)
+    assert lintc._runtime_dependencies() == set()  # check's librt rule
+    assert cmd_dev.pytest_pythonpath(project.root) == []  # test mypyc: pytest says what is wrong
+    with pytest.raises(PytError, match="wheel: pyproject.toml is not valid TOML"):
+        wheel._read_toml(pyproject)
 
 
 def test_a_failed_lock_puts_the_project_name_line_back_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

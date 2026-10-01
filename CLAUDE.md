@@ -1769,7 +1769,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   integer of more than 4300 digits, RecursionError for arrays nested about a thousand deep;
   `config.toml_error` words it), in `config.load`, `set_value`, `update_file`,
   `cli._python_needed` and `cmd_mode._config_from_text`
-  (`test_config_rules.test_a_config_tomllib_cannot_read_is_a_config_error`).
+  (`test_config_rules.test_a_config_tomllib_cannot_read_is_a_config_error`). The readers of
+  pyproject.toml catch the same errors (`cmd_apply.read_project`, render's managed-part checks,
+  `rename._plan_pyproject`, `presets._read_toml`/`project_name`/`set_project_name`, `envs.left_out`,
+  lintc's librt rule, `cmd_dev.pytest_pythonpath`, `wheel._read_toml`): such a pyproject.toml
+  ended apply, doctor and every rendering command in an internal-error traceback
+  (`test_apply.test_a_pyproject_tomllib_cannot_read_is_one_error`).
 - Loader (`config._build`): types come from the dataclass annotations (`typing.get_type_hints`),
   recursively: list items (`key[i]`), table values (`key.k`; non-bare keys are quoted in the
   path). `Any`-typed values (`[vscode] settings`, `[preset.<p>]` options, mypy override options)
