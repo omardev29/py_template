@@ -1099,6 +1099,10 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> Recorder:
     r = Recorder()
     monkeypatch.setattr(tasks.envs, "uv_run", r.uv_run)
     monkeypatch.setattr(tasks.proc, "run", r.run)
+    # The programs recorded here exist nowhere, and on Windows run_task refuses a bare name the
+    # task's PATH lacks before it reaches proc.run: POSIX rules, unless a test of that lookup
+    # sets tasks.IS_WINDOWS itself.
+    monkeypatch.setattr(tasks, "IS_WINDOWS", False)
     return r
 
 
@@ -1199,8 +1203,7 @@ def test_every_placeholder(rec: Recorder) -> None:
 def test_literal_braces_are_written_doubled(rec: Recorder) -> None:
     cfg = make({"tasks": {"t": {"cmd": ["python", "-c", "d = {{}}; print({{'a': 1}})"], "uv": False}}})
     tasks.run_task(cfg, "t", [], rec.dispatch)
-    [(program, *rest)] = rec.runs  # Windows runs the python it finds on PATH (PATHEXT), by its full path
-    assert Path(program).stem.lower() == "python" and rest == ["-c", "d = {}; print({'a': 1})"]
+    assert rec.runs == [["python", "-c", "d = {}; print({'a': 1})"]]
 
 
 BAD_BRACES = ["{}", "{", "}", "x{0}", "{name!r}", "{name:>9}", "{name.upper}", "{name[0]}", "{name[a]}", "{root"]
@@ -1412,25 +1415,40 @@ def test_a_bare_program_is_found_with_pathext_on_windows(rec: Recorder, tmp_path
     """Windows: CreateProcess only tries `npm.exe` for a bare `npm`, so a task running npm, yarn
     or mvn (.cmd files) failed with "program not found: npm" there and worked elsewhere. The
     search is the task's PATH alone: shutil.which looked in the current folder first, the
-    caller's (the launchers never cd), and a same-named npm.cmd there ran instead."""
+    caller's (the launchers never cd), and a same-named npm.cmd there ran instead. A name the
+    task's PATH lacks went to CreateProcess bare, which looks in the runner's own folder, the
+    caller's folder and the runner's PATH first: an npm.exe there ran. It is not found now."""
     npm = _batch(tmp_path / "nodejs", "npm.cmd")
     _batch(tmp_path / "caller", "npm.cmd")  # the folder ./pyt web was typed in: never searched
+    (tmp_path / "caller" / "npm.exe").write_bytes(b"MZ")  # what CreateProcess finds there for a bare npm
     monkeypatch.chdir(tmp_path / "caller")
     monkeypatch.setattr(tasks, "IS_WINDOWS", True)
     monkeypatch.setenv("PATHEXT", ".com;.exe;.bat;.cmd")  # lower case: Linux file names are case-sensitive
     work = tmp_path / "work"
     tool = _batch(work / "bin", "tool.bat")
+    script = tmp_path / "scripts" / "gen.py"
+    script.parent.mkdir()
+    script.write_text("print('gen')\n", encoding="utf-8")
     cfg = make({"tasks": {
         "web": {"cmd": ["npm", "run", "build"], "uv": False, "env": {"PATH": str(npm.parent)}},
         "missing": {"cmd": ["npm"], "uv": False, "env": {"PATH": str(tmp_path / "empty")}},
         "rel": {"cmd": ["tools/x.cmd"], "uv": False},
         "named": {"cmd": ["npm.cmd"], "uv": False, "env": {"PATH": str(npm.parent)}},
         "relpath": {"cmd": ["tool"], "uv": False, "env": {"PATH": "bin"}, "cwd": str(work)},
+        "script": {"cmd": ["gen.py"], "uv": False, "env": {"PATH": str(script.parent)}},
     }})
     tasks.run_task(cfg, "web", ["--prod"], rec.dispatch)
     assert rec.runs[-1] == [str(npm), "run", "build", "--prod"]  # the task's own PATH, never the caller's folder
+    ran = len(rec.runs)
+    with pytest.raises(PytError, match=r"^program not found: npm  \(looked for on the task's PATH") as e:
+        tasks.run_task(cfg, "missing", [], rec.dispatch)
+    assert e.value.code == 3 and len(rec.runs) == ran  # never handed to CreateProcess bare
+    monkeypatch.setattr(tasks.proc, "DRY_RUN", True)
     tasks.run_task(cfg, "missing", [], rec.dispatch)
-    assert rec.runs[-1] == ["npm"]  # not found (not even in the caller's folder): proc.run reports it
+    assert rec.runs[-1] == ["npm"]  # a dry run shows it (a dep may make the program)
+    monkeypatch.setattr(tasks.proc, "DRY_RUN", False)
+    tasks.run_task(cfg, "script", [], rec.dispatch)
+    assert rec.runs[-1] == [str(script)]  # an extension outside PATHEXT: as it is (CreateProcess then says it cannot start it)
     tasks.run_task(cfg, "rel", [], rec.dispatch)
     assert Path(rec.runs[-1][0]) == ROOT / "tools" / "x.cmd"  # a path is no PATH lookup
     tasks.run_task(cfg, "named", [], rec.dispatch)

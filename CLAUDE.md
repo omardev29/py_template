@@ -1882,7 +1882,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   renders a task whose deps do not parse. `uv = false` on Windows: a bare program is looked up
   on the task's PATH with PATHEXT (`npm` -> `npm.cmd`; `tasks._on_windows_path`: never in the
   current folder, the caller's, which shutil.which searched first, so an `npm.cmd` in the folder
-  `./pyt web` was typed in ran instead; a relative PATH entry is the task cwd's, as on POSIX),
+  `./pyt web` was typed in ran instead; a relative PATH entry is the task cwd's, as on POSIX; a
+  name with another extension, `gen.py`, as it is). A name the task's PATH lacks is `program not
+  found`, exit 3, before proc.run (not in a dry run: a dep may make it): handed to CreateProcess
+  bare, it was looked for in the runner's own folder, the caller's folder, the system folders and
+  the runner's PATH, and a `mytool.exe` there ran
+  (`test_cli_core.test_a_bare_program_is_found_with_pathext_on_windows`),
   and a `.cmd`/`.bat` program runs
   through cmd.exe, which re-parses the `list2cmdline` line: an argument it would change (`%`,
   `"`, a line break; `^ & | < >` when list2cmdline leaves it unquoted: no space, tab or empty
@@ -6104,9 +6109,14 @@ Windows:
   Goes: never.
 - **CreateProcess tries only `<name>.exe` for a bare program name** (LIMITATION, PATHEXT is a
   shell feature): a `uv = false` task running `npm`, `yarn` or `mvn` (`.cmd` files) failed with
-  "program not found" on Windows only. Fix: `tasks.run_task` looks the name up on the task's
-  PATH with PATHEXT (`tasks._on_windows_path`, not shutil.which, which on Windows searches the
-  current folder first: always on Python 3.11); the `.cmd` it finds runs
+  "program not found" on Windows only. And it looks for that `<name>.exe` in its own search
+  order (documented for CreateProcessW's lpApplicationName = NULL, which subprocess passes): the
+  folder of the runner's python.exe, the runner's current folder (the caller's: the launchers
+  never cd), the system folders, then the runner's PATH, never the child's: a `mytool.exe` in the
+  folder a task was typed in ran where its PATH had no mytool. Fix: `tasks.run_task` looks the
+  name up on the task's PATH with PATHEXT (`tasks._on_windows_path`, not shutil.which, which on
+  Windows searches the current folder first: always on Python 3.11), and a name not found there
+  never reaches CreateProcess bare (`program not found`, exit 3); the `.cmd` it finds runs
   through cmd.exe (the entry "cmd re-parses `%*`" below) (6.1). Test:
   `test_cli_core.py::test_a_bare_program_is_found_with_pathext_on_windows`. Goes: never.
 - **A command line holds 32767 characters** (LIMITATION): Fix: `hooks.ARG_LIMIT` batches file

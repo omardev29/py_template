@@ -174,6 +174,7 @@ def test_tasks_do_not_resolve_the_python_unless_needed(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(envs, "runtime_env", no_python)
     monkeypatch.setattr(tasks.proc, "run", fake_run)
+    monkeypatch.setattr(tasks, "IS_WINDOWS", False)  # `tool` exists nowhere: Windows would refuse it before proc.run
     assert tasks.run_task(cfg, "plain", ["x"], lambda _argv: 0) == 0
     assert calls[-1][0] == "tool" and calls[-1][2:] == ["cpython", "x"]
     with pytest.raises(PytError, match="no python"):

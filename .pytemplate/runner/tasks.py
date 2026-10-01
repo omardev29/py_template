@@ -204,11 +204,15 @@ def run_task(
         argv[0] = str(cwd / program)
     elif IS_WINDOWS and not os.path.isabs(program):
         # A bare name: CreateProcess only tries `<name>.exe`, so npm, yarn or mvn (npm.cmd...)
-        # were "not found". Search the task's PATH with PATHEXT, as a shell does (not found:
-        # the name stays, and proc.run says so)
+        # were "not found". Search the task's PATH with PATHEXT, as a shell does. Not found
+        # there, the name never reaches CreateProcess bare: it looks in the runner's own folder,
+        # the folder ./pyt was typed in and the runner's PATH first, and a mytool.exe there ran.
+        # A dry run keeps the name (a dep may make the program, as it may make the cwd).
         found = _on_windows_path(program, base, cwd)
         if found:
             argv[0] = found
+        elif not proc.DRY_RUN:
+            raise PytError(f"program not found: {program}  (looked for on the task's PATH, with the extensions of PATHEXT)", 3)
     if IS_WINDOWS and argv[0].lower().endswith((".cmd", ".bat")):
         # Its own path too: list2cmdline quotes it only for a blank, and C:\Users\R&D\...\x.cmd
         # reached cmd.exe as two commands.
@@ -235,8 +239,11 @@ def _on_windows_path(program: str, env: Mapping[str, str], cwd: Path) -> str | N
     ./pyt was typed in ran instead of the task's. A relative PATH entry is the task cwd's, as for
     execvp after the child's chdir on POSIX."""
     exts = [e for e in (env.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";") if e]
-    has_ext = os.path.splitext(program)[1].lower() in {e.lower() for e in exts}
+    ext = os.path.splitext(program)[1].lower()
+    has_ext = ext in {e.lower() for e in exts}
     names = [program] if has_ext else [program + e for e in exts]
+    if ext and not has_ext:  # as CreateProcess takes it: gen.py is found, and then cannot start (and says so)
+        names.append(program)
     for entry in env.get("PATH", "").split(os.pathsep):
         entry = entry.strip().strip('"')
         if not entry:
