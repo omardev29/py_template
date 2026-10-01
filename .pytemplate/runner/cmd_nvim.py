@@ -750,6 +750,18 @@ def cmd_doctor(cfg: Config) -> int:
 # --- trust / extras / bootstrap / sync --------------------------------------------------------------
 
 
+def _done(message: str, details: str = "") -> None:
+    """What the command did and where (a path, a hash, a backup): the answer to it, so -q, which
+    hides progress and ok lines, keeps it (5.3), as it keeps the paths render lists. `-q nvim
+    extras` rewrote lazyvim.json and made a backup without a word."""
+    if ui.QUIET:
+        ui.report(message)
+    else:
+        ui.ok(message)
+    if details:
+        ui.report(details)
+
+
 def cmd_trust(nv: Nvim) -> int:
     """nvim trust: pre-trust ROOT/.lazy.lua with vim.secure.trust (the same as (v)iew + :trust)."""
     before = trust_status(nv.trust_db, LAZY_LUA)
@@ -763,8 +775,7 @@ def cmd_trust(nv: Nvim) -> int:
             f"without {rtp_unsafe_text()}"
         )
     if before.state == "trusted":
-        ui.ok(f"already trusted: {before.path}")
-        ui.info(f"  sha256 {before.sha256}")
+        _done(f"already trusted: {before.path}", f"  sha256 {before.sha256}")
         return 0
     if proc.DRY_RUN:
         ui.info(f"would trust {before.path}\n  sha256 {before.sha256}\n  in {nv.trust_db}")
@@ -773,8 +784,7 @@ def cmd_trust(nv: Nvim) -> int:
     after = trust_status(nv.trust_db, LAZY_LUA)
     if after.state != "trusted":
         raise PytError(f"Neovim reported success, but {nv.trust_db} has no matching entry for {after.path} ({after.state})", 3)
-    ui.ok(f"trusted {after.path}")
-    ui.info(f"  sha256 {after.sha256}\n  database {nv.trust_db}")
+    _done(f"trusted {after.path}", f"  sha256 {after.sha256}\n  database {nv.trust_db}")
     ui.info("  It also lets .lazy.lua load the local plugin .pytemplate/nvim/. Any change to the file needs a new trust.")
     return 0
 
@@ -788,12 +798,10 @@ def cmd_extras(nv: Nvim) -> int:
         raise PytError(f"{path} does not exist yet. Start Neovim once (LazyVim creates it), then run ./pyt nvim extras again", 3)
     added, backup = enable_extras(path, dry_run=proc.DRY_RUN)
     if not added:
-        ui.ok(f"every recommended extra is already enabled in {path}")
+        _done(f"every recommended extra is already enabled in {path}")
         return 0
     verb = "would enable" if proc.DRY_RUN else "enabled"
-    ui.ok(f"{verb} in {path}: " + ", ".join(short_extra(e) for e in added))
-    if backup:
-        ui.info(f"  backup: {backup}")
+    _done(f"{verb} in {path}: " + ", ".join(short_extra(e) for e in added), f"  backup: {backup}" if backup else "")
     ui.info("  Restart Neovim: LazyVim imports them in order (see :LazyExtras).")
     return 0
 
@@ -801,9 +809,9 @@ def cmd_extras(nv: Nvim) -> int:
 def cmd_bootstrap(nv: Nvim) -> int:
     """nvim bootstrap: clone the LazyVim starter into <config> (only if <config> does not exist)."""
     if nv.config.exists():
-        ui.info(f"{nv.config} already exists: nothing done (an existing Neovim config is never touched)")
+        ui.report(f"{nv.config} already exists: nothing done (an existing Neovim config is never touched)")
         if not nv.lazyvim_installed():
-            ui.info("  It is not a LazyVim config. See https://lazyvim.github.io/installation to switch by hand.")
+            ui.report("  It is not a LazyVim config. See https://lazyvim.github.io/installation to switch by hand.")
         return 0
     git = which("git")
     if not git:
@@ -817,9 +825,11 @@ def cmd_bootstrap(nv: Nvim) -> int:
         remove_tree(nv.config / ".git")  # LazyVim's install steps: the config becomes your own
     except OSError as e:
         raise PytError(f"the starter is in {nv.config}, but its .git could not be removed ({e}): delete it by hand", 3) from None
-    ui.ok(f"LazyVim starter installed in {nv.config}")
     # one command per line, as `new` prints its next steps: cmd and Windows PowerShell 5.1 have no &&
-    ui.info("  Next: start nvim once (LazyVim installs its plugins), then run in the project:\n    ./pyt nvim trust\n    ./pyt nvim sync")
+    _done(
+        f"LazyVim starter installed in {nv.config}",
+        "  Next: start nvim once (LazyVim installs its plugins), then run in the project:\n    ./pyt nvim trust\n    ./pyt nvim sync",
+    )
     return 0
 
 
@@ -889,7 +899,7 @@ def cmd_sync(nv: Nvim) -> int:
         )
     if failed:
         ui.warn(f"lazy.nvim reported errors for: {', '.join(failed)} (see the messages above, or :Lazy)")
-    ui.ok("plugins installed (your other plugins were neither updated nor removed)")
+    _done("plugins installed (your other plugins were neither updated nor removed)")
     return 0
 
 

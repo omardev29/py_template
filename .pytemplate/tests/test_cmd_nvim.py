@@ -308,6 +308,45 @@ def test_bootstrap_names_the_next_steps_on_lines_of_their_own(tmp_path: Path, mo
     assert not (nv.config / ".git").exists()
 
 
+def test_q_keeps_what_the_nvim_commands_did(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """-q hides progress, never what was asked for (5.3): `-q nvim extras` rewrote the user's
+    lazyvim.json and made a backup without a word, and trust, sync and bootstrap said nothing of
+    what they did (A9-04)."""
+    monkeypatch.setattr(cmd_nvim.ui, "QUIET", True)
+    nv = _trusted_nvim(tmp_path / "home")
+    nv.config.mkdir(parents=True)
+    nv.lazyvim_json.write_text(FRESH_LAZYVIM_JSON, encoding="utf-8", newline="\n")
+    assert cmd_nvim.cmd_extras(nv) == 0
+    err = capsys.readouterr().err
+    backup = next(nv.config.glob("lazyvim.json.*.bak"))
+    assert f"enabled in {nv.lazyvim_json}: lang.python" in err and f"backup: {backup}" in err, err
+    assert cmd_nvim.cmd_extras(nv) == 0 and "every recommended extra is already enabled" in capsys.readouterr().err
+
+    nv.trust_db.unlink()
+
+    def trust(exe: str, file: Path, **_: object) -> dict[str, object]:  # what vim.secure.trust writes
+        nv.trust_db.write_text(f"{hashlib.sha256(file.read_bytes()).hexdigest()} {os.path.realpath(file)}\n", encoding="utf-8")
+        return {"ok": True}
+
+    monkeypatch.setattr(cmd_nvim, "trust_file", trust)
+    assert cmd_nvim.cmd_trust(nv) == 0
+    err = capsys.readouterr().err
+    digest = hashlib.sha256(cmd_nvim.LAZY_LUA.read_bytes()).hexdigest()
+    assert f"trusted {os.path.realpath(cmd_nvim.LAZY_LUA)}" in err and f"sha256 {digest}" in err, err
+    assert cmd_nvim.cmd_trust(nv) == 0 and "already trusted: " in capsys.readouterr().err
+
+    _record_runs(monkeypatch)
+    assert cmd_nvim.cmd_sync(nv) == 0
+    assert "plugins installed" in capsys.readouterr().err
+
+    fresh = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    _fake_clone(fresh, monkeypatch)
+    assert cmd_nvim.cmd_bootstrap(fresh) == 0
+    err = capsys.readouterr().err
+    assert f"LazyVim starter installed in {fresh.config}" in err and "./pyt nvim trust" in err, err
+    assert cmd_nvim.cmd_bootstrap(fresh) == 0 and "already exists: nothing done" in capsys.readouterr().err
+
+
 def test_local_spec_off(tmp_path: Path) -> None:
     config = tmp_path / "nvim"
     (config / "lua" / "config").mkdir(parents=True)

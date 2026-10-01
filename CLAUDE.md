@@ -1020,7 +1020,10 @@ header rules (with detector tests proving each rule fires).
   tool output and hint of a pre-commit check that did not pass: `hooks._print`, what `hooks
   install` and `uninstall` did or left alone and why (`hooks.cmd_hooks`: `-q hooks uninstall`
   next to another tool's hook printed nothing), the `hooks` status outside a git work tree
-  (`hooks.show_status`: `-q hooks` printed nothing there), what
+  (`hooks.show_status`: `-q hooks` printed nothing there), what `nvim extras`, `trust`, `sync`
+  and `bootstrap` did (`cmd_nvim._done`: the extras enabled and the backup's path, the file
+  trusted and its hash, where the starter went and the next steps; `-q nvim extras` rewrote
+  lazyvim.json without a word, `test_cmd_nvim.test_q_keeps_what_the_nvim_commands_did`), what
   `rename` and `apply` leave to review: the lines left unchanged and the other files that
   mention the old name, and why a captured step failed: mypyc's errors and the C compiler's
   (`mypyc.build`), the wheel's `uv build` (`wheel.build` captures it under `-q`: uv's `--quiet`
