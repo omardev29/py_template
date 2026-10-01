@@ -1600,6 +1600,21 @@ def test_the_pyproject_lines_a_rename_writes_are_never_left_unchanged(tmp_path: 
     assert [line for _, line in planned.pyproject.kept] == left
 
 
+def test_a_crlf_pyproject_gets_its_preset_values_renamed_too(tmp_path: Path) -> None:
+    """A pyproject.toml with CRLF line endings (a Windows checkout, git's autocrlf): the preset
+    block was cut into lines at LF and joined again without a last line break, so it ended in a
+    lone CR, which the TOML scanner refuses. None of [tool.flet]'s product, company and copyright
+    was renamed, and all three were listed as "left unchanged"."""
+    _write_project(tmp_path, "flet", "alpha")
+    path = tmp_path / "pyproject.toml"
+    path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    assert planned.pyproject is not None and planned.pyproject.kept == []
+    flet = tomllib.loads(planned.pyproject.new)["tool"]["flet"]
+    assert (flet["product"], flet["company"], flet["copyright"]) == ("beta", "beta", "Copyright (C) beta")
+    assert "\n" not in planned.pyproject.new.replace("\r\n", "")  # its line endings stay
+
+
 def test_rename_accepts_a_pyproject_with_a_bom(tmp_path: Path) -> None:
     _write_project(tmp_path, "flet", "alpha")
     path = tmp_path / "pyproject.toml"

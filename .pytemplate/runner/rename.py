@@ -1569,14 +1569,16 @@ def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
     count = 0
     if begin is not None and end is not None and end > begin + 1:
         # Only the values the preset writes with the name: flet's org = "com.example" is a
-        # reverse domain, and for an app named com it became "beta.example"
-        block, named, parts, pos = "\n".join(lines[begin + 1 : end]), _named_keys(), [], 0
+        # reverse domain, and for an app named com it became "beta.example". Every line of the
+        # block ends in its line break: joined without the last one, a CRLF block ended in a lone
+        # CR, which config.scan refuses, and no value was renamed (a Windows checkout)
+        block, named, parts, pos = "\n".join(lines[begin + 1 : end]) + "\n", _named_keys(), [], 0
         for stmt in config.scan(block) or []:
             if stmt.kind == "key" and stmt.path in named:
                 value = rewrite(block[stmt.value[0] : stmt.value[1]], names, toml=True)
                 parts += [block[pos : stmt.value[0]], value.text]
                 pos, count = stmt.value[1], count + value.count
-        lines[begin + 1 : end] = "".join([*parts, block[pos:]]).split("\n")
+        lines[begin + 1 : end] = "".join([*parts, block[pos:]])[:-1].split("\n")
         new = "\n".join(lines)
     try:
         tomllib.loads(new)

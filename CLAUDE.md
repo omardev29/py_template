@@ -1568,7 +1568,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     like the new name or its package (`_names_the_old_one`: renamed to its package's spelling,
     my-flet -> my_flet, the lines just written were listed as left unchanged,
     `test_rename.test_the_pyproject_lines_a_rename_writes_are_never_left_unchanged`). Read as bytes decoded `utf-8-sig`: its line
-    endings stay (a CRLF checkout used to come back LF), the BOM is not written back.
+    endings stay (a CRLF checkout used to come back LF), the BOM is not written back; the preset
+    block is scanned with every line ending in its line break (a CRLF block joined without the
+    last one ended in a lone CR, which `config.scan` refuses, and no value of `[tool.flet]` was
+    renamed: `test_rename.test_a_crlf_pyproject_gets_its_preset_values_renamed_too`).
   - A file of src/ or tests/ that never mentions the old name is searched once and left alone
     (`plan`, and `rewrite` itself; its line lists are made only for the lines it changes or
     keeps): tokenized and split into lines three times, a data asset of 100 MB (a level, a CSV)
