@@ -1304,6 +1304,38 @@ def test_new_render_and_init_refuse_an_option_given_twice(dry: Config, tmp_path:
     assert not (tmp_path / "p").exists()
 
 
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_new_refuses_an_empty_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    """`new DIR --name ""` (a script's "$NAME" with NAME unset) made a project named after the
+    folder without a word, as if --name had been left out: an empty --name is refused before
+    anything is written, in the dry run too."""
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    made: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(presets, "new", lambda dest, preset, name, python=None: made.append((preset, name)))
+    monkeypatch.setattr(cmd_mode.envs, "ensure_python", lambda version: Path(sys.executable))
+    with pytest.raises(PytError) as info:
+        cmd_mode.cmd_new(config.load(set()), [str(tmp_path / "game"), "--name", ""])
+    assert "new: --name is empty" in str(info.value) and info.value.code == 2
+    assert made == [] and not (tmp_path / "game").exists()
+
+
+def test_init_refuses_an_empty_name(dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`__init PRESET --name ""` (what `new` runs in the copy) planned the init under the current
+    app name, and presets.new named the project after its folder: an empty name is no name, and
+    refused like any invalid one."""
+    with pytest.raises(PytError) as info:
+        cmd_mode.cmd_init(dry, [dry.app.preset, "--name", "", "--force"])
+    assert "'' is not a valid app name" in str(info.value) and info.value.code == 2
+
+    def no_copy(dest: Path) -> None:
+        raise AssertionError(f"new copied the template into {dest} for an empty name")
+
+    monkeypatch.setattr(presets, "copy_template", no_copy)
+    with pytest.raises(PytError, match="'' is not a valid app name"):
+        presets.new(tmp_path / "game", dry.app.preset, "")
+    assert not (tmp_path / "game").exists()
+
+
 @pytest.mark.parametrize("supported", [["cpython"], ["pypy"], ["cpython", "mypyc"]])
 def test_mode_names_the_compiled_modules_only_where_mypyc_is_supported(supported: list[str], capsys: pytest.CaptureFixture[str]) -> None:
     """`./pyt mode` in a PyPy-only or CPython-only project said "mypyc compiles p1.core"."""

@@ -3219,7 +3219,11 @@ Per method:
   `new` derives the name from the folder with `name_from_folder` (NFKD without the combining
   marks, every run of other characters, letters without an ASCII form included, -> `-`, no
   `-`/`_` at the ends) and checks it before copying, so `./pyt new ../flet --preset
-  flet` fails with a hint to use `--name`.
+  flet` fails with a hint to use `--name`. Only a `--name` left out does so: an empty one (a
+  script's `"$NAME"` with NAME unset) is refused, by `cmd_mode.cmd_new` and its dry run, and
+  as an invalid name by `presets.new` and `plan_init` (`__init --name ""`): it named the project
+  after its folder, or `__init` after the current app, without a word
+  (`test_config_rules.test_new_refuses_an_empty_name`).
 - **[template repo]** Root `src/`, `tests/` and `pytemplate.toml` must equal
   `presets/script/files` rendered with `name = "myapp"` (`test_presets.py` checks it, and
   that every preset ships the same `tests/conftest.py`). Edit the preset, then regenerate the

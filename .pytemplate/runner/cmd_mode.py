@@ -539,8 +539,11 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
     if resolved == ROOT or ROOT in resolved.parents:
         raise PytError(f"new: the destination folder cannot be inside {presets.source_name()}")
     presets.check_destination(dest, "new: ")
-    # Checked here, before copying (and under --dry-run): a copy whose `init` fails is removed
-    name = ns.name or presets.name_from_folder(resolved.name)
+    # Checked here, before copying (and under --dry-run): a copy whose `init` fails is removed.
+    # An empty --name (a script's "$NAME" with NAME unset) is no name: it took the folder's
+    if ns.name == "":
+        raise PytError("new: --name is empty: give the app a name, or leave --name out to name it after the folder")
+    name = presets.name_from_folder(resolved.name) if ns.name is None else ns.name
     if not config.APP_NAME.fullmatch(name):
         raise PytError(
             f"new: '{name}' is not a valid app name (it may only contain {config.NAME_RULE}). "

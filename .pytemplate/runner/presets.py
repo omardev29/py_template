@@ -785,7 +785,7 @@ def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> Ini
     """Every check `init` makes, in memory: nothing is written (the --dry-run of init prints it)."""
     from . import config, render
 
-    new_name = name or cfg.app.name
+    new_name = cfg.app.name if name is None else name  # an empty --name is refused, never the current name
     check_name_free(cfg, preset, new_name)  # the format too
     target = load(preset)
     if not force and not pristine(cfg):
@@ -1426,7 +1426,7 @@ def new(dest: Path, preset: str, name: str | None, python: Path | None = None) -
     dest = dest.resolve()
     if dest == ROOT or ROOT in dest.parents:
         raise PytError(f"new: the destination folder cannot be inside {source_name()}")
-    app_name = name or name_from_folder(dest.name)
+    app_name = name_from_folder(dest.name) if name is None else name  # an empty name is refused below
     if not APP_NAME.fullmatch(app_name):
         raise PytError(f"'{app_name}' is not a valid app name: it may only contain {NAME_RULE}.\n  Choose one with --name NAME")
     load(preset)
