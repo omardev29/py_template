@@ -1011,13 +1011,14 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
 
 # --- new -----------------------------------------------------------------------------------------
 
-# Never copied by `new`: history, builds, caches and the marker of the template repository itself
-SKIP_ANYWHERE = frozenset(
-    {".git", ".build", "dist", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".hypothesis", ".flet", "template-repo"}
-)
-# PyInstaller/Flet leftovers, Claude Code state (settings, agent worktrees), and the page and
-# license of the program this is: a project made with `new` is another program (TEMPLATE_DOCS)
-SKIP_AT_ROOT = frozenset({"build", ".claude", "README.md", "LICENSE"})
+# Never copied by `new`: history, caches and the marker of the template repository itself
+SKIP_ANYWHERE = frozenset({".git", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".hypothesis", ".flet", "template-repo"})
+# The root's own outputs (./pyt's .build/ and dist/, PyInstaller/Flet's build/: .gitignore names
+# them from the root, since src/<pkg>/build/ or docs/dist/ is source like any other, and skipped
+# at any depth a tracked docs/dist/ never reached the new project, without a word), Claude Code
+# state (settings, agent worktrees), and the page and license of the program this is: a project
+# made with `new` is another program (TEMPLATE_DOCS)
+SKIP_AT_ROOT = frozenset({".build", "dist", "build", ".claude", "README.md", "LICENSE"})
 # Where a project keeps the template repository's README (the manual of ./pyt, of the
 # version it was made from) and LICENSE (the notice the MIT license asks for, for the copied
 # runner). A project copies them on like any tracked file when it runs `new` itself.

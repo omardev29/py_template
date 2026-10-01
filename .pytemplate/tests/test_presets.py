@@ -857,6 +857,8 @@ TRACKED = {
     ".pytemplate/runner/x.py": "X = 1\n",
     "src/app/__init__.py": "",
     "sub/build/keep.txt": "kept: build/ is only skipped at the root\n",
+    "site/dist/notes.md": "kept: dist/ is only skipped at the root\n",
+    "tools/.build/keep.txt": "kept: .build/ is only skipped at the root\n",
     ".github/workflows/ci.yml": "name: ci\n",
     ".github/workflows/template-e2e.yml": "name: template\n",
     ".claude/settings.json": "{}\n",
@@ -901,6 +903,8 @@ def test_copy_template_copies_only_what_git_tracks(tmp_path: Path, monkeypatch: 
         ".pytemplate/runner/x.py": "X = 1\n",
         "src/app/__init__.py": "",
         "sub/build/keep.txt": TRACKED["sub/build/keep.txt"],
+        "site/dist/notes.md": TRACKED["site/dist/notes.md"],
+        "tools/.build/keep.txt": TRACKED["tools/.build/keep.txt"],
         ".github/workflows/ci.yml": "name: ci\n",
         "pyt": "#!/bin/sh\n",
         "modified.txt": "new\n",  # the working-tree content
@@ -1009,7 +1013,7 @@ def test_copy_template_without_tracked_files_uses_the_skip_rules(tmp_path: Path,
     monkeypatch.setattr(presets, "ROOT", src)
     presets.copy_template(tmp_path / "new")
     copied = set(_files(tmp_path / "new"))
-    assert {".env", "notes.txt", "x.spec", "htmlcov/index.html", "sub/build/keep.txt", "modified.txt"} <= copied
+    assert {".env", "notes.txt", "x.spec", "htmlcov/index.html", "sub/build/keep.txt", "site/dist/notes.md", "tools/.build/keep.txt", "modified.txt"} <= copied
     assert not {".pytemplate/template-repo", ".github/workflows/template-e2e.yml", ".claude/settings.json", "build/out.txt"} & copied
     assert not any(p.startswith((".git/", ".venv")) or "__pycache__" in p for p in copied)
     assert "git does not track" in capsys.readouterr().err
@@ -1123,6 +1127,11 @@ def test_new_names_a_repository_git_refuses_and_how_to_let_it(tmp_path: Path, mo
         (".github/workflows/ci.yml", False),
         (".github/template-x.yml", False),
         ("sub/build/x", False),
+        # only the root's own outputs are builds (.gitignore says /.build/ and /dist/): a docs/dist/
+        # or tools/.build/ of the project is source, and was left out of the copy without a word
+        ("docs/dist/notes.md", False),
+        ("tools/.build/keep.txt", False),
+        ("src/app/dist/__init__.py", False),
         ("sub/.claude/x", False),
         ("src/app/core/bench.py", False),
         ("CLAUDE.md", False),

@@ -3279,9 +3279,11 @@ Per method:
   than "not a git repository" (dubious ownership...) is a warning first, with git's own command
   to let it read the folder (`presets._git_refused`, `git_refusal_fix`: it said "not a git work
   tree" of a clone another user owns; install refuses with them, 5.9) (git runs with
-  `LC_ALL=C`). Both skip (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`,
-  `.venv*`, `template-repo` at any depth; `build/`, `.claude/`, `README.md` and `LICENSE` at
-  the root; and `.github/workflows/template-*` (template CI files MUST use that prefix; the CI
+  `LC_ALL=C`). Both skip (`presets._skipped`) `.git`, caches, `.flet`, `.venv*`,
+  `template-repo` at any depth; `.build/`, `dist/`, `build/`, `.claude/`, `README.md` and
+  `LICENSE` at the root (`SKIP_AT_ROOT`: as `.gitignore` and render, only the root's own
+  outputs are builds; a tracked `docs/dist/` or `tools/.build/` was left out of the new project
+  without a word); and `.github/workflows/template-*` (template CI files MUST use that prefix; the CI
   image's folder `template-ci-image/` has it too). A
   project made with `new` is another program, not the template (an owner decision): `new`
   (`presets._make_own`) writes its own `README.md` (`presets.project_readme`: name, preset
