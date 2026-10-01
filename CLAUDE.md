@@ -801,7 +801,7 @@ header rules (with detector tests proving each rule fires).
 | `e2e.py` | `selftest --e2e` (section 13.1). |
 | `mutation.py` | `selftest --mutation` (section 13.1): `OPERATORS`, `test_map`/`ordered`/`junit_seconds`, `changed_lines`/`parse_diff`, `select`/`skipped_spans`/`handler_classes`, `own_mutant` (ExceptionReplacer's), `made` (what is skipped), `classify`, `Driver` (tools/mutation_cr.py), `list_mutants` (the snapshot), the workers (`make_copy`, `sync_copy`, `worker_env`, `set_mtime`, `Runs`, `kill_run`/`descendants`, `run_all`), `Report`/`print_report`, `deferred_interrupts`, the base (`default_base`, `prepare_base`, `base_lock`). |
 | `hooks.py` | `./pyt hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (apply/setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify` (`runs_checks`), `hook_state`/`own_local` (a copy chained after another project's hook), `hook_script`/`launcher_of`, `install`/`uninstall` (apply removes the hook when `hooks.pre_commit = false`), `chain_hint`/`chain_advice`, `hooks_path_runner`, `checks`. |
-| `cmd_install.py` | `./pyt install` / `uninstall` and doctor's "pyt install" step (section 5.9): where things go (`data_home`, `snapshot_dir`, `bin_dir`), `MARKER`/`is_launcher`/`not_ours`/`not_an_install`, the record (`read_record`, `recorded_bin`, `source_state`, `describe`, `age`), PATH (`on_path`, `path_state`, `path_problem`, `first_pyt`, `shadowing`), Windows (`pathext_shadows`, `policy_notes`), `make_plan` (every refusal before the first write, in one message: `_refuse`), `_Swap` + `install` (all or nothing; `_new_folder`, `_terminations_interrupt`), `_remove_earlier`, `leftovers`/`remove_leftovers`, `remove_installed` (`_remove_in_place`, `_remove_last`), `cmd_uninstall`, `doctor`. |
+| `cmd_install.py` | `./pyt install` / `uninstall` and doctor's "pyt install" step (section 5.9): where things go (`data_home`, `snapshot_dir`, `bin_dir`), `MARKER`/`is_launcher`/`not_ours`/`not_an_install`, the record (`read_record`, `recorded_bin`, `source_state`, `describe`, `age`), PATH (`on_path`, `path_state`, `path_problem`, `first_pyt`, `shadowing`), Windows (`pathext_shadows`, `policy_notes`), `make_plan` (every refusal before the first write, in one message: `_refuse`), `_Swap` + `install` (all or nothing; `_new_folder`, `_terminations_interrupt`; one run at a time: `_one_run`), `_remove_earlier`, `leftovers`/`remove_leftovers`, `remove_installed` (`_remove_in_place`, `_remove_last`), `cmd_uninstall`, `doctor`. |
 | `rename.py` | `./pyt rename NEW_NAME [--force]` and the rename step of apply: pure `plan` / `apply_plan` (undoes itself when a write fails or it is interrupted: `_undo`, `_moved_to`) / `rewrite` (tokenizer + `ast` scopes + context rules, `MODULE_KEYS`), `references_left`, `check_new_name` (`locked_names`), `git_changes`, `dirty_tree_message`, `validate_config`, `tidy_before`/`tidy_after` (ruff, `Tidy`), `report`, `cmd_rename` (section 5.7). |
 | `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `locate`, `find`, `uses`, `preflight` (from `cmd_build`, before any work), `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
 
@@ -1758,6 +1758,20 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `test_install.test_a_folder_that_refuses_the_new_files_is_named_not_their_temporary_names`).
   `remove_leftovers` deletes what a killed install left (only staged files with the MARKER).
   Windows renames are retried for a few seconds (a scanner holding a new file).
+- One install or uninstall at a time (`_one_run`): a lock on `<data home>/pytemplate/.pyt-install.lock`
+  (`LOCK_FILE`; `fcntl.flock`, `msvcrt.locking` on Windows, dropped by the OS when the process
+  ends) is held around the whole swap (`install`) or removal (`cmd_uninstall`, not in a dry run),
+  and a second run is refused before it changes anything ("another pyt install or uninstall is
+  running"). Each run's `remove_leftovers` deleted the `.template-new-*` copy another run was still
+  writing: that run swapped an installed template without the files copied before in (exit 0),
+  or its undo deleted the installed template and said "nothing was changed". The lock file goes
+  as the run ends (on POSIX while still locked: `_lock` takes a lock on a deleted file again), and
+  so do the folders made for it when empty; a folder where no file can be made is no place two
+  runs of this user meet (no lock). Against a run of an older pyt, which takes no lock, the copy
+  never makes the new copy's folder again (`_copy_files`), and the undo takes the new copy's
+  folder gone for the swap only when the installed template holds this run's own record
+  (`test_install.test_a_second_install_or_uninstall_waits_for_none_and_changes_nothing`,
+  `test_an_install_whose_new_copy_another_run_deleted_changes_nothing`).
 - Once the swap has succeeded, the launchers of the earlier install in the bin folder its record
   names, when uv's tool bin folder is another one now (`UV_TOOL_BIN_DIR` changed), are removed
   (`Plan.earlier`, `_remove_earlier`: only regular files with the MARKER; the `pyt.cmd` cmd runs

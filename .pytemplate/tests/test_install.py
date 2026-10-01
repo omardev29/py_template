@@ -1114,6 +1114,88 @@ def test_a_complete_install_replaces_everything(tmp_path: Path, monkeypatch: pyt
     assert sorted(p.name for p in swap.snapshot.parent.iterdir()) == ["template"]
 
 
+NEW_COPY = {"a.txt": b"new a\n", "sub/b.txt": b"new b\n", cmd_install.RECORD: b'{\n  "schema": 1,\n  "commit": "new"\n}\n'}
+
+
+def _during_the_copy(monkeypatch: pytest.MonkeyPatch, step: Callable[[], None]) -> None:
+    """`step` runs once the first file of the new copy is written (in the first copy only: a
+    second install that `step` starts copies as usual), then the copy goes on."""
+    real = cmd_install._copy_files
+    ran: list[bool] = []
+
+    def copy(files: Any, dest: Path) -> None:
+        files = list(files)
+        real(files[:1], dest)
+        if not ran:
+            ran.append(True)
+            step()
+        real(files[1:], dest)
+
+    monkeypatch.setattr(cmd_install, "_copy_files", copy)
+
+
+@pytest.mark.parametrize("second", ["install", "uninstall"])
+def test_a_second_install_or_uninstall_waits_for_none_and_changes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second: str) -> None:
+    """Two runs at once (two terminals, a script and a hand): each deletes what an unfinished run
+    left next to the installed template, and the second deleted the copy the first was writing.
+    The first then swapped in an installed template without the files it had copied, and said
+    it was installed (or its undo deleted the installed template, saying nothing was changed).
+    One run at a time: the second is refused before it changes anything, and the first ends whole."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    monkeypatch.setattr(cmd_install, "snapshot_dir", lambda environ=None, windows=IS_WINDOWS: swap.snapshot)
+    monkeypatch.setattr(cmd_install, "bin_dir", lambda: swap.bin)
+    monkeypatch.delenv(cmd_install.LAUNCHER_FILE, raising=False)
+    refused: list[str] = []
+
+    def run_the_second() -> None:
+        with pytest.raises(PytError, match=rf"pyt {second}: another pyt install or uninstall is running \(") as e:
+            if second == "install":
+                cmd_install.install(swap.plan())
+            else:
+                cmd_install.cmd_uninstall(NO_CFG, [])
+        refused.append(str(e.value))
+
+    _during_the_copy(monkeypatch, run_the_second)
+    cmd_install.install(swap.plan())
+    assert refused and str(swap.snapshot.parent / cmd_install.LOCK_FILE) in refused[0], refused
+    assert _files(swap.snapshot) == NEW_COPY  # whole: every file of the new copy
+    assert _files(swap.bin) == {"pyt": NEW_LAUNCHER, "pyt.cmd": NEW_LAUNCHER}
+    assert sorted(p.name for p in swap.snapshot.parent.iterdir()) == ["template"]  # no lock file left
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0  # the lock went with the run that held it
+    assert not swap.snapshot.parent.exists()
+
+
+@pytest.mark.parametrize("then", ["the copy goes on", "a copy fails"])
+def test_an_install_whose_new_copy_another_run_deleted_changes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, then: str) -> None:
+    """A run of a pyt older than the lock (an installed template's own runner) deletes the new
+    copy as a leftover while install writes it: the copy made the folder again and swapped in an
+    installed template without the files written before (exit 0), or, when a copy failed, the
+    undo took the folder's absence for the swap and deleted the installed template that was
+    there, saying "nothing was changed". The copy now stops, and the old installed template stays."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+
+    def an_older_pyt() -> None:
+        cmd_install.remove_leftovers(swap.snapshot, [swap.bin])  # what such a run does first: no lock
+        if then == "a copy fails":
+            raise OSError(errno.EIO, "Input/output error", str(swap.snapshot.parent / "x"))
+
+    _during_the_copy(monkeypatch, an_older_pyt)
+    with pytest.raises(PytError, match="nothing was changed") as e:
+        cmd_install.install(swap.plan())
+    assert "could not put back" not in str(e.value)
+    assert swap.state() == swap.before  # the old installed template and launchers, whole
+
+
+def test_a_lock_file_a_killed_run_left_holds_nothing_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lock is the OS's, on the open file (dropped when the process ends, however it ends):
+    the file a killed run left blocks no later run, which deletes it as it ends."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    (swap.snapshot.parent / cmd_install.LOCK_FILE).write_bytes(b"")
+    cmd_install.install(swap.plan())
+    assert _files(swap.snapshot) == NEW_COPY
+    assert sorted(p.name for p in swap.snapshot.parent.iterdir()) == ["template"]
+
+
 @posix_only
 @pytest.mark.parametrize("fresh", [False, True], ids=["over an install", "first install"])
 def test_the_installed_template_has_the_mode_of_a_plain_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh: bool) -> None:

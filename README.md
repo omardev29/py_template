@@ -217,7 +217,9 @@ one run is named in one message.
 
 To update the installed template, run `./pyt install` again in the clone (after a `git pull`,
 say): the new copy is written next to the old one and swapped in whole, and a failure, Ctrl+C,
-SIGTERM or SIGHUP at any step puts the old copy and the old launchers back. When uv's tool bin
+SIGTERM or SIGHUP at any step puts the old copy and the old launchers back. One `install` or
+`uninstall` runs at a time: a second one, started while the first runs, is refused before it
+changes anything. When uv's tool bin
 folder has changed since the last install (`UV_TOOL_BIN_DIR`), the launchers that install wrote
 into the old one (those with the `pytemplate-launcher` line only) are removed once the new ones
 are in place. `./pyt doctor` says whether pyt is installed, whether the installed template is
