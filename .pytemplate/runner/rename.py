@@ -1793,8 +1793,9 @@ def apply_plan(root: Path, plan_: Plan) -> None:
     their old bytes back and the folder moves back. The error says what could not be undone. A
     Ctrl+C, SIGTERM or SIGHUP is undone the same way, then goes on (SIGTERM and SIGHUP are
     exceptions only while it writes, as for `pyt install`: their default action ended the runner
-    at once): it left the tree half-renamed with only `error: interrupted`. Another Ctrl+C waits
-    for the undo (_undo_shield): it cut the undo short, and nothing said so."""
+    at once): it left the tree half-renamed with only `error: interrupted`. Another Ctrl+C,
+    SIGTERM or SIGHUP waits for the undo (_undo_shield): it cut the undo short, and nothing said
+    so."""
     from .cmd_install import _terminations_interrupt, _undo_shield  # the swap of `pyt install` uses the same
 
     # (path, new bytes, the text or bytes the plan read there): a file that no longer holds what was

@@ -1382,9 +1382,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   for `pyt install`: in-process work, whose default action ended the runner at once; it left a
   half-renamed tree with only `error: interrupted`; one that came as the folder moved is read
   back from the listing of src/, `_moved_to`, the temporary name of a case-only move included:
-  `test_rename.test_an_interrupted_rename_is_undone`; another Ctrl+C waits for the undo,
-  `cmd_install._undo_shield`, as for `pyt install`: it cut the undo short without a word,
-  `test_rename.test_a_second_ctrl_c_waits_for_the_undo`); a file that no longer holds what the
+  `test_rename.test_an_interrupted_rename_is_undone`; another Ctrl+C, and a SIGTERM or SIGHUP,
+  waits for the undo, `cmd_install._undo_shield`, as for `pyt install`: they cut the undo short
+  without a word, `test_rename.test_a_second_ctrl_c_waits_for_the_undo`,
+  `test_a_termination_signal_waits_for_the_undo`); a file that no longer holds what the
   plan read there, an edit saved after the plan (an editor's autosave while the ruff check ran),
   stops it the same way, the edit kept (`_as_planned`, `_ChangedSincePlan`: it was overwritten,
   `test_rename.test_a_file_edited_after_the_plan_is_never_overwritten`), but another name of a
@@ -1771,8 +1772,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   ones until the undo is done; their default action left a whole `.template-new-*` copy) undoes
   every step (`_Swap.undo`: the launchers' old bytes, the old copy back, the staged and new files
   deleted; a rename cut short is read back from the folders); what it could not undo is named.
-  A Ctrl+C during the undo waits for it (`_undo_shield`: SIGINT ignored while it runs; it cut the
-  undo short, `test_install.test_a_second_ctrl_c_waits_for_the_undo_of_the_swap`).
+  A Ctrl+C, SIGTERM or SIGHUP during the undo waits for it (`_undo_shield`: ignored while it runs,
+  then given their handlers back; they cut the undo short, the undo of a failed step or a Ctrl+C
+  too, `test_install.test_a_second_ctrl_c_waits_for_the_undo_of_the_swap`,
+  `test_a_termination_signal_waits_for_the_undo_of_the_swap`).
   A launcher that cannot be replaced (another user's, chattr +i) is named, not its staged file,
   and was never changed: its entry goes before the undo (os.replace is all or nothing), which
   also skips a launcher that holds its old bytes and deletes the staged file of a put-back that

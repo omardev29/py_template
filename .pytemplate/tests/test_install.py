@@ -1106,6 +1106,44 @@ def test_a_second_ctrl_c_waits_for_the_undo_of_the_swap(tmp_path: Path, monkeypa
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler  # given back once the undo is done
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM and SIGHUP are POSIX signals")
+@pytest.mark.parametrize("second", ["sigterm", "sighup"])
+@pytest.mark.parametrize("first", ["ctrl+c", "a rename that fails"])
+@pytest.mark.usefixtures("default_signals")
+def test_a_termination_signal_waits_for_the_undo_of_the_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], first: str, second: str
+) -> None:
+    """A SIGTERM or SIGHUP during the undo of a Ctrl+C or a failed step (a closed terminal,
+    timeout, docker stop) raised proc.Interrupted inside the undo: the old copy stayed aside, and
+    "nothing was changed" never came. The undo goes on to its end first, and the signals get
+    their handlers back."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    real = cmd_install._rename
+    calls: list[int] = []
+    stop = signal.SIGTERM if second == "sigterm" else signal.SIGHUP
+
+    def rename(src: Path, dst: Path) -> None:
+        calls.append(1)
+        if len(calls) == 2:  # the new copy moves in: it fails, or a Ctrl+C
+            if first == "ctrl+c":
+                raise KeyboardInterrupt
+            raise OSError(errno.EACCES, "Permission denied", str(dst))
+        if len(calls) == 3:  # the undo moves the old copy back: a signal comes
+            signal.raise_signal(stop)
+        real(src, dst)
+
+    monkeypatch.setattr(cmd_install, "_rename", rename)
+    with pytest.raises((KeyboardInterrupt, PytError)) as e:  # proc.Interrupted escaped the undo
+        cmd_install.install(swap.plan())
+    assert isinstance(e.value, KeyboardInterrupt if first == "ctrl+c" else PytError), repr(e.value)
+    assert len(calls) == 3 and swap.state() == swap.before
+    told = capsys.readouterr().err if first == "ctrl+c" else str(e.value)
+    assert "nothing was changed" in told, told
+    for signum in (signal.SIGTERM, signal.SIGHUP):  # given back once the undo is done
+        assert signal.getsignal(signum) is signal.SIG_DFL
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
 def test_a_complete_install_replaces_everything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     swap = Swap(tmp_path, monkeypatch, fresh=False)
     cmd_install.install(swap.plan())

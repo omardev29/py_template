@@ -42,6 +42,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import envs, presets, proc, project, shells, ui
 from .cmd_dev import only_flags
@@ -980,8 +981,9 @@ def _terminations_interrupt() -> Iterator[None]:
     its undo runs, and cli.main ends the command as it ends every interrupted one (`error:
     terminated (SIGTERM)`, 128 + N). Their default action killed the runner at once and left a
     whole `.template-new-*` copy next to the installed template. The first one also ignores the
-    next ones, so the undo is never cut short. Only in the main thread, and only while the
-    signal has its default handler (under nohup it stays ignored), as proc.run does."""
+    next ones, so the undo is never cut short (and _undo_shield ignores them during any undo).
+    Only in the main thread, and only while the signal has its default handler (under nohup it
+    stays ignored), as proc.run does."""
     installed: list[int] = []
     if sys.platform != "win32" and threading.current_thread() is threading.main_thread():
         watched = (signal.SIGTERM, signal.SIGHUP)
@@ -1004,18 +1006,28 @@ def _terminations_interrupt() -> Iterator[None]:
 
 @contextlib.contextmanager
 def _undo_shield() -> Iterator[None]:
-    """While an undo runs (the swap's, a rename's), a Ctrl+C waits for it: SIGINT is ignored, as
-    _terminations_interrupt ignores the SIGTERM and SIGHUP after the first. A second Ctrl+C cut
-    the undo short: the tree stayed half-done, and the line that says what was put back never
-    came. Only in the main thread, and only while SIGINT has Python's own handler."""
-    shield = threading.current_thread() is threading.main_thread() and signal.getsignal(signal.SIGINT) is signal.default_int_handler
-    if shield:
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    """While an undo runs (the swap's, a rename's), a Ctrl+C, SIGTERM or SIGHUP waits for it: they
+    are ignored, then get their handlers back. A second Ctrl+C cut the undo short, and so did a
+    SIGTERM or SIGHUP (a closed terminal, timeout, docker stop) during the undo of a failed write,
+    a changed file or a Ctrl+C, where _terminations_interrupt had not ignored them yet (it ignores
+    those after a first one of them): the tree stayed half-done, and the line that says what was
+    put back never came. Only in the main thread; SIGINT only while it has Python's own handler."""
+    shielded: list[tuple[int, Any]] = []  # (signal, its handler before the undo)
+    if threading.current_thread() is threading.main_thread():
+        if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+            shielded.append((signal.SIGINT, signal.default_int_handler))
+        if sys.platform != "win32":
+            for termination in (signal.SIGTERM, signal.SIGHUP):
+                previous = signal.getsignal(termination)
+                if previous is not None:  # None: not set from Python, and it could not be given back
+                    shielded.append((termination, previous))
+        for signum, _ in shielded:
+            signal.signal(signum, signal.SIG_IGN)
     try:
         yield
     finally:
-        if shield:
-            signal.signal(signal.SIGINT, signal.default_int_handler)
+        for signum, handler in shielded:
+            signal.signal(signum, handler)
 
 
 def install(plan: Plan) -> None:

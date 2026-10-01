@@ -2284,6 +2284,54 @@ def test_a_second_ctrl_c_waits_for_the_undo(tmp_path: Path, monkeypatch: pytest.
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler  # given back once the undo is done
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM and SIGHUP are POSIX signals")
+@pytest.mark.parametrize("second", ["sigterm", "sighup"])
+@pytest.mark.parametrize("first", ["ctrl+c", "a write that fails", "a file edited meanwhile"])
+@pytest.mark.usefixtures("default_signals")
+def test_a_termination_signal_waits_for_the_undo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], first: str, second: str
+) -> None:
+    """A SIGTERM or SIGHUP (a closed terminal, timeout, docker stop) during the undo of a failed
+    write, a file edited meanwhile or a Ctrl+C raised proc.Interrupted inside the undo
+    (_terminations_interrupt ignores only those after a first one of them): files kept their new
+    bytes, src/beta/ stayed moved, and neither the error nor the line that says what was undone
+    came. The undo goes on to its end first, and the signals get their handlers back."""
+    import signal
+
+    _write_project(tmp_path, "flet", "alpha")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    if first == "a file edited meanwhile":  # the last file the rename writes
+        edited = tmp_path / "pyproject.toml"
+        edited.write_bytes(edited.read_bytes() + b"\n# saved by an editor meanwhile\n")
+    before = _everything(tmp_path)
+    real = rename._replace_bytes
+    calls: list[Path] = []
+    undoing: list[Path] = []
+    stop = signal.SIGTERM if second == "sigterm" else signal.SIGHUP
+
+    def replace(path: Path, data: bytes) -> None:
+        calls.append(path)
+        if len(calls) == 3 and first != "a file edited meanwhile":  # the third write
+            if first == "ctrl+c":
+                raise KeyboardInterrupt
+            raise OSError(errno.ENOSPC, "No space left on device", str(path))
+        if path in calls[:-1]:  # a file written before: the undo puts it back, and a signal comes
+            undoing.append(path)
+            signal.raise_signal(stop)
+        real(path, data)
+
+    monkeypatch.setattr(rename, "_replace_bytes", replace)
+    with pytest.raises((KeyboardInterrupt, PytError)) as e:  # proc.Interrupted escaped the undo
+        rename.apply_plan(tmp_path, planned)
+    assert isinstance(e.value, KeyboardInterrupt if first == "ctrl+c" else PytError), repr(e.value)
+    assert undoing and _everything(tmp_path) == before  # every write undone, the folder moved back
+    told = capsys.readouterr().err if first == "ctrl+c" else str(e.value)
+    assert "The rename was undone" in told, told
+    for signum in (signal.SIGTERM, signal.SIGHUP):  # given back once the undo is done
+        assert signal.getsignal(signum) is signal.SIG_DFL
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
 @pytest.mark.parametrize("changed", ["tests/test_core.py", "pytemplate.toml", "pyproject.toml"])
 def test_a_file_edited_after_the_plan_is_never_overwritten(tmp_path: Path, changed: str) -> None:
     """rename and apply plan every file, report, run the ruff check (uv run, a sync maybe), then
