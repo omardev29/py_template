@@ -3767,7 +3767,14 @@ LazyVim wiring:
 - overseer: the pytemplate provider (one template per command in `editor.json`, `report` and
   `compile` only with mypyc, plus every `[tasks]` entry) replaces the `.vscode/tasks.json` one
   (`disable_template_modules = {"overseer.template.vscode"}`), otherwise labels would be
-  duplicated and tasks would go through `pyt.cmd`. overseer runs `"type": "shell"` tasks
+  duplicated and tasks would go through `pyt.cmd`. It serves the plugin's root (the folder of the
+  trusted `.lazy.lua`) whatever overseer's search says: overseer builds the search from the current
+  buffer's folder, and with a file outside the project current (a stdlib module reached by
+  go-to-definition or by stepping into it) `:OverseerRun` listed no pyt template and overseer's dap
+  listener never found a launch configuration's preLaunchTask (`pyt: compile`): it logged that
+  and never resumed nvim-dap, so F5 did nothing
+  (`test_overseer_finds_the_projects_tasks_from_a_buffer_outside_it`, the pinned overseer.nvim and
+  nvim-dap). overseer runs `"type": "shell"` tasks
   through `'shell'`: another reason to keep VS Code tasks `process`. Commands that can change
   the mode or `editor.json` (`mode`, `setup`, `apply` (the same `tasks.META` entry as
   `setup`), `sync`, `lock`, `add`, `remove`, `render`, `rename`) get the `pytemplate.refresh`

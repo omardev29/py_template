@@ -330,6 +330,16 @@ check("parse ruff", m and m.type == "W" and m.col == 8, vim.inspect(m))
 check("parse note", p("src/x.py:5: note: see") == nil, "note not ignored")
 local tmpl = require("overseer.template.pytemplate")
 check("overseer provider", type(tmpl.generator) == "function", vim.inspect(tmpl))
+-- the templates of the plugin's root whatever overseer's search (the current buffer's folder): a
+-- buffer outside the project left no pyt template, and the preLaunchTask `pyt: compile` unfound
+local saved_constants = package.loaded["overseer.constants"]
+package.loaded["overseer.constants"] = saved_constants or { TAG = { RUN = "RUN", TEST = "TEST", BUILD = "BUILD", CLEAN = "CLEAN" } }
+for _, dir in ipairs({ root, root .. "/src", vim.fs.dirname(root), vim.fn.tempname() }) do
+  local okg, got = pcall(tmpl.generator, { dir = dir })
+  local names = okg and type(got) == "table" and vim.tbl_map(function(t) return t.name end, got) or got
+  check("overseer templates from " .. dir, type(names) == "table" and vim.tbl_contains(names, "pyt: help"), vim.inspect(names))
+end
+package.loaded["overseer.constants"] = saved_constants
 
 -- a relative path with no file under src/ stays root-relative; the stage->src mapping needs a
 -- real src/<pkg>/core, so it is checked hermetically in test_parser_maps_mypyc_stage_paths_to_src
@@ -1413,6 +1423,70 @@ def test_the_windows_mypy_linter_runs_through_the_real_nvim_lint(tmp_path: Path)
         assert spawn["cmd"] == "cmd.exe" and args[:2] == ["/C", "mypy"] and args[-1] == "src\\app.py", spawn
         assert "--show-column-numbers" in args and Path(spawn["cwd"]) == project, spawn
     assert not [n for n in got["notes"] if "unpack" in n], got["notes"]
+
+
+# The pinned overseer.nvim's own template search and dap listener (not a stand-in): it builds the
+# search from the current buffer (overseer.commands' get_search_params), here a file outside the
+# project. run_task must find `pyt: help`, and the listener must run a launch configuration's
+# preLaunchTask and resume nvim-dap (it logged "Could not find template" and never resumed: F5 on
+# the mypyc configuration, preLaunchTask `pyt: compile`, did nothing and said nothing).
+OVERSEER_OUTSIDE_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+vim.opt.rtp:prepend(vim.env.PT_OVERSEER)
+vim.opt.rtp:prepend(vim.env.PT_NVIM_DAP)
+local pt = require("pytemplate")
+pt.setup({ root = vim.env.PT_TEST_ROOT })
+local overseer = require("overseer")
+overseer.setup({})
+local got = {}
+vim.cmd.edit(vim.fn.fnameescape(vim.env.PT_TMP .. "/outside/notes.txt"))
+got.buffer = vim.api.nvim_buf_get_name(0)
+local done = false
+overseer.run_task({ name = "pyt: help", autostart = false }, function(task, err)
+  got.run_task = task and task.name or ("error: " .. tostring(err))
+  done = true
+end)
+vim.wait(20000, function()
+  return done
+end)
+local co = coroutine.create(function()
+  local cfg = require("overseer.dap").listener({ type = "python", request = "launch", name = "app", preLaunchTask = "pyt: help" })
+  got.resumed = cfg and cfg.name or "no config"
+end)
+local okc, errc = coroutine.resume(co)
+got.listener_error = not okc and tostring(errc) or nil
+vim.wait(60000, function() -- `./pyt help` takes about a second; the run stays under _headless_lua's limit
+  return got.resumed ~= nil
+end)
+io.stdout:write("PTOVERSEER" .. vim.json.encode(got) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_overseer_finds_the_projects_tasks_from_a_buffer_outside_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pinned overseer.nvim searches templates from the current buffer's folder: with a file
+    outside the project current (a stdlib module reached by go-to-definition or by stepping into
+    it), the provider offered no pyt template, :OverseerRun and <leader>jj listed none, and the
+    preLaunchTask of the mypyc launch configuration was never found, so F5 started nothing and
+    said nothing (A9-01). The provider serves the plugin's root whatever the buffer. Skipped
+    without checkouts of the pinned overseer.nvim and nvim-dap (./pyt selftest --nvim makes them)."""
+    plugins = _pinned_plugins("overseer.nvim", "nvim-dap")
+    if plugins is None:
+        pytest.skip("no checkout of the pinned overseer.nvim and nvim-dap (./pyt selftest --nvim installs them)")
+    if not (os.environ.get("UV") or shutil.which("uv")):
+        pytest.skip("uv not found")
+    for name in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "PYTEMPLATE_GLOBAL"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "notes.txt").write_text("not the project's\n", encoding="utf-8")
+    extra = {"PT_OVERSEER": plugins["overseer.nvim"].as_posix(), "PT_NVIM_DAP": plugins["nvim-dap"].as_posix()}
+    r = _headless_lua(tmp_path, OVERSEER_OUTSIDE_CHECK, ROOT, extra)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTOVERSEER")), None)
+    assert line is not None, r.stdout + r.stderr
+    got = json.loads(line[len("PTOVERSEER") :])
+    assert Path(got["buffer"]) == tmp_path / "outside" / "notes.txt", got
+    assert got["run_task"] == "pyt help", got
+    assert got.get("listener_error") is None and got.get("resumed") == "app", got
 
 
 BOM_CHECK = r"""

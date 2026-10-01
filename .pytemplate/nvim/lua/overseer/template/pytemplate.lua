@@ -14,11 +14,16 @@ local ARGS = {
 local RANK = { Development = 1, Distribution = 3, Environment = 4, Mode = 5 }
 local TASKS_RANK = 2
 
----@param search overseer.SearchParams
-local function generator(search)
+-- The templates of the plugin's one root (the folder of the trusted .lazy.lua), whatever the
+-- search: overseer builds it from the current buffer (its folder, else Neovim's cwd), and a buffer
+-- outside the project (a stdlib module reached by go-to-definition or by stepping into it) left
+-- :OverseerRun without a pyt template and a launch configuration's preLaunchTask ("pyt: compile")
+-- unfound, so F5 did nothing. The tasks run in the root whatever the buffer (tasks.definition),
+-- as the <leader>j keymaps and :Pyt do; the search never names another root.
+local function generator()
   local pt = require("pytemplate")
   local root = pt.root()
-  if not root or not pt.in_root(search.dir) then
+  if not root then
     return "not in a pytemplate project"
   end
   local tasks = require("pytemplate.tasks")
