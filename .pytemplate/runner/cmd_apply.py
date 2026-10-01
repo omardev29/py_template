@@ -454,22 +454,39 @@ def _block_options(preset: str, project: Project) -> dict[str, str]:
     return found
 
 
+def _traceless() -> list[str]:
+    """The presets that leave no trace in pyproject.toml: no option-driven requirement and no
+    extra table (script)."""
+    return [p for p in presets.available() if not (_option_names(p, presets.default_options(p)) or _marks(p))]
+
+
 def _traced(cfg: Config, project: Project) -> list[str]:
     """The presets whose traces pyproject.toml holds: an option-driven requirement (by name: any
     version; with the default options, app.preset's current ones, and those the managed block was
-    last written with) or an extra table. The managed [tool.uv] keys themselves are no trace:
+    last written with) or an extra table. The managed [tool.uv] keys alone are no trace:
     render.managed_block writes them from app.preset, so `./pyt lock` after a hand edit of
-    app.preset writes the NEW preset's keys."""
+    app.preset writes the NEW preset's keys.
+
+    While app.preset leaves no trace itself (script), another preset's requirements alone are no
+    trace either: a script project may depend on raylib or flet (`./pyt add raylib`, README), and
+    once the record was lost apply refused it as a hand switch, doctor and the hook reported it on
+    every commit, and putting the named preset back switched the project in place. Then only what
+    the user does not write counts: the preset's extra tables (flet's [tool.flet]), or its
+    requirements with the managed block written for it (its keys there: `./pyt new`, the last
+    lock or apply ran with that preset)."""
     declared = set(project.deps) | set(project.dev)
+    added_by_hand = cfg.app.preset in _traceless()  # what another preset's requirements may be
 
     def present(preset: str) -> bool:
+        if any(_has_table(project.data, t) for t in _marks(preset)):
+            return True
         names = _option_names(preset, presets.default_options(preset))
         if preset == cfg.app.preset:
             names |= _option_names(preset, presets.options(cfg))
         block = _block_options(preset, project)
         if block:
             names |= _option_names(preset, {**presets.default_options(preset), **block})
-        return bool(names & declared or any(_has_table(project.data, t) for t in _marks(preset)))
+        return bool(names & declared) and (bool(block) or not added_by_hand)
 
     return [p for p in presets.available() if present(p)]
 
@@ -480,10 +497,10 @@ def _infer_preset(cfg: Config, project: Project, record: dict[str, Any] | None) 
     The trusted record decides: the last apply, rename or `./pyt new` wrote it, so an app.preset
     that differs from it was changed by hand, whatever pyproject.toml holds (a script project may
     depend on raylib or flet). Without one (it was lost: a state.json merge conflict whose sides
-    disagree on it, a deleted file), pyproject.toml's traces (_traced): app.preset when it shows
-    them, else a preset that does (a hand switch), else, with no trace of any preset, app.preset
-    when it leaves none (script), else the preset that leaves none (a guess: its dependencies may
-    also have been replaced by hand)."""
+    disagree on it, a deleted file), pyproject.toml's traces (_traced: for a script project, a
+    dependency it added is none): app.preset when it shows them, else a preset that does (a hand
+    switch), else, with no trace of any preset, app.preset when it leaves none (script), else the
+    preset that leaves none (a guess: its dependencies may also have been replaced by hand)."""
     available = presets.available()
     if record is not None and record["preset"] in available:
         return str(record["preset"]), False
@@ -492,7 +509,7 @@ def _infer_preset(cfg: Config, project: Project, record: dict[str, Any] | None) 
         return cfg.app.preset, False
     if traced:
         return traced[0], False
-    traceless = [p for p in available if not (_option_names(p, presets.default_options(p)) or _marks(p))]
+    traceless = _traceless()
     if cfg.app.preset in traceless or len(traceless) != 1:
         return cfg.app.preset, False
     return traceless[0], True

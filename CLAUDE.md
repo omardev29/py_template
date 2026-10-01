@@ -1782,9 +1782,16 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   reads raylib's `no-build-package` back through `_unformat`, from between the markers only,
   `Project.block` (`render.managed_values`): a script project's own `no-build-package = ["six"]`
   outside them read as raylib's `["{package}"]`, a hand switch apply refused), its extra tables (flet's
-  `[tool.flet]`). The managed `[tool.uv]` KEYS are never a trace: `render.managed_block` writes
-  them from app.preset, so `./pyt lock`, `mode` or `rename` after a hand edit wrote the new
-  preset's keys and apply then accepted the switch. app.preset when it shows traces, else a
+  `[tool.flet]`). The managed `[tool.uv]` KEYS alone are never a trace: `render.managed_block`
+  writes them from app.preset, so `./pyt lock`, `mode` or `rename` after a hand edit wrote the
+  new preset's keys and apply then accepted the switch. While app.preset is a preset without
+  traces (script, `_traceless`), another preset's requirements alone are no trace either (README:
+  a dependency the user added is no preset switch): only its extra tables, or its requirements
+  with the managed block written for it, count (a script project with `./pyt add raylib` lost its
+  record, apply and setup refused app.preset = "script" as changed by hand, doctor and the hook
+  reported it on every commit, and putting app.preset = "raylib" back switched the project in
+  place: `test_apply.test_a_script_project_that_depends_on_raylib_or_flet_stays_one_without_a_record`).
+  app.preset when it shows traces, else a
   preset that does (a hand switch), else, with no trace of any preset, the preset without traces
   (script): a guess (`Applied.guessed`), and the refusal and doctor say so and how to keep
   app.preset (restore its requirements with `./pyt add`, or set `[preset.<name>]` to what
@@ -7081,7 +7088,11 @@ Behaviour:
   raylib project whose raylib requirement was replaced by hand (`./pyt remove/add`, not
   `[preset.raylib]`) shows no trace of its preset, so apply refuses app.preset = "raylib" as a
   guess that says so and names the way out (`./pyt add raylib==...`, or `[preset.raylib]
-  package`). Fix idea: keep one side's record when render rewrites a conflicted state.json.
+  package`). And a raylib project whose app.preset was set to "script" by hand, then locked
+  (`./pyt lock`, `mode` or `rename` wrote the script preset's managed block), reads as a script
+  project that depends on raylib: apply accepts the switch (a script project's own raylib is no
+  trace of the raylib preset, 5.8). Fix idea: keep one side's record when render rewrites a
+  conflicted state.json.
 - A hand-edited `app.name` is rendered into `editor.json` and `ci.yml` by the next command's
   `render.auto` before `apply` renames the package (harmless: apply's dirty-tree check ignores
   generated files, and a run in between still uses src/<old_pkg>/).

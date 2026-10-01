@@ -461,9 +461,14 @@ def _declared(deps: list[str], dev: list[str] | None = None) -> cmd_apply.Projec
         ("raylib", {}, ["raylib==6.0.1.0"], ["types-cffi>=1"], None, "raylib"),
         # hand switch: the project still declares the old preset's dependencies
         ("flet", {}, ["rich>=15.0.0"], [], None, "script"),
-        ("script", {}, FLET_DEPS, FLET_DEV, None, "flet"),
         ("raylib", {}, FLET_DEPS, FLET_DEV, None, "flet"),
         ("flet", {}, ["raylib==6.0.1.0"], [], None, "raylib"),
+        # ...but a script project may depend on raylib or flet: without a record their
+        # requirements alone are no trace (flet's [tool.flet] or raylib's managed block is:
+        # test_applied_preset_reads_every_trace)
+        ("script", {}, FLET_DEPS, FLET_DEV, None, "script"),
+        ("script", {}, ["rich>=15.0.0", "flet>=1.0.1"], [], None, "script"),
+        ("script", {}, ["rich>=15.0.0", "raylib>=6.0.1.0"], [], None, "script"),
         ("flet", {}, ["rich>=15.0.0"], [], {"preset": "script"}, "script"),
         # an option change is not a preset change
         ("raylib", {"package": "raylib_sdl"}, ["raylib==6.0.1.0"], [], None, "raylib"),
@@ -507,6 +512,12 @@ OWN_NO_BUILD_SIX = {"tool": {"uv": {"no-build-package": ["six"]}}}  # a project'
         ("script", {}, ["rich>=15.0.0"], {"tool": {"flet": {"org": "com.example"}}}, {}, "flet"),
         ("flet", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
         ("script", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
+        ("script", {}, ["raylib==6.0.1.0"], NO_BUILD_RAYLIB, NO_BUILD_RAYLIB, "raylib"),
+        ("script", {}, FLET_DEPS, {"tool": {"flet": {"org": "com.example"}}}, {}, "flet"),
+        # a script project that added raylib (`./pyt add raylib`): its managed block is the script
+        # preset's, so the requirement is the user's own, no preset switch (README)
+        ("script", {}, ["rich>=15.0.0", "raylib>=6.0.1.0"], {"tool": {"uv": {}}}, {"tool": {"uv": {}}}, "script"),
+        ("script", {}, ["raylib==6.0.1.0"], OWN_NO_BUILD_SIX, {}, "script"),
         # the managed block follows app.preset (`./pyt lock` after a hand switch writes the
         # new preset's keys): never a trace of it; putting app.preset back is accepted
         ("raylib", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, NO_BUILD_RAYLIB, "script"),
@@ -614,6 +625,30 @@ def test_a_script_project_may_depend_on_raylib(tmp_path: Path, monkeypatch: pyte
     assert "raylib==6.0.1.0" in project.pyproject()["project"]["dependencies"]  # never removed
     assert cmd_apply.pending(project.cfg()) == []
     assert cmd_apply.load_record() == cmd_apply.record_of(project.cfg())
+
+
+@pytest.mark.parametrize("added", [["raylib>=6.0.1.0"], ["flet>=1.0.1"], FLET_DEPS], ids=["raylib", "flet", "flet pinned"])
+def test_a_script_project_that_depends_on_raylib_or_flet_stays_one_without_a_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, added: list[str]) -> None:
+    """README: a dependency you add yourself (`./pyt add raylib` in a script project) is not a
+    preset switch. That held only while state.json kept the record: lost (a state.json merge
+    conflict whose sides disagree on it, a deleted file), the declared raylib (or flet) was read
+    as the trace of a raylib project: apply and setup refused app.preset = "script" as changed
+    by hand, doctor and the pre-commit hook reported it on every commit, and putting app.preset =
+    "raylib" back, as they said, switched the project to the raylib preset in place."""
+    project, uv = _project(tmp_path, monkeypatch, "script")
+    assert _run(project) == 0  # the record: script
+    uv(envs.tool_env(project.cfg()), ["add", "--frozen", *added])
+    uv(envs.tool_env(project.cfg()), ["lock"])
+    state = project.root / ".pytemplate" / "state.json"
+    data = json.loads(state.read_text(encoding="utf-8"))
+    del data["applied"]
+    state.write_text(json.dumps(data), encoding="utf-8")
+    assert cmd_apply.load_record() is None
+    assert cmd_apply.pending(project.cfg(), hook=False) == []
+    for command in ("apply", "setup"):
+        assert _run(project, command=command) == 0
+    assert set(added) <= set(project.pyproject()["project"]["dependencies"])  # never removed
+    assert cmd_apply.load_record() == cmd_apply.record_of(project.cfg())  # script, recorded again
 
 
 def _as_new(project: Project) -> None:
