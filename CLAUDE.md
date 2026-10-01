@@ -2691,8 +2691,8 @@ Formats:
     (`lintc._block_classes`: mypyc compiles only the classes of the module's own statements, and
     a version check, a `try:` fallback or an `if TYPE_CHECKING:` Protocol stopped every mypyc
     build with "Nested class definitions not supported" while `check` passed; not in a branch
-    mypy reads as unreachable, the else of `if TYPE_CHECKING:` and the body of `if not
-    TYPE_CHECKING:`, which mypyc skips;
+    mypy reads as unreachable, which mypyc compiles as a raise and never as a class: the else of
+    `if TYPE_CHECKING:` and the body of `if not TYPE_CHECKING:` are the next rule's;
     `test_mypyc_core.test_lintc_flags_every_class_the_locked_mypyc_rejects_as_nested` compares
     the lines with the locked mypyc's); t-strings; `if __name__ == "__main__"` (either order) at
     module level. Every rule skips what mypy reads as unreachable on the Python mypyc compiles
@@ -2704,6 +2704,20 @@ Formats:
     module (`test_lintc_skips_the_classes_mypy_reads_as_unreachable_on_python_cpython`,
     `test_lintc_reads_a_test_as_mypy_does`; CLASSES_IN_BLOCKS holds each case for the real
     mypyc).
+  - What runs but mypy never reads (`lintc._mypy_skips_what_runs`, an error in any scope): a
+    block mypy reads as unreachable, the else of `if TYPE_CHECKING:` (or `if MYPY:`), the body of
+    `if not TYPE_CHECKING:`, any test mypy and the runtime read apart (`_static_value` with
+    `checking` True and False), which mypyc compiles as `raise RuntimeError("Reached allegedly
+    unreachable code!")` (`UNREACHABLE_BUT_RUN`), and an operand of `and`/`or` after one mypy
+    reads as deciding it (`TYPE_CHECKING or FLAG`, `not TYPE_CHECKING and x`: mypy's semantic
+    analysis never reads it, `right_unreachable`), which mypyc compiles unread: a NameError, or
+    RuntimeError "should be unreachable" (`_never_read_operands`, `NEVER_READ_BUT_RUN`); never
+    what never runs (a sys.version_info test decides the same at runtime), nor a compound
+    statement in a class body, which mypyc refuses itself. The runtime fallback `if
+    TYPE_CHECKING: from x import Y` / `else: Y = object` passed check, the hook and the build's
+    checks, and the compiled app failed at import (15.1;
+    `test_mypyc_core.test_real_compile_fails_exactly_where_lintc_says_mypy_skips_what_runs` pins
+    each line against the locked mypyc).
   - Module-level `__file__` ONLY when `compile.modules` is one top-level module file, the one
     Python imports (`relative_file_at_import` reads `config.compiled_paths`: a leftover folder
     of that name without `__init__.py` does not turn the rule off): mypyc (>= 1.20.2) sets the
@@ -5588,6 +5602,17 @@ mypy and mypyc:
   `test_mypyc_core.py::test_real_compile_single_top_level_module_sees_a_relative_file` (a pin:
   it fails once mypyc fixes it),
   `test_lintc_flags_module_level_file_for_a_single_top_level_module`. Goes: when that pin fails.
+- **mypyc compiles what mypy never reads to fail, also when it runs** (DEFECT, mypyc 2.3.1): a
+  block mypy reads as unreachable is compiled as `raise RuntimeError("Reached allegedly
+  unreachable code!")`, the else of `if TYPE_CHECKING:` and the body of `if not TYPE_CHECKING:`
+  included, which run; an `and`/`or` operand mypy never reads (`TYPE_CHECKING or FLAG`) is
+  compiled unread, a NameError in a test. The runtime fallback `else: Y = object` passed check
+  and the build, and the compiled module failed at import. Up: mypyc/mypyc#1159 (open, the
+  block), cf. mypyc/mypyc#761 (closed: the value of such an operand raises RuntimeError; in a
+  test, none found). Fix: the `lintc` rule (`lintc._mypy_skips_what_runs`, 9). Test:
+  `test_mypyc_core.py::test_real_compile_fails_exactly_where_lintc_says_mypy_skips_what_runs`
+  (a pin: it fails once mypyc compiles those lines), `test_lintc_flags_what_runs_but_mypy_never_reads`.
+  Goes: when that pin fails.
 - **What mypyc compiles badly or not at all** (LIMITATION): a class decorator outside its native
   list, a metaclass other than ABCMeta (every Enum), a NamedTuple or a TypedDict make a slow
   Python class; nested classes, classes in functions, t-strings and a module-level `if __name__

@@ -739,6 +739,13 @@ again.
   supported, and a module-level `__file__` when `compile.modules` is a single top-level module
   (there it is a relative path). Compiled code that imports `librt` needs it as an app dependency:
   `./pyt add librt --cpython-only` (mypy installs it only in the dev group).
+- **`TYPE_CHECKING` only in `if TYPE_CHECKING:` with no else**: mypy reads it as always true, and
+  mypyc compiles what mypy never reads to fail when it runs (mypyc issue 1159): the runtime
+  fallback `if TYPE_CHECKING: from x import Y` / `else: Y = object`, the body of
+  `if not TYPE_CHECKING:`, and the `FLAG` of `if TYPE_CHECKING or FLAG:` raise `RuntimeError`
+  ("Reached allegedly unreachable code!") or `NameError` in the compiled module. `./pyt check`
+  flags them; keep such fallbacks in a boundary module, or import the name under
+  `if TYPE_CHECKING:` alone and quote the annotations that use it.
 - **Executables**: PyInstaller and Nuitka cannot see the imports inside a compiled module:
   `./pyt` passes them on (`from X import submodule` included). If one is still missing at
   runtime, list it in `[deploy.exe] hidden_imports` (PyInstaller) or add `--include-module=NAME`

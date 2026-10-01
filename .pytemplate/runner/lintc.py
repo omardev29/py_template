@@ -2,8 +2,10 @@
 
 They catch what mypy accepts but mypyc compiles badly or not at all: classes that silently
 become slow Python classes, imports that do not belong in compiled code
-(compile.forbid_imports, librt), nested classes, t-strings, `if __name__ == "__main__"`, and a
-module-level `__file__` where mypyc runs the module body with a relative one.
+(compile.forbid_imports, librt), nested classes, t-strings, `if __name__ == "__main__"`, a
+module-level `__file__` where mypyc runs the module body with a relative one, and what runs but
+mypy never reads (the else of `if TYPE_CHECKING:`, the `x` of `TYPE_CHECKING or x`), which mypyc
+compiles to fail.
 """
 
 from __future__ import annotations
@@ -176,9 +178,10 @@ def _reachable(stmt: ast.If, version: tuple[int, int], *, checking: bool) -> lis
 
 def _runtime_nodes(tree: ast.AST, version: tuple[int, int]) -> list[ast.AST]:
     """Every node of the compiled module but those that never run in it: under `if
-    TYPE_CHECKING:` (its else, and the body of `if not TYPE_CHECKING:`, do run), and in the branch
-    of a sys.version_info test that is false on the Python mypyc compiles with, which mypy reads as
-    unreachable and mypyc skips (imports.iter_runtime_nodes, with the version)."""
+    TYPE_CHECKING:` (its else, and the body of `if not TYPE_CHECKING:`, do run, and fail compiled:
+    _mypy_skips_what_runs), and in the branch of a sys.version_info test that is false on the
+    Python mypyc compiles with, which mypy reads as unreachable and mypyc compiles as a raise that
+    never runs (imports.iter_runtime_nodes, with the version)."""
     out: list[ast.AST] = []
     stack: list[ast.AST] = [tree]
     while stack:
@@ -187,6 +190,90 @@ def _runtime_nodes(tree: ast.AST, version: tuple[int, int]) -> list[ast.AST]:
         block = _reachable(node, version, checking=False) if isinstance(node, ast.If) else None
         stack.extend(block if block is not None else ast.iter_child_nodes(node))
     return out
+
+
+UNREACHABLE_BUT_RUN = (
+    "mypy reads this block as unreachable, but it runs: mypyc compiles it as "
+    '`raise RuntimeError("Reached allegedly unreachable code!")` and the compiled module fails here '
+    "(mypyc/mypyc#1159). Keep the runtime fallback in a boundary module, or import the name under "
+    "`if TYPE_CHECKING:` alone and quote the annotations that use it"
+)
+NEVER_READ_BUT_RUN = (
+    "mypy never reads this operand (it follows `TYPE_CHECKING or`, or `not TYPE_CHECKING and`), but it "
+    "runs: mypyc compiles it unread and the compiled module fails here (a NameError). Keep TYPE_CHECKING "
+    "out of the runtime conditions of compiled code (`if TYPE_CHECKING:` with no else), or move this "
+    "code to a boundary module"
+)
+
+
+def _own_expressions(stmt: ast.stmt) -> list[ast.AST]:
+    """The parts of statement `stmt` that are no statements of their own: its test, values,
+    decorators, defaults, an except clause's class, a case's pattern and guard."""
+    out = [c for c in ast.iter_child_nodes(stmt) if not isinstance(c, ast.stmt | ast.excepthandler | ast.match_case)]
+    out += [h.type for h in getattr(stmt, "handlers", ()) if h.type is not None]
+    out += [part for case in getattr(stmt, "cases", ()) for part in (case.pattern, case.guard) if part is not None]
+    return out
+
+
+def _never_read_operands(node: ast.AST, version: tuple[int, int]) -> Iterator[ast.expr]:
+    """In expression `node`, the first operand of every `and`/`or` that mypy never reads but
+    that runs. mypy's semantic analysis stops reading an `or` after an operand it reads as true
+    (TYPE_CHECKING, MYPY), an `and` after one it reads as false (`not TYPE_CHECKING`): the rest is
+    `right_unreachable` (its visit_op_expr, which nests `a or b or c` as `a or (b or c)`), and
+    mypyc compiles it unread: a name there raises NameError, a value RuntimeError("mypyc internal
+    error: should be unreachable"). It runs unless an operand before it decides the operation at
+    runtime too (a sys.version_info test: the compiled module runs on the Python it was compiled
+    for)."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, ast.BoolOp):
+            decides = isinstance(n.op, ast.Or)  # True decides an `or`, False an `and`
+            for i, value in enumerate(n.values[:-1]):
+                if _static_value(value, version, checking=True) is decides:
+                    if decides not in [_static_value(v, version, checking=False) for v in n.values[: i + 1]]:
+                        yield n.values[i + 1]
+                    stack += n.values[: i + 1]  # what follows is never read: nothing more to say there
+                    break
+            else:
+                stack += n.values
+            continue
+        stack.extend(ast.iter_child_nodes(n))
+
+
+def _mypy_skips_what_runs(tree: ast.Module, version: tuple[int, int]) -> Iterator[tuple[ast.AST, str]]:
+    """What mypy never reads, but runs: the first statement of a block mypy reads as unreachable
+    (the else of `if TYPE_CHECKING:` or `if MYPY:`, the body of `if not TYPE_CHECKING:`, any test
+    mypy and the runtime read apart: _static_value), which mypyc compiles, in any scope, as `raise
+    RuntimeError("Reached allegedly unreachable code!")` (its transform_block, mypyc/mypyc#1159),
+    with UNREACHABLE_BUT_RUN; and an operand of _never_read_operands, with NEVER_READ_BUT_RUN. A
+    runtime fallback (`else: Sequence = list`) passed check and the build, and the compiled module
+    failed at import. A block that never runs is not looked into; neither is a compound statement
+    directly in a class body, which mypyc refuses on its own ("Unsupported statement in class
+    body"). Iterative, like _scope_statements."""
+    stack: list[list[ast.stmt]] = [tree.body]
+    while stack:
+        for stmt in stack.pop():
+            for part in _own_expressions(stmt):
+                yield from ((operand, NEVER_READ_BUT_RUN) for operand in _never_read_operands(part, version))
+            if isinstance(stmt, ast.ClassDef):
+                stack.append([s for s in stmt.body if not isinstance(s, tuple(BLOCK_KEYWORDS))])
+            elif isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+                stack.append(stmt.body)
+            elif isinstance(stmt, ast.If):
+                checking = _static_value(stmt.test, version, checking=True)
+                runtime = _static_value(stmt.test, version, checking=False)
+                for block, taken in ((stmt.body, True), (stmt.orelse, False)):
+                    if not block or (runtime is not None and runtime != taken):
+                        continue  # no else, or a block that never runs
+                    if checking is not None and checking != taken:
+                        yield block[0], UNREACHABLE_BUT_RUN  # the line mypyc's RuntimeError names
+                    else:
+                        stack.append(block)
+            else:
+                blocks = [inner for name in ("body", "orelse", "finalbody") if isinstance(inner := getattr(stmt, name, None), list)]
+                blocks += [block.body for block in (*getattr(stmt, "handlers", ()), *getattr(stmt, "cases", ()))]
+                stack.extend(blocks)
 
 
 def compile_version(cfg: Config) -> tuple[int, int]:
@@ -410,10 +497,11 @@ def _block_classes(stmt: ast.stmt, version: tuple[int, int]) -> Iterator[ast.Cla
     theirs. mypyc compiles only the classes of the module's own statements (its build_type_map
     reads module.defs) and stops at any other with "Nested class definitions not supported": a
     version check, a `try:` fallback, an `if TYPE_CHECKING:` Protocol. Never one of a block mypy
-    reads as unreachable, which mypyc skips (_reachable): the else of `if TYPE_CHECKING:`, the
-    body of `if not TYPE_CHECKING:`, and the branch of a sys.version_info test that is false on
-    `version` (a backport class under `else:` of `if sys.version_info >= (3, 12):` compiled on
-    3.14 was a false error). A class in a function or class of such a block is the other rules'."""
+    reads as unreachable, which mypyc compiles as a raise and never as a class (_reachable): the
+    branch of a sys.version_info test that is false on `version` (a backport class under `else:`
+    of `if sys.version_info >= (3, 12):` compiled on 3.14 was a false error), and the else of `if
+    TYPE_CHECKING:` or the body of `if not TYPE_CHECKING:`, which run, and fail compiled
+    (_mypy_skips_what_runs). A class in a function or class of such a block is the other rules'."""
     stack: list[ast.stmt] = [stmt]
     while stack:
         node = stack.pop()
@@ -577,6 +665,8 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
                 add(inner, f"class '{inner.name}' defined inside a function: mypyc does not support it")
         elif hasattr(ast, "TemplateStr") and isinstance(node, ast.TemplateStr):  # 3.14+
             add(node, "t-strings: mypyc does not support them")
+    for node, message in _mypy_skips_what_runs(tree, version):
+        add(node, message)
 
     relative_file = relative_file_at_import(cfg)
     for stmt in tree.body:

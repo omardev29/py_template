@@ -897,9 +897,10 @@ def test_lintc_flags_a_lone_module_next_to_a_leftover_folder(src_tree: Path) -> 
         ("for _ in ():\n    class F: ...\nwhile False:\n    class W: ...\n", [], [(2, "`for` block"), (4, "`while` block")]),
         ("import contextlib\nwith contextlib.nullcontext():\n    if True:\n        class C:\n            class D: ...\n", [], [(4, "class 'C' defined inside a module-level `with` block"), (5, "nested class 'D'")]),
         ("match 1:\n    case 1:\n        class M: ...\n", [], [(3, "class 'M' defined inside a module-level `match` block")]),
-        # mypy reads TYPE_CHECKING as true: mypyc rejects a class under it, and skips the other branch
-        ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    class P: ...\nelse:\n    class R: ...\n", [], [(3, "class 'P' defined inside a module-level `if`")]),
-        ("import typing\nif not typing.TYPE_CHECKING:\n    class R: ...\nelse:\n    class P: ...\n", [], [(5, "class 'P' defined inside a module-level `if`")]),
+        # mypy reads TYPE_CHECKING as true: mypyc rejects a class under it, and compiles the other
+        # branch, which runs, as a RuntimeError (no class there)
+        ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    class P: ...\nelse:\n    class R: ...\n", [], [(3, "class 'P' defined inside a module-level `if`"), (5, "mypy reads this block as unreachable, but it runs")]),
+        ("import typing\nif not typing.TYPE_CHECKING:\n    class R: ...\nelse:\n    class P: ...\n", [], [(3, "mypy reads this block as unreachable, but it runs"), (5, "class 'P' defined inside a module-level `if`")]),
         # a class in a function of such a block is the function rule's, once
         ("if True:\n    def f() -> None:\n        class L: ...\n", [], [(3, "class 'L' defined inside a function")]),
         # forbid_imports: dotted names through `from a import b`; relative imports are the app's modules
@@ -913,7 +914,7 @@ def test_lintc_flags_a_lone_module_next_to_a_leftover_folder(src_tree: Path) -> 
         ("from .flet import helper\n", ["flet"], []),
         ("from . import flet\n", ["flet"], []),
         ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import flet\n", ["flet"], []),
-        ("import typing\nif typing.TYPE_CHECKING:\n    pass\nelse:\n    import flet\n", ["flet"], [(5, "import of 'flet'")]),
+        ("import typing\nif typing.TYPE_CHECKING:\n    pass\nelse:\n    import flet\n", ["flet"], [(5, "import of 'flet'"), (5, "mypy reads this block as unreachable")]),
         # `if __name__ == "__main__"` in either order; other comparisons are fine
         ("if __name__ != 'x':\n    pass\n", [], []),
         ("if __name__ == 'x':\n    pass\n", [], []),
@@ -1064,8 +1065,243 @@ def test_lintc_flags_every_class_the_locked_mypyc_rejects_as_nested(tmp_path: Pa
     r = subprocess.run([str(TOOL_PYTHON), "-m", "mypyc", "m.py"], cwd=tmp_path, capture_output=True, text=True, timeout=600, check=False)
     rejected = {int(n) for n in re.findall(r"^m\.py:(\d+): error: Nested class definitions not supported", r.stdout + r.stderr, re.M)}
     assert r.returncode != 0 and rejected, r.stdout + r.stderr
-    found = lintc.lint_file(make({}), tmp_path / "m.py")
+    # what runs but mypy never reads (the else of `if TYPE_CHECKING:`) is another rule's, pinned
+    # by test_real_compile_fails_exactly_where_lintc_says_mypy_skips_what_runs
+    skipped = (lintc.UNREACHABLE_BUT_RUN, lintc.NEVER_READ_BUT_RUN)
+    found = [f for f in lintc.lint_file(make({}), tmp_path / "m.py") if f.message not in skipped]
     assert {f.line for f in found} == rejected, ([(f.line, f.message) for f in found], sorted(rejected))
+
+
+# What runs but mypy never reads, which the locked mypyc compiles to fail (mypyc/mypyc#1159). A line
+# ending in `# raises` starts a block mypy reads as unreachable: compiled, it raises
+# RuntimeError("Reached allegedly unreachable code!"). One ending in `# never read` holds an operand
+# mypy never reads (after `TYPE_CHECKING or`): compiled, it raises NameError, or RuntimeError("mypyc
+# internal error: should be unreachable") for a value. `# raises (the test fails first)`: its test's
+# operand fails before the block. Every other case runs.
+UNREACHABLE_CASES = """\
+import sys
+from typing import TYPE_CHECKING
+
+FLAG = len(sys.argv) > 99
+MYPY = False
+
+
+def case_else_of_checking() -> int:
+    if TYPE_CHECKING:
+        x = 1
+    else:
+        x = 2  # raises
+    return x
+
+
+def case_body_of_not_checking() -> int:
+    if not TYPE_CHECKING:
+        return 3  # raises
+    return 0
+
+
+def case_else_of_mypy() -> int:
+    if MYPY:
+        return 4
+    else:
+        return 5  # raises
+
+
+def case_elif_after_checking() -> int:
+    if TYPE_CHECKING:
+        return 6
+    elif FLAG:  # raises
+        return 7
+    return 8
+
+
+def case_flag_or_checking() -> int:
+    if FLAG or TYPE_CHECKING:
+        return 9
+    else:
+        return 10  # raises
+
+
+def case_in_a_loop() -> int:
+    total = 0
+    for i in range(2):
+        try:
+            if TYPE_CHECKING:
+                total += i
+            else:
+                total -= i  # raises
+        finally:
+            total += 1
+    return total
+
+
+def case_in_a_nested_function() -> int:
+    def inner() -> int:
+        if not TYPE_CHECKING:
+            return 11  # raises
+        return 12
+
+    return inner()
+
+
+class Holder:
+    def method(self) -> int:
+        if TYPE_CHECKING:
+            return 13
+        else:
+            pass  # raises
+        return 14
+
+
+def case_in_a_method() -> int:
+    return Holder().method()
+
+
+def case_checking_or_flag() -> int:
+    if TYPE_CHECKING or FLAG:  # never read
+        return 15
+    return 16
+
+
+def case_value_of_checking_or_flag() -> bool:
+    return TYPE_CHECKING or FLAG  # never read
+
+
+def case_not_checking_and_flag() -> int:
+    if not TYPE_CHECKING and not FLAG:  # never read
+        return 17  # raises (the test fails first)
+    return 18
+
+
+def case_not_of_checking_or_flag() -> int:
+    if not (TYPE_CHECKING or FLAG):  # never read
+        return 19  # raises (the test fails first)
+    return 20
+
+
+def case_body_of_checking() -> int:
+    if TYPE_CHECKING:
+        return 21
+    return 22
+
+
+def case_checking_and_flag() -> int:
+    if TYPE_CHECKING and FLAG:
+        return 23
+    else:
+        return 24
+
+
+def case_version_or_flag() -> int:
+    if sys.version_info >= (3, 11) or FLAG:
+        return 25
+    else:
+        return 26
+
+
+def case_inside_a_block_that_never_runs() -> int:
+    if TYPE_CHECKING:
+        if not TYPE_CHECKING:
+            return 27
+    return 28
+
+
+def case_conditional_expression() -> int:
+    return 29 if TYPE_CHECKING else 30
+"""
+
+UNREACHABLE_TOP = """\
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+else:
+    Sequence = list  # raises
+
+
+def total(xs: Sequence[int]) -> int:
+    return sum(xs)
+"""
+
+
+def _marked(source: str, *markers: str) -> set[int]:
+    return {n for n, line in enumerate(source.splitlines(), 1) if line.endswith(markers)}
+
+
+def test_lintc_flags_what_runs_but_mypy_never_reads(tmp_path: Path) -> None:
+    """mypyc compiles a block mypy reads as unreachable as a RuntimeError, also the else of `if
+    TYPE_CHECKING:` (or `if MYPY:`) and the body of `if not TYPE_CHECKING:`, which run: the
+    runtime fallback `else: Sequence = list` passed check, the hook and the build's checks, and
+    the compiled module failed at import (lintc said mypyc skipped those blocks). The same for an
+    operand mypy never reads (`TYPE_CHECKING or FLAG`). Any scope, any test mypy and the runtime
+    read apart; never what never runs, nor an if statement in a class body, which mypyc refuses on
+    its own."""
+    for source in (UNREACHABLE_CASES, UNREACHABLE_TOP):
+        found = _lint(tmp_path, source)
+        blocks = {f.line for f in found if f.message == lintc.UNREACHABLE_BUT_RUN}
+        operands = {f.line for f in found if f.message == lintc.NEVER_READ_BUT_RUN}
+        assert blocks == _marked(source, "# raises", "# raises (the test fails first)"), [(f.line, f.message) for f in found]
+        assert operands == _marked(source, "# never read"), [(f.line, f.message) for f in found]
+        assert not any(f.note for f in found)  # errors like the other rules: blocking under the mypyc profile
+    in_a_class = "from typing import TYPE_CHECKING\n\n\nclass Settings:\n    if TYPE_CHECKING:\n        x: int\n    else:\n        x = 0\n"
+    assert not [f for f in _lint(tmp_path, in_a_class) if f.message == lintc.UNREACHABLE_BUT_RUN]
+    default = "import sys\nfrom typing import TYPE_CHECKING\n\n\nclass Settings:\n    debug: bool = TYPE_CHECKING or len(sys.argv) > 1\n"
+    assert [(f.line, f.message) for f in _lint(tmp_path, default)] == [(6, lintc.NEVER_READ_BUT_RUN)]
+    for message in (lintc.UNREACHABLE_BUT_RUN, lintc.NEVER_READ_BUT_RUN):
+        assert "boundary module" in message
+    assert "Reached allegedly unreachable code!" in lintc.UNREACHABLE_BUT_RUN and "NameError" in lintc.NEVER_READ_BUT_RUN
+
+
+@needs_compiler
+def test_real_compile_fails_exactly_where_lintc_says_mypy_skips_what_runs(tmp_path: Path) -> None:
+    """The lines the rules flag are exactly those where the locked mypyc's compiled code fails,
+    with the error each rule names, and every other case runs: if this fails after a mypy bump,
+    mypyc changed (mypyc/mypyc#1159 fixed: the rules can go)."""
+    (tmp_path / "cases.py").write_text(UNREACHABLE_CASES, encoding="utf-8")
+    (tmp_path / "top.py").write_text(UNREACHABLE_TOP, encoding="utf-8")
+    r = subprocess.run(
+        [str(TOOL_PYTHON), "-m", "mypyc", "cases.py", "top.py"], cwd=tmp_path, capture_output=True, text=True, timeout=600, check=False
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    probe = (
+        "import json, sys, traceback\n"
+        "sys.path.insert(0, '.')\n"
+        "def failed(e, name):\n"
+        "    line = [f.lineno for f in traceback.extract_tb(e.__traceback__) if f.filename.endswith(name)][-1]\n"
+        "    return [line, type(e).__name__, str(e)]\n"
+        "out = {}\n"
+        "try:\n"
+        "    import top\n"
+        "except Exception as e:\n"
+        "    out['top'] = failed(e, 'top.py')\n"
+        "import cases\n"
+        "assert not cases.__file__.endswith('.py'), cases.__file__\n"
+        "for name in sorted(n for n in dir(cases) if n.startswith('case_')):\n"
+        "    try:\n"
+        "        out[name] = ['ran', getattr(cases, name)()]\n"
+        "    except Exception as e:\n"
+        "        out[name] = failed(e, 'cases.py')\n"
+        "print('PTLINES' + json.dumps(out))\n"
+    )
+    r = subprocess.run([str(TOOL_PYTHON), "-c", probe], cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False)
+    assert r.returncode == 0 and "PTLINES" in r.stdout, r.stdout + r.stderr
+    results = json.loads(r.stdout.split("PTLINES", 1)[1])
+    failed = {n: v for n, v in results.items() if v[0] != "ran"}
+    alleged = "Reached allegedly unreachable code!"
+    assert failed.pop("top") == [_marked(UNREACHABLE_TOP, "# raises").pop(), "RuntimeError", alleged], results
+    blocks, operands = set(), set()
+    for line, kind, error in failed.values():
+        if (kind, error) == ("RuntimeError", alleged):
+            blocks.add(line)
+        else:
+            assert kind == "NameError" or error == "mypyc internal error: should be unreachable", results
+            operands.add(line)
+    assert blocks == _marked(UNREACHABLE_CASES, "# raises"), results
+    assert operands == _marked(UNREACHABLE_CASES, "# never read"), results
+    for source, name in ((UNREACHABLE_CASES, "cases.py"), (UNREACHABLE_TOP, "top.py")):
+        found = lintc.lint_file(real({}), tmp_path / name)
+        assert {f.line for f in found if f.message == lintc.UNREACHABLE_BUT_RUN} == _marked(source, "# raises", "# raises (the test fails first)")
+        assert {f.line for f in found if f.message == lintc.NEVER_READ_BUT_RUN} == _marked(source, "# never read")
 
 
 @pytest.mark.skipif(not hasattr(ast, "TemplateStr"), reason="t-strings need Python 3.14")
