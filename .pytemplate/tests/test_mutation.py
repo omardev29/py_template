@@ -1215,6 +1215,42 @@ def test_run_reports_pytests_result(tmp_path: Path) -> None:
     assert mutation.classify(code, output)[0] == KILLED
 
 
+def test_a_leftover_in_the_basetemp_never_fails_the_next_run(tmp_path: Path, unprivileged_python: Path) -> None:
+    """A run that its time limit or a stop killed, or a test that a mutant made fail before it
+    put a folder's mode back, leaves an unreadable folder in the worker's --basetemp, which
+    pytest's own cleanup cannot remove: the next run errored at setup (FileExistsError), a kill
+    for classify, of a mutant that survives (A10-01). Runs.run empties the basetemp first."""
+    worker = _worker(tmp_path, {"test_ok.py": "def test_ok(tmp_path):\n    assert tmp_path.is_dir()\n"})
+    worker = Worker(worker.index, worker.copy, unprivileged_python, worker.tmp, worker.log, worker.env)
+    left = worker.tmp / "test_killed_run0" / "locked"
+    left.mkdir(parents=True)
+    (left / "f.txt").write_text("x", encoding="utf-8")
+    left.chmod(0)
+    try:
+        code, output, _ = Runs().run(worker, ["test_ok.py"], 120)
+    finally:
+        if left.exists():
+            left.chmod(0o700)
+    assert mutation.classify(code, output) == (SURVIVED, ""), output
+
+
+def test_the_cleanup_never_loses_the_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The workers' folders and the logs go in run()'s finally: whatever stops their removal is a
+    warning, never an error that loses the report of hours of runs (rmtree raised TypeError on a
+    folder a test left unreadable, A10-01)."""
+    for name in ("w0", "t0", "logs"):
+        (tmp_path / name).mkdir()
+
+    def broken(path: Path) -> None:
+        raise TypeError("open() missing required argument 'flags' (pos 2)")
+
+    monkeypatch.setattr(mutation, "rmtree", broken)
+    mutation._remove_workers(tmp_path)
+    mutation._remove_logs(tmp_path)
+    err = capsys.readouterr().err
+    assert "could not remove the workers' folders" in err and "could not remove" in err.split("workers' folders", 1)[1], err
+
+
 def test_run_uses_the_suites_own_pytest_settings(tmp_path: Path) -> None:
     """The copy is the project: its pyproject.toml gives its app's tests their settings (a
     coverage gate: every baseline failed, here an unknown option, exit 4) and so does its root

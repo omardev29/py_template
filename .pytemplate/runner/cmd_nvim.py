@@ -483,10 +483,14 @@ def remove_tree(path: Path) -> None:
     """shutil.rmtree that also deletes read-only files (git objects on Windows). A symlink or a
     junction goes as a link, never what it names, as e2e.rmtree: rmtree refuses a link, and the
     retry chmodded the folder it names to 0o600 through it and returned, the link left (a
-    subfolder of selftest --nvim's --dir moved to another disk)."""
+    subfolder of selftest --nvim's --dir moved to another disk). POSIX: a folder without its
+    write, read or search bit is made the owner's rwx again and the tree removed once more
+    (e2e.rmtree_posix): the retry of a single step raised TypeError there (os.open without its
+    flags, rmtree being fd-based) and left the folder 0o600."""
     from .cmd_env import _is_link  # cmd_env imports this module: import it lazily
 
     def retry(func: Callable[[str], object], name: str, exc: object) -> None:
+        # Windows (rmtree works by path there): a read-only file or folder loses the attribute
         error = exc[1] if isinstance(exc, tuple) else exc  # onerror's exc_info (3.11), onexc's exception
         if isinstance(error, BaseException) and os.path.islink(name):
             raise error  # chmod follows a link
@@ -498,7 +502,11 @@ def remove_tree(path: Path) -> None:
         return
     if not path.exists():
         return
-    if sys.version_info >= (3, 12):
+    if not IS_WINDOWS:
+        from .e2e import rmtree_posix  # e2e imports what this module never needs: import it lazily
+
+        rmtree_posix(path)
+    elif sys.version_info >= (3, 12):
         shutil.rmtree(path, onexc=retry)
     else:
         shutil.rmtree(path, onerror=retry)

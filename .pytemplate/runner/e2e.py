@@ -769,7 +769,14 @@ class Context:
 
 def rmtree(path: Path) -> None:
     """Remove a tree even with read-only files (.git objects) and paths over 260 characters. A
-    symlink or a junction (a --base on another disk) goes as a link, never what it names."""
+    symlink or a junction (a --base on another disk) goes as a link, never what it names.
+
+    POSIX: a folder without its write, read or search bit (a test of the runner that chmodded one
+    and was stopped, or failed, before it put the mode back: selftest --mutation's workers leave
+    such folders) is made the owner's rwx again, links neither followed nor changed, and the tree
+    removed once more (rmtree_posix). The retry of a single step made it worse: rmtree is
+    fd-based there, and os.open(name) without its flags raised TypeError, which no caller
+    catches, after a chmod to 0o200 had taken the folder's read and search bits."""
     from .cmd_env import _is_link  # imported here: cmd_env imports much this module never needs
 
     if _is_link(path):
@@ -782,6 +789,7 @@ def rmtree(path: Path) -> None:
     target = long_path(path) if IS_WINDOWS else str(path)
 
     def retry(func: Callable[..., object], name: str, exc: object) -> None:
+        # Windows (rmtree works by path there): a read-only file or folder loses the attribute
         error = exc[1] if isinstance(exc, tuple) else exc  # onerror's exc_info (3.11), onexc's exception
         if isinstance(error, BaseException) and os.path.islink(name):
             raise error  # chmod follows a link: it made the folder a symlinked base names 0o200
@@ -790,7 +798,9 @@ def rmtree(path: Path) -> None:
 
     for attempt in range(5):
         try:
-            if sys.version_info >= (3, 12):
+            if not IS_WINDOWS:
+                rmtree_posix(path)
+            elif sys.version_info >= (3, 12):
                 shutil.rmtree(target, onexc=retry)
             else:
                 shutil.rmtree(target, onerror=retry)
@@ -801,6 +811,23 @@ def rmtree(path: Path) -> None:
             if attempt == 4:
                 raise
             time.sleep(1 + attempt)  # a just-exited exe or an antivirus scan may still hold a file
+
+
+def rmtree_posix(path: Path) -> None:
+    """shutil.rmtree, and when a folder stopped it (no write, read or search bit), once more with
+    every folder of the tree the owner's rwx again: cmd_env._make_writable only adds bits, never
+    follows nor changes a link, and goes top-down, so each folder opens before it is entered. What
+    the owner cannot change (another user's folder) still raises OSError, for the caller to name."""
+    from .cmd_env import _make_writable  # imported here: cmd_env imports much this module never needs
+
+    if os.path.islink(path):  # a link goes as a link (os.walk would enter the folder it names)
+        os.unlink(path)
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        _make_writable(path)
+        shutil.rmtree(path)
 
 
 def kill_tree(child: subprocess.Popen[bytes]) -> None:

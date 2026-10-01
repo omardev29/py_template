@@ -356,6 +356,48 @@ def test_rmtree_reaches_a_base_on_a_network_share(monkeypatch: pytest.MonkeyPatc
     assert removed == [r"\\?\UNC\server\share\pt\e2e"]
 
 
+# Run as a user whom folder modes stop: the folders of `tree` get their modes, then `remove` runs.
+REMOVE_A_LOCKED_TREE = r"""
+import json, os, stat, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from runner import cmd_nvim, e2e
+top, modes = Path(sys.argv[2]), json.loads(sys.argv[3])
+for name, mode in modes.items():
+    os.chmod(top / name, int(mode, 8))
+try:
+    {"e2e.rmtree": e2e.rmtree, "cmd_nvim.remove_tree": cmd_nvim.remove_tree}[sys.argv[4]](top)
+    out = "gone" if not os.path.lexists(top) else "left"
+except Exception as e:
+    out = type(e).__name__ + ": " + str(e)
+print("PTOUT" + out)
+"""
+
+
+@pytest.mark.parametrize("remove", ["e2e.rmtree", "cmd_nvim.remove_tree"])
+def test_rmtree_removes_folders_a_test_left_unreadable(tmp_path: Path, unprivileged_python: Path, remove: str) -> None:
+    """A test of the runner that chmods a folder (0o555, 0o000, 0o311, 0o300) and is stopped, or
+    fails, before it puts the mode back leaves it in selftest --mutation's worker folders. The
+    retry of one step (rmtree is fd-based on POSIX) called os.open(name) without its flags: a
+    TypeError no caller catches, after a chmod to 0o200 that took the folder's read and search
+    bits; the cleanup lost the report of the run, and every later run died on that folder
+    (A10-01). The owner may always change his own folders: they get rwx, and the tree goes."""
+    top = tmp_path / "w0"
+    modes = {"a/ro": "555", "a/none": "000", "b/wx": "311", "b/w": "300", "b/w/deeper": "500"}
+    for name in modes:
+        (top / name).mkdir(parents=True, exist_ok=True)
+        (top / name / "f.txt").write_text("x", encoding="utf-8")
+    deepest = sorted(modes, key=lambda n: n.count("/"), reverse=True)  # chmod the inner ones first
+    r = subprocess.run(
+        [str(unprivileged_python), "-c", REMOVE_A_LOCKED_TREE, str(ROOT / ".pytemplate"), str(top), json.dumps({n: modes[n] for n in deepest}), remove],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    for root, dirs, _ in os.walk(top):  # whatever was left, for pytest's own cleanup
+        for d in dirs:
+            os.chmod(os.path.join(root, d), 0o700)
+    assert "PTOUTgone" in r.stdout, r.stdout + r.stderr
+
+
 @needs_git
 def test_commit_goes_through_the_projects_hook(tmp_path: Path) -> None:
     base = tmp_path / "base"

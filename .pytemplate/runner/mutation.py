@@ -54,7 +54,7 @@ import tokenize
 import warnings
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, Any
@@ -1018,6 +1018,12 @@ class Runs:
             str(worker.python), "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", "-c", f"{TESTS}/pytest.ini", "--rootdir=.",
             "--color=no", f"--basetemp={worker.tmp}", "--hypothesis-seed=0", *([f"--junitxml={junit}"] if junit else []), *tests,
         ]  # fmt: skip
+        # A run that a time limit or a stop killed, or a test that a mutant made fail before it put
+        # a folder's mode back, leaves folders pytest's own cleanup of --basetemp cannot remove (no
+        # read or search bit): the next run of the worker errored at setup (FileExistsError), a
+        # kill for classify. rmtree empties it first, giving such folders back to their owner.
+        with suppress(OSError):
+            rmtree(worker.tmp)
         start = time.perf_counter()
         code: int | None = None
         with worker.log.open("wb") as out:
@@ -1378,12 +1384,14 @@ def _test(cfg: Config, opts: Options, uv: str, root: Path, base: Path, tests: Ma
 
 def _remove_workers(base: Path) -> None:
     """The workers' copies (a .venv each), homes and temp folders, and the snapshot of the
-    modules: they always go."""
+    modules: they always go. Whatever stops it is a warning: the cleanup runs in run()'s
+    finally, and an error there lost the report of hours of runs (rmtree's TypeError on a
+    folder a test left unreadable did)."""
     try:
         for d in sorted(base.iterdir()):
             if d.is_dir() and (d.name == "snapshot" or re.fullmatch(r"[wht]\d+", d.name)):
                 rmtree(d)
-    except OSError as e:
+    except Exception as e:  # noqa: BLE001 - the report comes first (run())
         ui.warn(f"could not remove the workers' folders in {base}: {e}")
 
 
@@ -1391,5 +1399,5 @@ def _remove_logs(base: Path) -> None:
     """The logs, once nothing in them is worth reading (the lock is still held)."""
     try:
         rmtree(base / "logs")
-    except OSError as e:
+    except Exception as e:  # noqa: BLE001 - the report comes first (run())
         ui.warn(f"could not remove {base / 'logs'}: {e}")

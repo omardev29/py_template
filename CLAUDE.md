@@ -4537,7 +4537,13 @@ short temp tree and unset `NVIM_APPNAME`.
   `.pytemplate-e2e` is wiped, and a symlinked or junctioned base loses only its link, its marker
   and its lock file (`e2e.rmtree` removes a link as a link and never chmods through one: a passing
   run left the folder it named at 0o200; `e2e._remove_base` unlinks the two files through the link
-  first: they stayed in that folder, `test_a_passing_run_on_a_symlinked_base_leaves_the_folder_it_names_as_it_was`). One run at a time per base: `selftest` holds `project.base_lock` on
+  first: they stayed in that folder, `test_a_passing_run_on_a_symlinked_base_leaves_the_folder_it_names_as_it_was`;
+  on POSIX a folder without its write, read or search bit, which a runner test stopped or failed
+  before it put the mode back leaves, gets the owner's rwx again and the tree goes, `e2e.rmtree_posix`,
+  also behind `cmd_nvim.remove_tree`: the retry of one fd-based rmtree step called `os.open`
+  without its flags, a TypeError after a chmod to 0o200, and `--mutation` lost its report,
+  `test_e2e_run.test_rmtree_removes_folders_a_test_left_unreadable`, run without the
+  capabilities that let root pass folder modes: the `unprivileged_python` fixture). One run at a time per base: `selftest` holds `project.base_lock` on
   `<base>/lock` around the run and the cleanup (as `--mutation` does), so a second run is refused
   ("another run is using <base>") instead of deleting the first's projects and logs; only a lock
   another process holds is another run (`project.lock_refusal`: a file system without locks, ENOLCK,
@@ -4667,9 +4673,15 @@ short temp tree and unset `NVIM_APPNAME`.
     `.pytemplate-mutation`, one run at a time (`base_lock` on `<base>/lock`). The workers'
     folders and the snapshot always go; the logs (`<base>/logs`: Cosmic Ray's, each worker's last
     run, the junit times, each failed baseline, each error) stay after an interrupt, a failed
-    baseline or an error, and otherwise go, while the lock is still held. The base itself stays
+    baseline or an error, and otherwise go, while the lock is still held. What stops that cleanup
+    is a warning (`_remove_workers`, `_remove_logs`: it runs in `run()`'s finally, and an error
+    there lost the report). The base itself stays
     with its marker and lock file (removed, it could vanish under a second run that just
-    prepared it).
+    prepared it). Each run starts on an empty `--basetemp` (`Runs.run` removes it with
+    `e2e.rmtree`): a folder a killed run or a failed test left without its read or search bit
+    made pytest's own cleanup of it fail, and the next run of the worker errored at setup
+    (FileExistsError), a kill for `classify`
+    (`test_mutation.test_a_leftover_in_the_basetemp_never_fails_the_next_run`).
   Measured (Linux, `--jobs 3`, September 2026): a module's baseline 1.5 to 3 minutes, a killed
   mutant about 5 s; a survivor costs a whole run of its module's tests, so a pass of the whole
   runner takes a day of CPU or more. `--diff origin/main` on the branch that added the suite
@@ -6153,6 +6165,16 @@ Cosmic Ray (selftest --mutation, 13.1):
   mutants of the runner). Up: none found. Fix: `mutation.made` compiles every mutant and skips
   one that does not compile, with the reason (13.1). Test: `test_mutation.py::test_made`,
   `test_cosmic_rays_defects_that_the_runner_works_around`. Goes: never (a cheap check).
+
+pytest (the suite's own runs, selftest --mutation, 13.1):
+- **pytest cannot empty a --basetemp that holds a folder without its read or search bit** (DEFECT,
+  pytest 9.1.1: its rm_rf retries only rmdir and unlink, never the os.open of a folder): the
+  next run errored at setup with FileExistsError. A worker of `selftest --mutation` reuses one
+  basetemp, and a run its time limit killed, or a test a mutant made fail before it put a
+  folder's mode back, left such a folder: the next mutant of that worker read as killed. Up:
+  pytest-dev/pytest#7821 (open). Fix: `mutation.Runs.run` empties the basetemp with `e2e.rmtree`
+  before each run (13.1). Test: `test_mutation.py::test_a_leftover_in_the_basetemp_never_fails_the_next_run`.
+  Goes: when pytest removes such folders itself.
 
 VS Code, its extensions, pyright and basedpyright:
 - **Shell tasks run in the user's terminal profile** (LIMITATION): xonsh, niubash or MSYS2 as

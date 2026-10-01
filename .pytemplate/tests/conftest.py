@@ -19,6 +19,8 @@ needed it failed far from the cause. `_the_project_environment_stays` names the 
 
 from __future__ import annotations
 
+import os
+import shlex
 import shutil
 import signal
 import sys
@@ -63,6 +65,26 @@ def _the_project_environment_stays() -> Iterator[None]:
                 "another python.cpython than the project's; give its Config the project's (config.load)",
                 pytrace=False,
             )
+
+
+@pytest.fixture
+def unprivileged_python(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """This Python, run as a user whom folder modes stop (POSIX): itself when the suite is not
+    root, else a wrapper that drops the capabilities that let root pass them (setpriv; the test
+    skips without it). A test of what a read-only or unreadable folder does needs it: root
+    removes, reads and enters any folder, and such a test passed as root on a broken runner."""
+    if sys.platform == "win32":
+        pytest.skip("POSIX folder modes")
+    if os.geteuid() != 0:
+        return Path(sys.executable)
+    setpriv = shutil.which("setpriv")
+    if setpriv is None:
+        pytest.skip("root, and no setpriv to drop the capabilities that let root pass folder modes")
+    wrapper = tmp_path_factory.mktemp("unprivileged") / "python"
+    argv = [setpriv, "--bounding-set=-dac_override,-dac_read_search,-fowner", "--", sys.executable]
+    wrapper.write_text("#!/bin/sh\nexec " + shlex.join(argv) + ' "$@"\n', encoding="utf-8", newline="\n")
+    wrapper.chmod(0o755)
+    return wrapper
 
 
 @pytest.fixture
