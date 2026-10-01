@@ -1597,7 +1597,8 @@ only deletes files is checked too).
   `.husky/pre-commit`); it skips a checkout without `./pyt`, so a global hooks folder that
   every repository runs keeps working in the others.
 - A project in a subfolder of a bigger repository: the hook goes into that repository's hooks
-  folder and checks the project's staged files. Two projects in one repository: `apply` leaves
+  folder and checks the project's staged files (the paths and commands it prints are the
+  project's: `cd` into its folder, as its last line says, to follow them). Two projects in one repository: `apply` leaves
   the other project's hook alone, and `./pyt hooks install --force` runs both (the first
   project's hook becomes `pre-commit.local`: that project's `hooks uninstall`, or its
   `pre_commit = false`, removes it). A third project cannot be chained that way. A project that

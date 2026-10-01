@@ -1962,6 +1962,32 @@ def test_run_checks_a_commit_that_only_deletes_files(tmp_path: Path, monkeypatch
     assert "nothing to check" in capsys.readouterr().err
 
 
+@needs_git
+@pytest.mark.parametrize("sub", ["", "apps/my app"])
+def test_a_failed_check_says_where_its_hints_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], sub: str) -> None:
+    """git runs the hook from the top of the work tree, where a project in a subfolder has no
+    ./pyt: its hints (`./pyt render, then git add .vscode/tasks.json`) and the paths the tools
+    print are the project's, and typed at the top they failed. The closing line says where they
+    run; a project at the top needs no such line."""
+    top, project = make_repo(tmp_path, sub)
+    (project / "a.txt").write_text("x\n", encoding="utf-8")
+    git(project, "add", "a.txt")
+    repo = find(project, top)
+
+    def fake_checks(cfg: Config, repo: hooks.Repo, staged: Sequence[str], **kw: object) -> Iterator[hooks.Result]:
+        yield hooks.Result(False, "generated files up to date", "outdated: .vscode/tasks.json\n./pyt render, then git add .vscode/tasks.json")
+
+    monkeypatch.setattr(hooks, "checks", fake_checks)
+    assert hooks.run(make(), repo) == 1
+    err = capsys.readouterr().err
+    assert "./pyt render, then git add .vscode/tasks.json" in err
+    note = "the commands and paths above are the project's: run them in its folder"
+    if sub:
+        assert f'{note}, cd "{sub}" from the top of the repository' in err, err
+    else:
+        assert note not in err, err
+
+
 def test_uv_error_message() -> None:
     out = (
         "Resolved 25 packages in 20ms\n"

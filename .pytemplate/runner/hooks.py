@@ -1654,9 +1654,14 @@ def run(cfg: Config, repo: Repo) -> int:
         failed += result.passed is False
     seconds = time.perf_counter() - start
     if failed:
+        # git runs the hook from the top of the work tree, where a project in a subfolder has no
+        # ./pyt: the hints, and the paths the tools print, are the project's (typed at the top,
+        # `./pyt render` and `git add .vscode/tasks.json` failed)
+        folder = f'"{repo.prefix}"' if " " in repo.prefix else repo.prefix
+        where = f"\n  (the commands and paths above are the project's: run them in its folder, cd {folder} from the top of the repository)" if repo.prefix else ""
         ui.error(
             f"pre-commit: {failed} check{'s' if failed != 1 else ''} failed ({seconds:.1f} s). Fix, `git add` and commit again\n"
-            "  (skip the hook once: git commit --no-verify)"
+            f"  (skip the hook once: git commit --no-verify){where}"
         )
         return 1
     ui.ok(f"pre-commit: all checks passed ({seconds:.1f} s)")

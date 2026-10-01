@@ -1176,7 +1176,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   checkouts); a launcher exit code above 1 (uv not found from a GUI client, a broken
   pytemplate.toml, an old runner without `hooks run`) also prints `git commit --no-verify` and
   `sh <launcher> hooks uninstall` (the launcher it calls, from the top: a project in a subfolder
-  has no `./pyt` there, `test_hooks.test_git_runs_the_hook`). `shellcheck -s sh`-clean (tested when installed). Any change to
+  has no `./pyt` there, `test_hooks.test_git_runs_the_hook`); for such a project the closing
+  error line of a failed `hooks run` says that the hints and the paths the tools print are the
+  project's, `cd <prefix>` from the top (`hooks.run`: typed at the top, `./pyt render` and `git
+  add .vscode/tasks.json` failed; `test_hooks.test_a_failed_check_says_where_its_hints_run`).
+  `shellcheck -s sh`-clean (tested when installed). Any change to
   `hooks.hook_script` makes installed hooks "outdated": apply/setup rewrite them.
 - Never overwritten: a hook `hooks.hook_script` did not write, or any symlink (writing through a
   dangling link created a file in the work tree). pytemplate's hook is one that starts with the
