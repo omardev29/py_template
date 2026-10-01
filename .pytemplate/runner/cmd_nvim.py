@@ -55,22 +55,25 @@ EXTRA_PREFIX = "lazyvim.plugins.extras."
 LAZY_LUA = ROOT / ".lazy.lua"
 MARK = "PTNVIM"  # prefix of the JSON line the headless snippets print
 
-# Neovim reads every 'runtimepath' entry as a file glob (gen_expand_wildcards). On POSIX `[ ] { }`
-# are wildcards, a comma separates entries, a backslash escapes, a backtick is command
-# substitution, a single quote sends the entry through 'shell', and a `$NAME` is expanded. On
-# Windows (Neovim 0.12.5's path.c and os/win_defs.h) only `[` is a wildcard (path_has_exp_wildcard:
-# `*?[`), no entry ever goes through 'shell' (SPECIAL_WILDCHAR, the `'`, `{` and backtick that
-# need one, is POSIX only; a backtick counts only around the whole entry, which starts with a
-# drive there), a comma still separates and a `$NAME` is still expanded (vim.fs.normalize too): a
-# `'` (C:\Users\O'Brien), `{ }` or `]` is a plain character. A project path holding one of these
-# cannot carry the plugin on the runtimepath (require fails, E79), so spec.lua skips the whole
+# Neovim reads every 'runtimepath' entry as a file glob (gen_expand_wildcards). On POSIX `* ? [ ] {
+# }` are wildcards (Neovim 0.12.5's path.c, path_has_exp_wildcard: `*?[{`), a comma separates
+# entries, a backslash escapes, a backtick is command substitution, a single quote sends the entry
+# through 'shell', and a `$NAME` is expanded. A wildcard that matches another folder is the worst
+# case: in `game?` the plugin's entry also named the sibling `game1`, which sorts first, and
+# require ran that folder's code, which nobody trusted. On Windows (os/win_defs.h) the wildcards
+# are `* ? [` (path_has_exp_wildcard: `*?[`; `*` and `?` cannot be in a name there), no entry ever
+# goes through 'shell' (SPECIAL_WILDCHAR, the `'`, `{` and backtick that need one, is POSIX only; a
+# backtick counts only around the whole entry, which starts with a drive there), a comma still
+# separates and a `$NAME` is still expanded (vim.fs.normalize too): a `'` (C:\Users\O'Brien), `{ }`
+# or `]` is a plain character. A project path holding one of these cannot carry the plugin on the
+# runtimepath (require fails or loads another folder's code, E79), so spec.lua skips the whole
 # integration there and names the character; this reports it for `nvim doctor` and `nvim trust`.
-RTP_UNSAFE = "[]{},\\`'$"
-RTP_UNSAFE_WINDOWS = "[,$"
+RTP_UNSAFE = "[]{}*?,\\`'$"
+RTP_UNSAFE_WINDOWS = "[*?,$"
 
 
 def rtp_unsafe_text(*, windows: bool = IS_WINDOWS) -> str:
-    """The characters of `rtp_unsafe_char`, for a message: "[ ] { } , \\ ` ' or $"."""
+    """The characters of `rtp_unsafe_char`, for a message: "[ ] { } * ? , \\ ` ' or $"."""
     chars = list(RTP_UNSAFE_WINDOWS if windows else RTP_UNSAFE)
     return " ".join(chars[:-1]) + " or " + chars[-1]
 

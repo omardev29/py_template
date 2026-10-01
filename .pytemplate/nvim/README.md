@@ -29,8 +29,9 @@ lazy.nvim finds it: the nearest `.lazy.lua` file up from Neovim's folder, which 
 folder's own file, never a link) and runs `.pytemplate/nvim/spec.lua`, so all the logic lives in
 `.pytemplate/nvim/` (trusted with `.lazy.lua`) and a later fix there needs no re-trust. The loader
 changed once, in September 2026: trust the new file once after taking it. Because Neovim reads a runtimepath entry as
-a file glob, a project path holding `[ ] { } , \ ` `` ` `` `'` or `$` (on Windows only `[ , $`)
-cannot carry the plugin: the integration is skipped with one message so your other plugins keep
+a file glob, a project path holding `[ ] { } * ? , \ ` `` ` `` `'` or `$` (on Windows only
+`[ * ? , $`) cannot carry the plugin (from `game?` the glob also names a folder `game1` next to it,
+whose code would load): the integration is skipped with one message so your other plugins keep
 working (`./pyt nvim doctor` names the character; move the project to a plain path).
 
 ## What you get

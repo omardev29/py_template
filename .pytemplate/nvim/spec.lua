@@ -10,23 +10,26 @@ return function(root)
   if not vim.uv.fs_stat(root .. "/pytemplate.toml") or not vim.uv.fs_stat(root .. "/.pytemplate/nvim/lua/pytemplate/init.lua") then
     return {}
   end
-  -- Neovim reads a 'runtimepath' entry as a file glob. On POSIX [ ] { } are wildcards, a comma
+  -- Neovim reads a 'runtimepath' entry as a file glob. On POSIX * ? [ ] { } are wildcards, a comma
   -- separates entries, a backslash escapes, a backtick is command substitution, a single quote
-  -- makes it go through 'shell' and a $NAME is expanded. On Windows only [ is a wildcard and no
-  -- entry goes through 'shell' (a ' { } ] or backtick is a plain character there: C:\Users\O'Brien),
-  -- but a comma still separates and a $NAME is still expanded (cmd_nvim.RTP_UNSAFE_WINDOWS). The
-  -- plugin cannot be put on the runtimepath from such a path (require fails, or E79), which would
-  -- also break the LazyVim plugins whose opts call into it. Skip the integration with one message
-  -- so those plugins keep working; the fix is to move the project to a plain path (./pyt nvim
-  -- doctor and trust name the character too).
+  -- makes it go through 'shell' and a $NAME is expanded. A wildcard that matches another folder
+  -- is the worst case: from `game?` the plugin's entry also named the sibling `game1`, which sorts
+  -- first, and require ran that folder's code, which nobody trusted. On Windows the wildcards are
+  -- * ? [ and no entry goes through 'shell' (a ' { } ] or backtick is a plain character there:
+  -- C:\Users\O'Brien), but a comma still separates and a $NAME is still expanded
+  -- (cmd_nvim.RTP_UNSAFE_WINDOWS). The plugin cannot be put on the runtimepath from such a path
+  -- (require fails or loads another folder's code, or E79), which would also break the LazyVim
+  -- plugins whose opts call into it. Skip the integration with one message so those plugins keep
+  -- working; the fix is to move the project to a plain path (./pyt nvim doctor and trust name the
+  -- character too).
   local windows = vim.fn.has("win32") == 1
-  local bad = root:find(windows and "[%[,$]" or "[%[%]{},\\`'$]")
+  local bad = root:find(windows and "[%[%*%?,$]" or "[%[%]{}%*%?,\\`'$]")
   if bad then
     vim.schedule(function()
       vim.notify(
         "pytemplate: the ./pyt integration is off: the project path holds `" .. root:sub(bad, bad)
           .. "`, which Neovim cannot put on 'runtimepath'. Move the project to a path without "
-          .. (windows and "[ , or $" or "[ ] { } , \\ ` ' or $") .. ".",
+          .. (windows and "[ * ? , or $" or "[ ] { } * ? , \\ ` ' or $") .. ".",
         vim.log.levels.WARN
       )
     end)

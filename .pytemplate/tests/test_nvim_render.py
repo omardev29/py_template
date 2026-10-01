@@ -919,7 +919,7 @@ vim.cmd(ok and "qa!" or "cq!")
 
 
 def test_lazy_lua_refuses_a_runtimepath_unsafe_root(tmp_path: Path) -> None:
-    r"""A `[ ] { } , \ ` ' $` in the project path is a 'runtimepath' glob: the plugin cannot load
+    r"""A `[ ] { } * ? , \ ` ' $` in the project path is a 'runtimepath' glob: the plugin cannot load
     there (require fails, E79), so spec.lua returns {} with one notify and the LazyVim plugins whose
     opts call into it keep working. cmd_nvim.rtp_unsafe_char names the character for doctor/trust."""
     root = tmp_path / "q[x]z"
@@ -930,6 +930,53 @@ def test_lazy_lua_refuses_a_runtimepath_unsafe_root(tmp_path: Path) -> None:
     assert cmd_nvim.rtp_unsafe_char(Path("/tmp/a,b")) == ","
     assert cmd_nvim.rtp_unsafe_char(Path("/tmp/a`b"), windows=False) == "`"
     assert cmd_nvim.rtp_unsafe_char(Path("/tmp/plain")) is None
+
+
+# What lazy.nvim does with the local spec: each plugin's dir goes on the runtimepath, and the plugin
+# loads by require, through Neovim's runtime search path (the rtp entries, each read as a glob).
+LAZY_LUA_GLOB_CHECK = r"""
+local root = vim.fs.normalize(vim.env.PT_UNSAFE_ROOT)
+package.loaded["lazy.core.config"] = { spec = { modules = {} } }
+vim.uv.chdir(root)
+local notified
+vim.notify = function(msg) notified = msg end
+local ok, spec = pcall(loadfile(root .. "/.lazy.lua"))
+for _, s in ipairs(ok and type(spec) == "table" and spec or {}) do
+  if s.dir then vim.opt.rtp:prepend(s.dir) end
+end
+_G.PT_SIBLING_RAN = nil
+local loaded = pcall(require, "pytemplate")
+vim.wait(1000, function() return notified ~= nil end, 10)
+io.stdout:write("PTGLOB" .. vim.json.encode({
+  ok = ok, entries = ok and type(spec) == "table" and #spec or -1, loaded = loaded,
+  ran = _G.PT_SIBLING_RAN == true, notified = notified or vim.NIL,
+}) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows forbids * and ? in a file name")
+@pytest.mark.parametrize(("name", "sibling"), [("g?", "g1"), ("my*game", "my game")])
+def test_a_project_path_neovim_globs_never_loads_a_siblings_plugin(tmp_path: Path, name: str, sibling: str) -> None:
+    """Neovim reads `*` and `?` in a 'runtimepath' entry as wildcards too (path.c's
+    path_has_exp_wildcard: `*?[{` on POSIX): with the project in `g?` the plugin's entry
+    `g?/.pytemplate/nvim` matched the sibling `g1/.pytemplate/nvim`, which sorts first, and
+    require("pytemplate") ran that folder's code, which nobody trusted (only g?/.lazy.lua was).
+    spec.lua refuses such a root like `[`: nothing goes on the runtimepath, one notify names the
+    character, and doctor and trust name it too."""
+    root = tmp_path / "q" / name
+    _lay_out_project(root)
+    plugin = tmp_path / "q" / sibling / ".pytemplate" / "nvim" / "lua" / "pytemplate"
+    plugin.mkdir(parents=True)
+    (plugin / "init.lua").write_text("_G.PT_SIBLING_RAN = true\nreturn { setup = function() end }\n", encoding="utf-8")
+    r = _headless_lua(tmp_path, LAZY_LUA_GLOB_CHECK, ROOT, {"PT_UNSAFE_ROOT": root.as_posix()})
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTGLOB")), None)
+    assert line is not None and r.returncode == 0, r.stdout + r.stderr
+    got = json.loads(line.removeprefix("PTGLOB"))
+    assert got["ok"] and not got["ran"], f"the sibling's untrusted plugin code ran: {got}"
+    bad = cmd_nvim.rtp_unsafe_char(PurePosixPath(root.as_posix()), windows=False)
+    assert bad is not None and got["entries"] == 0 and not got["loaded"], got
+    assert isinstance(got["notified"], str) and f"holds `{bad}`" in got["notified"], got
 
 
 # spec.lua's verdict on each root, with has('win32') answering as `windows` says
@@ -959,14 +1006,15 @@ vim.cmd("qa!")
 
 
 def test_the_runtimepath_rule_is_the_same_in_spec_lua_and_cmd_nvim(tmp_path: Path) -> None:
-    r"""On Windows Neovim 0.12.5 globs only `[` in a 'runtimepath' entry and never hands one to
+    r"""On Windows Neovim 0.12.5 globs only `* ? [` in a 'runtimepath' entry and never hands one to
     'shell' (SPECIAL_WILDCHAR is POSIX only): a `'`, `{ }`, `]` or a backtick is a plain character
     there, and spec.lua refused every project below C:\Users\O'Brien. A comma, `[` and `$` still
-    break it; POSIX keeps its whole set. spec.lua (the loader) and cmd_nvim (doctor, trust) must
-    give the same verdict, name the same character and list the same set."""
+    break it; POSIX keeps its whole set, `*` and `?` included (they were missing, and a sibling
+    folder the glob matched loaded its plugin code). spec.lua (the loader) and cmd_nvim (doctor,
+    trust) must give the same verdict, name the same character and list the same set."""
     names = ["O'Brien", "a{b}c", "a]b", "a`b", "q[x]z", "a,b", "a$b", "plain"]
     if sys.platform != "win32":
-        names.append("a\\b")  # a name character off Windows only
+        names += ["a\\b", "a?b", "a*b"]  # name characters off Windows only
     cases = []
     for name in names:
         root = tmp_path / "roots" / name / "proj"
@@ -991,8 +1039,10 @@ def test_the_runtimepath_rule_is_the_same_in_spec_lua_and_cmd_nvim(tmp_path: Pat
     assert cmd_nvim.rtp_unsafe_char(PureWindowsPath(r"C:\x\a`b"), windows=True) is None
     for text, char in ((r"C:\a,b", ","), (r"C:\q[x]z", "["), (r"C:\$HOME\p", "$")):
         assert cmd_nvim.rtp_unsafe_char(PureWindowsPath(text), windows=True) == char
-    assert cmd_nvim.rtp_unsafe_text(windows=True) == "[ , or $"
-    assert cmd_nvim.rtp_unsafe_text(windows=False) == "[ ] { } , \\ ` ' or $"
+    for text, char in (("/home/u/game?", "?"), ("/home/u/my*game", "*")):
+        assert cmd_nvim.rtp_unsafe_char(PurePosixPath(text), windows=False) == char
+    assert cmd_nvim.rtp_unsafe_text(windows=True) == "[ * ? , or $"
+    assert cmd_nvim.rtp_unsafe_text(windows=False) == "[ ] { } * ? , \\ ` ' or $"
 
 
 def test_mypy_linter_follows_a_venv_created_later(tmp_path: Path) -> None:

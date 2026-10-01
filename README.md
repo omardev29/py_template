@@ -1503,8 +1503,9 @@ only on failure. flet: `<leader>jd` starts `dev` (hot reload) as a background ta
   Moving the folder asks again.
 - A warning about the order of the LazyVim extras: `./pyt nvim extras` fixes it for good.
 - Nothing loads and one message names a character in the project path: Neovim cannot put a path
-  with `[ ] { } , \ ' $` or a backtick on its runtimepath (on Windows only `[ , $`: a folder
-  such as `C:\Users\O'Brien` is fine there), so the integration is off there.
+  with `[ ] { } * ? , \ ' $` or a backtick on its runtimepath (on Windows only `[ * ? , $`: a
+  folder such as `C:\Users\O'Brien` is fine there), so the integration is off there: Neovim reads
+  them as wildcards, and from `game?` it would load the plugin code of a folder `game1` next to it.
   Move the project to a plain path (`./pyt nvim doctor` names the character).
 - No `.venv` yet (`:checkhealth pytemplate` warns): run `./pyt setup` and restart Neovim.
 - The language server is chosen when Neovim starts: restart it after changing
@@ -1857,7 +1858,8 @@ regenerate the root (CLAUDE.md, section 11).
   get git repositories of their own, even when `--dir` is inside one of yours; a `--dir` (or an
   `--e2e --base`) whose parent path holds `:` (`;` on Windows), which git cannot keep apart
   from a repository around it, is refused, and so is a `--dir` whose path holds a character
-  Neovim cannot put on its runtimepath (`[ ] { } , \ ' $` or a backtick; on Windows `[ , $`),
+  Neovim cannot put on its runtimepath (`[ ] { } * ? , \ ' $` or a backtick; on Windows
+  `[ * ? , $`),
   where the `./pyt` integration cannot load, as `./pyt nvim trust` says of such a project.
   `--fresh` reinstalls that LazyVim; `--require` fails instead of skipping when nvim or git is
   missing.

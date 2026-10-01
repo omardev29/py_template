@@ -3740,11 +3740,15 @@ Files:
   but no `.lazy.lua` file of its own, is never `root`, so its code and its `.venv` tools never run
   without a trust of its own; that guard lives in the loader, since a `spec.lua` dofile'd from the
   wrong root runs its own code first). It also returns `{}`, with one `vim.notify`, when `root` holds a character Neovim
-  reads as a `runtimepath` glob (`[ ] { } , \ ` `'` or a `$` it expands; on Windows only `[ , $`:
-  Neovim 0.12.5 globs only `[` there and never hands an entry to 'shell', and every project below
-  `C:\Users\O'Brien` was refused): the plugin cannot go on the runtimepath from such a path
-  (require fails, E79), so the whole integration is skipped and the other LazyVim plugins whose
-  `opts` delegate to it keep working. `cmd_nvim.rtp_unsafe_char` names the same characters
+  reads as a `runtimepath` glob (`[ ] { } * ? , \ ` `'` or a `$` it expands; on Windows only
+  `[ * ? , $`: Neovim 0.12.5 globs only `* ? [` there, `*` and `?` cannot be in a name, and it
+  never hands an entry to 'shell', and every project below `C:\Users\O'Brien` was refused): the
+  plugin cannot go on the runtimepath from such a path (require fails, E79), or a wildcard names
+  another folder too (`*` and `?` were missing: from `game?` the entry also matched the sibling
+  `game1`, which sorts first, and require ran its untrusted code,
+  `test_a_project_path_neovim_globs_never_loads_a_siblings_plugin`), so the whole integration is
+  skipped and the other LazyVim plugins whose `opts` delegate to it keep working.
+  `cmd_nvim.rtp_unsafe_char` names the same characters
   (`RTP_UNSAFE`, `RTP_UNSAFE_WINDOWS`), and `nvim doctor` (a problem line), `nvim trust`
   (refused) and `selftest --nvim` (a `--dir` refused, `nvimtest._prepare_dir`, 13.1) report them
   (`test_the_runtimepath_rule_is_the_same_in_spec_lua_and_cmd_nvim`: both
@@ -6207,17 +6211,22 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `test_lazy_lua_bytes_are_pinned`, `test_gitattributes_keeps_lazy_lua_lf`,
   `test_lazy_lua_never_runs_a_nested_folders_spec`,
   `test_cmd_nvim.py::test_trust_macos_paths_ignore_case_and_unicode_form`. Goes: never.
-- **Neovim reads a 'runtimepath' entry as a file glob** (LIMITATION): `[ ] { }` are wildcards, a
-  comma separates entries, a backslash escapes, a backtick is command substitution, a single quote
-  sends it through 'shell' and a `$NAME` is expanded (vim.secure expands it too), so in a project
-  folder whose path holds one of these the plugin cannot be put on the runtimepath (require fails,
-  E79), and because the optional plugins' `opts` delegate to it their config broke too (no LSP, no
-  lint, no tasks). On Windows (0.12.5: path.c's `path_has_exp_wildcard` is `*?[` there, and the
-  `SPECIAL_WILDCHAR` that sends an entry to 'shell' is defined in `os/unix_defs.h` only) just `[`,
-  the comma and `$NAME` do. Up: none found. Fix: `spec.lua` refuses such a root (returns `{}` with
-  one `vim.notify`, so the other plugins keep working), with the Windows set there;
+- **Neovim reads a 'runtimepath' entry as a file glob** (LIMITATION): `* ? [ ] { }` are wildcards
+  (0.12.5: path.c's `path_has_exp_wildcard` is `*?[{` on POSIX), a comma separates entries, a
+  backslash escapes, a backtick is command substitution, a single quote sends it through 'shell'
+  and a `$NAME` is expanded (vim.secure expands it too), so in a project folder whose path holds
+  one of these the plugin cannot be put on the runtimepath (require fails, E79), and because the
+  optional plugins' `opts` delegate to it their config broke too (no LSP, no lint, no tasks); a
+  wildcard that matches another folder is worse: from `game?` (or `my*game`) the plugin's entry
+  also named the sibling `game1` (`my game`), which sorts first, and require ran that folder's
+  code, which nobody trusted. On Windows (0.12.5: `path_has_exp_wildcard` is `*?[` there, `*` and
+  `?` cannot be in a name, and the `SPECIAL_WILDCHAR` that sends an entry to 'shell' is defined in
+  `os/unix_defs.h` only) just `[`, the comma and `$NAME` do. A backslash cannot escape them: lazy.nvim's
+  `Util.norm` turns it into `/`. Up: none found. Fix: `spec.lua` refuses such a root (returns `{}`
+  with one `vim.notify`, so the other plugins keep working), with the Windows set there;
   `cmd_nvim.rtp_unsafe_char` names the character and `nvim doctor`/`nvim trust` report it (12.2).
   Test: `test_nvim_render.py::test_lazy_lua_refuses_a_runtimepath_unsafe_root`,
+  `test_a_project_path_neovim_globs_never_loads_a_siblings_plugin`,
   `test_the_runtimepath_rule_is_the_same_in_spec_lua_and_cmd_nvim`. Goes: never.
 - **`vim.secure.trust`** (LIMITATION): the `path` form exists from 0.12 only (0.11 needs a
   buffer), and it writes its database with `io.open(<state>/trust, "w")`, which fails while the
