@@ -3895,7 +3895,10 @@ short temp tree and unset `NVIM_APPNAME`.
   checks what every project has (`[project] name`), the skeleton's docstring only while it is
   still there (7 tests failed in every real project;
   `test_paths.test_the_tests_that_copy_the_project_pass_in_one_with_its_own_code` runs them in a
-  copy with code of its own). Its `[tasks]` are its user's too: a test runs only tasks its own
+  copy with code of its own), and files of its own anywhere: a test that writes into a copy of
+  the project takes a name the copy does not hold (`test_install._free_name`: a docs/ folder or a
+  tracked notes.txt failed two install tests;
+  `test_paths.test_the_install_tests_pass_in_a_project_that_has_the_names_they_write`). Its `[tasks]` are its user's too: a test runs only tasks its own
   fixture defines (`test_cli_core.tasks_project`: it ran the preset's deps-only `ci`, which a
   project may rename, delete or give a cmd;
   `test_paths.test_the_task_tests_pass_in_a_project_whose_ci_task_is_its_own`), and a task of

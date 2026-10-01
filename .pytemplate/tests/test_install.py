@@ -185,6 +185,13 @@ def _tracked(root: Path) -> set[str]:
     return {p for p in git(root, "-c", "core.quotePath=false", "ls-files").splitlines() if p}
 
 
+def _free_name(clone: Path, stem: str, suffix: str = "") -> str:
+    """A name the clone holds nothing at: the clone is the project the suite runs in, its files
+    included. Fixed names failed ./pyt selftest in a project that has them: docs/ (mkdir said it
+    exists) and a tracked notes.txt (written over, it was no untracked file)."""
+    return next(name for i in range(1000) if not os.path.lexists(clone / (name := f"{stem}{i or ''}{suffix}")))
+
+
 def _record(snapshot: Path) -> dict[str, Any]:
     data: dict[str, Any] = json.loads((snapshot / cmd_install.RECORD).read_text(encoding="utf-8"))
     return data
@@ -205,10 +212,11 @@ def _leftovers(box: Box) -> list[str]:
 @needs_git
 @needs_uv
 def test_install_copies_the_tracked_template_and_writes_the_launchers(clone: Path, box: Box) -> None:
-    (clone / "notes.txt").write_text("untracked\n", encoding="utf-8")
+    notes = _free_name(clone, "notes", ".txt")
+    (clone / notes).write_text("untracked\n", encoding="utf-8")
     r = pyt(clone, box, "install")
     assert r.returncode == 0, r.stderr
-    assert "pyt is installed" in r.stderr and "not copied (not tracked by git): notes.txt" in r.stderr, r.stderr
+    assert "pyt is installed" in r.stderr and f"not copied (not tracked by git): {notes}" in r.stderr, r.stderr
     snapshot = box.snapshot
     if not IS_WINDOWS:
         assert snapshot == box.data / "pytemplate" / "template"  # an absolute XDG_DATA_HOME
@@ -240,35 +248,37 @@ def test_install_copies_the_tracked_template_and_writes_the_launchers(clone: Pat
 def test_install_keeps_tracked_links_as_links(clone: Path, box: Box) -> None:
     """A symbolic link git tracks is copied as the link (its target text), as `new` copies it:
     never the file it points to, and a dangling one too."""
-    (clone / "docs").mkdir()
-    (clone / "docs" / "manual.md").symlink_to(Path("..") / "README.md")
-    (clone / "docs" / "gone.md").symlink_to("missing.md")
-    git(clone, "add", "docs")
+    docs = _free_name(clone, "docs")
+    (clone / docs).mkdir()
+    (clone / docs / "manual.md").symlink_to(Path("..") / "README.md")
+    (clone / docs / "gone.md").symlink_to("missing.md")
+    git(clone, "add", docs)
     git(clone, "commit", "-q", "-m", "links")
     assert pyt(clone, box, "install").returncode == 0
     for name, target in (("manual.md", "../README.md"), ("gone.md", "missing.md")):
-        link = box.snapshot / "docs" / name
+        link = box.snapshot / docs / name
         assert link.is_symlink() and os.readlink(link) == target, name
 
 
 @needs_git
 @needs_uv
 def test_install_again_swaps_the_whole_copy(clone: Path, box: Box) -> None:
-    (clone / "extra.txt").write_text("one\n", encoding="utf-8")
-    git(clone, "add", "extra.txt")
+    extra, stray = _free_name(clone, "extra", ".txt"), _free_name(clone, "stray", ".txt")
+    (clone / extra).write_text("one\n", encoding="utf-8")
+    git(clone, "add", extra)
     git(clone, "commit", "-q", "-m", "extra")
     assert pyt(clone, box, "install").returncode == 0
     first = _record(box.snapshot)
-    assert (box.snapshot / "extra.txt").is_file()
-    (box.snapshot / "stray.txt").write_text("written by hand\n", encoding="utf-8")
-    git(clone, "rm", "-q", "extra.txt")
+    assert (box.snapshot / extra).is_file()
+    (box.snapshot / stray).write_text("written by hand\n", encoding="utf-8")
+    git(clone, "rm", "-q", extra)
     git(clone, "commit", "-q", "-m", "no extra")
     (clone / "README.md").write_bytes(b"# py_template\n\nChanged, not committed.\n")
     r = pyt(clone, box, "install")
     assert r.returncode == 0, r.stderr
     assert f"it replaces the one of commit {first['commit'][:7]}" in r.stderr, r.stderr
     got = _files(box.snapshot)
-    assert "extra.txt" not in got and "stray.txt" not in got  # the old copy went whole
+    assert extra not in got and stray not in got  # the old copy went whole
     assert got["README.md"] == b"# py_template\n\nChanged, not committed.\n"
     record = _record(box.snapshot)
     assert record["commit"] == git(clone, "rev-parse", "HEAD").strip() != first["commit"]
@@ -871,8 +881,9 @@ def test_the_installed_template_knows_how_old_it_is(clone: Path, box: Box) -> No
         return str(r.stdout.strip())
 
     assert age() == "''"
-    (clone / "extra.txt").write_text("x\n", encoding="utf-8")
-    git(clone, "add", "extra.txt")
+    extra = _free_name(clone, "extra", ".txt")
+    (clone / extra).write_text("x\n", encoding="utf-8")
+    git(clone, "add", extra)
     git(clone, "commit", "-q", "-m", "newer")
     assert "is older than this clone" in age()
 

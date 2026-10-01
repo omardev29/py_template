@@ -693,6 +693,30 @@ def test_the_install_tests_pass_in_a_project_with_install_and_uninstall_tasks(tm
 
 @needs_uv
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_install_tests_pass_in_a_project_that_has_the_names_they_write(tmp_path: Path) -> None:
+    """test_install's clones are copies of the project the suite runs in, its own files included.
+    Tests that wrote docs/, notes.txt and extra.txt there failed ./pyt selftest in a project that
+    has them: mkdir said docs/ exists, a tracked notes.txt written over was no untracked file, and
+    an extra.txt with the bytes the test wrote left nothing to commit. They run here in a copy that
+    holds every one of those names."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    for rel in ("docs/guide.md", "notes.txt", "extra.txt", "stray.txt"):
+        (own / rel).parent.mkdir(parents=True, exist_ok=True)
+        (own / rel).write_bytes(b"one\n")
+    nodes = [
+        "test_install.py::test_install_copies_the_tracked_template_and_writes_the_launchers",
+        "test_install.py::test_install_keeps_tracked_links_as_links",  # POSIX only: skipped on Windows
+        "test_install.py::test_install_again_swaps_the_whole_copy",
+        "test_install.py::test_the_installed_template_knows_how_old_it_is",
+    ]
+    r = _run_tests_in(own, tmp_path, nodes)
+    passed = "3 passed, 1 skipped" if sys.platform == "win32" else "4 passed"
+    assert r.returncode == 0 and passed in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]
+
+
+@needs_uv
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 def test_the_real_apply_test_passes_in_a_project_without_the_git_hook(tmp_path: Path) -> None:
     """[hooks] pre_commit = false is documented (README: apply then installs no hook).
     test_real_apply_after_a_hand_edited_name ran apply in a copy of the project, its
