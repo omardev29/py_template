@@ -5277,9 +5277,11 @@ CPython and its standard library:
   uv has it). Goes: never (update it per Python release).
 - **`shutil.rmtree` error hooks** (LIMITATION): `onerror` is deprecated from 3.12 and `onexc`
   does not exist in 3.11, and a read-only file (git objects on Windows) needs a chmod and a
-  retry. Fix: the version switch in `cmd_nvim.remove_tree`, `presets._remove`, `e2e.rmtree`;
+  retry, never through a link (rmtree refuses one through the hook, and a chmod there changed
+  the folder it names: `cmd_nvim.remove_tree` and `e2e.rmtree` unlink a link first). Fix: the
+  version switch in `cmd_nvim.remove_tree`, `presets._remove`, `e2e.rmtree`;
   `cmd_env._remove` retries after `cmd_env._make_writable` (7). Test:
-  `test_cmd_nvim.py::test_remove_tree_read_only`,
+  `test_cmd_nvim.py::test_remove_tree_read_only`, `test_remove_tree_removes_a_link_as_a_link`,
   `test_presets.py::test_remove_deletes_read_only_entries`,
   `test_envs_core.py::test_clean_retries_read_only_contents`. Goes: the switch once the runner
   needs 3.12; the retry never.

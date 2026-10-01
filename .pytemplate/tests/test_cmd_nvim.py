@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -370,6 +371,26 @@ def test_remove_tree_read_only(tmp_path: Path) -> None:
     cmd_nvim.remove_tree(tmp_path / "repo")
     assert not (tmp_path / "repo").exists()
     cmd_nvim.remove_tree(tmp_path / "repo")  # missing: no error
+
+
+def test_remove_tree_removes_a_link_as_a_link(tmp_path: Path) -> None:
+    """A subfolder of selftest --nvim's --dir that is a link (moved to another disk): rmtree refused
+    it, the retry chmodded the folder it names to 0o600 through it and returned, the link left
+    (A10-07). A link goes as a link; the folder it names keeps its mode and files."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "f").write_text("kept\n", encoding="utf-8")
+    mode = stat.S_IMODE(real.stat().st_mode)
+    link, dangling = tmp_path / "link", tmp_path / "dangling"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+        dangling.symlink_to(tmp_path / "gone", target_is_directory=True)
+    except OSError:
+        pytest.skip("this user may not make symbolic links (Windows without Developer Mode)")
+    cmd_nvim.remove_tree(link)
+    cmd_nvim.remove_tree(dangling)
+    assert not os.path.lexists(link) and not os.path.lexists(dangling)
+    assert (real / "f").read_text(encoding="utf-8") == "kept\n" and stat.S_IMODE(real.stat().st_mode) == mode
 
 
 # --- selftest --nvim harness ------------------------------------------------------------------------

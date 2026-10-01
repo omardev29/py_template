@@ -473,12 +473,22 @@ def short_extra(name: str) -> str:
 
 
 def remove_tree(path: Path) -> None:
-    """shutil.rmtree that also deletes read-only files (git objects on Windows)."""
+    """shutil.rmtree that also deletes read-only files (git objects on Windows). A symlink or a
+    junction goes as a link, never what it names, as e2e.rmtree: rmtree refuses a link, and the
+    retry chmodded the folder it names to 0o600 through it and returned, the link left (a
+    subfolder of selftest --nvim's --dir moved to another disk)."""
+    from .cmd_env import _is_link  # cmd_env imports this module: import it lazily
 
-    def retry(func: Callable[[str], object], name: str, *_: object) -> None:
+    def retry(func: Callable[[str], object], name: str, exc: object) -> None:
+        error = exc[1] if isinstance(exc, tuple) else exc  # onerror's exc_info (3.11), onexc's exception
+        if isinstance(error, BaseException) and os.path.islink(name):
+            raise error  # chmod follows a link
         os.chmod(name, stat.S_IWRITE | stat.S_IREAD)
         func(name)
 
+    if _is_link(path):
+        os.unlink(path)  # on Windows this also removes a directory symlink or a junction
+        return
     if not path.exists():
         return
     if sys.version_info >= (3, 12):
