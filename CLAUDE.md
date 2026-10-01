@@ -4256,7 +4256,9 @@ short temp tree and unset `NVIM_APPNAME`.
   mode --typing strict` (every preset ships `typing.relaxed = off`, which would leave the mypy
   linter untested), trust through the API, `Lazy! install` from the project, and
   `nvim --headless -c "doautocmd UIEnter" -c "luafile .pytemplate/nvim/tests/smoke.lua"` with
-  `PT_ROOT=<project>` (timeout 600 s). Every child runs in its own session: a timeout or Ctrl+C
+  `PT_ROOT=<project>` (timeout 600 s; `--timeout` above 0 and at most a day, `nvimtest.MAX_TIMEOUT`,
+  else exit 2 before anything runs: 0 killed every smoke run at once, after minutes of installs).
+  Every child runs in its own session: a timeout or Ctrl+C
   kills the whole tree (`nvimtest.kill_tree`: SIGTERM to the group, so Neovim can stop its
   jobstart jobs, then SIGKILL after 5 s; `taskkill /T` on Windows), and so do SIGTERM and SIGHUP
   (`e2e.termination_as_interrupt`, as for `--e2e`: they never reached a step's session, and its

@@ -702,9 +702,15 @@ def _parse_args(args: list[str]) -> argparse.Namespace:
     return parser.parse_args(args)
 
 
+MAX_TIMEOUT = 86400  # a day per smoke run: Windows waits take 32-bit milliseconds (as shells.MAX_TIMEOUT)
+
+
 def selftest(cfg: Config, args: list[str]) -> int:
     """selftest --nvim [PRESET,...] [--keep] [--fresh] [--require] [--timeout S] [--dir DIR]"""
     ns = _parse_args(args)
+    if not 0 < ns.timeout <= MAX_TIMEOUT:  # also nan and inf: a usage error before minutes of installs
+        # (0 or less killed every smoke run at once: each preset failed as "timed out after 0 s")
+        raise PytError(f"selftest --nvim --timeout: {ns.timeout:g} is not a number of seconds above 0 (at most {MAX_TIMEOUT})")
     names = [p.strip() for p in ns.presets.split(",") if p.strip()]
     unknown = [p for p in names if p not in presets.available()]
     if unknown or not names:

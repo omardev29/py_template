@@ -430,6 +430,17 @@ def test_nvim_unknown_preset_is_a_usage_error(nvim_run: dict[str, Any]) -> None:
     assert e.value.code == 2 and nvim_run["ran"] == []
 
 
+@pytest.mark.parametrize("value", ["0", "-5", "nan", "inf", "86401"])
+def test_nvim_timeout_that_is_no_number_of_seconds_is_a_usage_error(value: str, nvim_run: dict[str, Any]) -> None:
+    """--timeout 0 or below was taken: each smoke run was killed at once, every preset failed as
+    "timed out after 0 s" after minutes of installs, exit 1 (A10-09). nan, inf and over a day
+    (Windows waits take 32-bit milliseconds) are refused alike, before anything runs."""
+    with pytest.raises(PytError, match=r"selftest --nvim --timeout: .* is not a number of seconds above 0") as e:
+        nvimtest.selftest(make(), ["script", "--timeout", value, *nvim_run["args"]])
+    assert e.value.code == 2 and nvim_run["ran"] == []
+    assert nvimtest.selftest(make(), ["script", "--timeout", "0.5", *nvim_run["args"]]) == 0 and nvim_run["ran"] == ["script"]
+
+
 def test_nvim_base_that_cannot_be_installed_fails_the_suite(nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     """No network, a git failure, a timeout: exit 1 (a FAIL of the suite), never 2 (usage)."""
     monkeypatch.setattr(nvimtest, "prepare_base", PREPARE_BASE)
