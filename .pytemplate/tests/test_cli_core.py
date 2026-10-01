@@ -861,6 +861,22 @@ def test_find_program_never_takes_the_callers_folder_on_windows(windows_caller: 
     assert proc.find_program("git", path="") is None  # an empty PATH holds nothing, as for shutil.which
 
 
+def test_find_program_keeps_an_answer_that_names_no_folder_below_the_current_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only an answer in the current folder or below it (shutil.which's .\\git.bat, an empty or
+    relative PATH entry's) is searched again on Windows; a rooted one is PATH's own and stays,
+    such as the /usr/bin/xvfb-run tests give e2e on every OS."""
+    below = proc._below_the_current_folder
+    for found in (os.path.join(os.curdir, "git.bat"), "git.exe", os.path.join("bin", "git.exe")):
+        assert below(found), found
+    for found in ("/usr/bin/xvfb-run", "\\bin\\git.exe"):
+        assert not below(found), found
+    if sys.platform == "win32":  # drives exist only there
+        assert not below("C:\\x\\git.exe") and not below("\\\\server\\share\\git.exe") and below("C:bin\\git.exe")
+    monkeypatch.setattr(proc, "IS_WINDOWS", True)
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: "/usr/bin/xvfb-run")
+    assert proc.find_program("xvfb-run") == "/usr/bin/xvfb-run"
+
+
 def test_doctors_nvim_and_powershell_never_come_from_the_callers_folder_on_windows(windows_caller: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`pyt doctor` (global mode too) starts nvim (its Neovim step, cmd_nvim.which) and both
     PowerShells (the execution policies, shells._ps_policies): an nvim.cmd or pwsh.exe left in

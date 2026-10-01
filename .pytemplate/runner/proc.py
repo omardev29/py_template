@@ -148,15 +148,22 @@ def _has_folder(name: str) -> bool:
     return any(c in name for c in "\\/:")
 
 
+def _below_the_current_folder(found: str) -> bool:
+    """Whether a path shutil.which answered names a file of the current folder or below it: the
+    current folder itself (.\\git.BAT), or an empty, relative or drive-relative (C:bin) PATH
+    entry. A rooted one (\\bin, a drive's root or a share) does not."""
+    return not os.path.splitdrive(found)[1].startswith(("\\", "/"))
+
+
 def find_program(name: str, path: str | None = None) -> str | None:
     """Where the program `name` is on PATH (`path`, default this process's own PATH), as
-    shutil.which finds it, but on Windows never in the current folder: an answer there that is
-    no absolute path (the current folder, which it searches first, or an empty or relative PATH
-    entry, which name it too) is searched again with on_path, which skips them. Elsewhere
-    shutil.which's answer (a relative PATH entry is the user's own choice there, as for every
-    program they start)."""
+    shutil.which finds it, but on Windows never in the current folder: an answer there (the
+    current folder, which it searches first, or an empty or relative PATH entry, which name it
+    too) is searched again with on_path, which skips them, and the answer is then absolute.
+    Elsewhere shutil.which's answer (a relative PATH entry is the user's own choice there, as for
+    every program they start)."""
     found = shutil.which(name) if path is None else shutil.which(name, path=path)
-    if found is None or not IS_WINDOWS or _absolute(found) or _has_folder(name):
+    if found is None or not IS_WINDOWS or _has_folder(name) or not _below_the_current_folder(found):
         return found
     return on_path(name, os.environ.get("PATH", "") if path is None else path, os.environ.get("PATHEXT", ""))
 

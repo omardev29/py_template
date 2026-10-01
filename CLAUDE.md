@@ -6432,7 +6432,8 @@ Windows:
   in, with the caller's rights (every folder made under `C:\` is writable by any authenticated
   user by default). Up: cf. python/cpython#101283 (subprocess's own unqualified cmd.exe, fixed
   for `shell=True` only). Fix: every lookup goes through `proc.find_program` (shutil.which's
-  answer when it is an absolute path, else `proc.on_path`: PATH's absolute entries with PATHEXT),
+  answer, unless it names the current folder or a folder below it, `proc._below_the_current_folder`;
+  then `proc.on_path`: PATH's absolute entries with PATHEXT),
   and a bare argv[0] through `proc.program` (`proc.windows_program`: the system folders, then
   PATH; not found, exit 3), which `proc.run`, `hooks._run_bytes` and the harnesses'
   `e2e.run_logged` and `nvimtest._run_logged` apply; `proc.taskkill` for their tree kills (5.1,
