@@ -1576,6 +1576,30 @@ def test_mentions_outside_src_and_tests_are_reported(tmp_path: Path) -> None:
     assert 'source = ["alpha"]' in pyproject.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize(
+    ("preset", "old", "new", "left"),
+    [
+        ("flet", "my-flet", "my_flet", ["# the my-flet app"]),
+        ("script", "Alpha", "alpha", ["# the Alpha app"]),
+        ("flet", "my_flet", "My-Flet", []),  # the package keeps its name: no leftover there
+        ("flet", "alpha", "beta", ['source = ["alpha"]', "# the alpha app"]),
+    ],
+)
+def test_the_pyproject_lines_a_rename_writes_are_never_left_unchanged(tmp_path: Path, preset: str, old: str, new: str, left: list[str]) -> None:
+    """Renamed to its package's spelling (my-flet -> my_flet, Alpha -> alpha), the plan looked for
+    what is left of the old name in the NEW pyproject.toml, where the new name is the old package:
+    the [project] name and the preset values it had just written were listed as "left unchanged
+    ... (not changed; review them)", and so was a reference to the package, which keeps its
+    name. Only what still holds the old spelling is listed."""
+    _write_project(tmp_path, preset, old)
+    pyproject = tmp_path / "pyproject.toml"
+    extra = f'\n[tool.pt-cov]\nsource = ["{rename.package_of(old)}"]\n# the {old} app\n'
+    pyproject.write_text(pyproject.read_text(encoding="utf-8") + extra, encoding="utf-8")
+    planned = rename.plan(tmp_path, old, new)
+    assert planned.pyproject is not None and f'name = "{new}"' in planned.pyproject.new
+    assert [line for _, line in planned.pyproject.kept] == left
+
+
 def test_rename_accepts_a_pyproject_with_a_bom(tmp_path: Path) -> None:
     _write_project(tmp_path, "flet", "alpha")
     path = tmp_path / "pyproject.toml"

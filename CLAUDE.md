@@ -1519,7 +1519,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     either quote style, any indentation; a table it cannot edit stops the plan) and, in the
     preset block, the values the preset writes with the name (`rename._named_keys`: `{{name}}`
     or `{{pkg}}` in a preset.toml `pyproject`; flet's `org = "com.example"` stays, which for an
-    app named com became `beta.example`); mentions in other tables are reported. Read as bytes decoded `utf-8-sig`: its line
+    app named com became `beta.example`); mentions in other tables are reported, never one spelled
+    like the new name or its package (`_names_the_old_one`: renamed to its package's spelling,
+    my-flet -> my_flet, the lines just written were listed as left unchanged,
+    `test_rename.test_the_pyproject_lines_a_rename_writes_are_never_left_unchanged`). Read as bytes decoded `utf-8-sig`: its line
     endings stay (a CRLF checkout used to come back LF), the BOM is not written back.
   - A file of src/ or tests/ that never mentions the old name is searched once and left alone
     (`plan`, and `rewrite` itself; its line lists are made only for the lines it changes or

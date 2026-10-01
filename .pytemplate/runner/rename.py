@@ -1544,6 +1544,13 @@ def _named_keys() -> frozenset[tuple[str, ...]]:
     return frozenset(out)
 
 
+def _names_the_old_one(line: str, names: Names) -> bool:
+    """Whether `line` holds the old name or package in a spelling that is neither the new name nor
+    the new package (renamed to its package's spelling, the old package is the new one)."""
+    fresh = {names.new_name, names.new_pkg}
+    return any(m.group(0) not in fresh for p in (_pattern(names), _escaped_pattern(names)) for m in p.finditer(line))
+
+
 def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
     path = root / "pyproject.toml"
     if not path.is_file():
@@ -1575,11 +1582,14 @@ def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
         tomllib.loads(new)
     except config.TOML_ERRORS as e:  # an integer of 5000 digits, arrays nested a thousand deep: no TOMLDecodeError
         raise PytError(f"rename: the new pyproject.toml would not be valid TOML ({config.toml_error(e)}); nothing was changed") from None
-    # What is left (other tables: [tool.coverage] source = ["alpha"]...) is only reported
+    # What is left (other tables: [tool.coverage] source = ["alpha"]...) is only reported, unless
+    # it is spelled like the new name or its package: renamed to the package's spelling (my-flet ->
+    # my_flet, Alpha -> alpha), the [project] name and the preset values just written were listed
+    # as "left unchanged" (and so was a reference to the package, which keeps its name)
     rest = rewrite(new, names, only_pkg=True, toml=True)
     left = {n for n, _, _ in rest.changes} | {n for n, _ in rest.kept}
-    new_lines = new.split("\n")
-    kept = [(n, new_lines[n - 1].rstrip("\r")) for n in sorted(left)]
+    new_lines = [line.rstrip("\r") for line in new.split("\n")]
+    kept = [(n, new_lines[n - 1]) for n in sorted(left) if _names_the_old_one(new_lines[n - 1], names)]
     detail = f'[project] name = "{names.new_name}"' + (f" and {count} in the preset block" if count else "")
     return TextEdit("pyproject.toml", old, new, count, kept, detail)
 
