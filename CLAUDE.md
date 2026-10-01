@@ -6081,7 +6081,8 @@ VS Code, its extensions, pyright and basedpyright:
   files found."), said "0 errors" and `check` (and the checks of `build`) passed code with errors
   only basedpyright reports; under `bs\x` it stopped (exit 3). A root-relative config and file
   arguments fail the same way, so the editors' Pylance and basedpyright, which read the same
-  `pyrightconfig.json`, check only the files opened there (measured with the language server).
+  `pyrightconfig.json`, check only the files opened there (measured with basedpyright's
+  language server: "No source files found.", an opened file still gets its diagnostics).
   Up: none found. Fix: `cmd_dev.basedpyright_problem` (`PYRIGHT_UNSAFE`, read after the path's
   anchor) fails the check before basedpyright runs, and doctor names it, with the ways out:
   move the project, or `typing.editor = "pylance"` (8). Test:
