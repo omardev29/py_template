@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import ast
 import itertools
+import operator
 import re
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import TOML_ERRORS, Config, compiled_paths
-from .imports import PARSE_ERRORS, iter_runtime_nodes, module_name, parse, parse_error, type_checking
+from .imports import PARSE_ERRORS, module_name, parse, parse_error
 from .project import PYPROJECT, SRC
 
 # The class decorators that keep a class native, by FULL name, as mypyc (2.3.1) decides it:
@@ -71,6 +72,129 @@ def _decorator_name(node: ast.expr) -> str:
     return ".".join(reversed(parts))
 
 
+# --- what mypy reads as unreachable, which mypyc never compiles ---------------------------------
+
+# The comparisons mypy evaluates in a `sys.version_info` test (mypy/reachability.py)
+_COMPARE: dict[type[ast.cmpop], str] = {ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">="}
+_SWAPPED = {"==": "==", "!=": "!=", "<": ">", "<=": ">=", ">": "<", ">=": "<="}
+_OPERATORS: dict[str, Callable[[tuple[int, ...], tuple[int, ...]], bool]] = {
+    "==": operator.eq, "!=": operator.ne, "<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge,
+}  # fmt: skip
+
+
+def _int(node: ast.expr | None) -> int | None:
+    return node.value if isinstance(node, ast.Constant) and type(node.value) is int else None
+
+
+def _version_info_part(node: ast.expr) -> int | tuple[int | None, int | None] | None:
+    """mypy's contains_sys_version_info: `sys.version_info` ((None, None): all of it),
+    `sys.version_info[i]` (i) or `sys.version_info[lo:hi]` ((lo, hi)); None for anything else."""
+
+    def is_version_info(expr: ast.expr) -> bool:
+        return isinstance(expr, ast.Attribute) and expr.attr == "version_info" and isinstance(expr.value, ast.Name) and expr.value.id == "sys"
+
+    if is_version_info(node):
+        return (None, None)
+    if not (isinstance(node, ast.Subscript) and is_version_info(node.value)):
+        return None
+    index = node.slice
+    if not isinstance(index, ast.Slice):
+        return _int(index)
+    if index.step is not None and _int(index.step) != 1:
+        return None
+    bounds = [None if b is None else _int(b) for b in (index.lower, index.upper)]
+    if any(b is None and given is not None for b, given in zip(bounds, (index.lower, index.upper), strict=True)):
+        return None  # a bound that is no int literal
+    return (bounds[0], bounds[1])
+
+
+def _ints(node: ast.expr) -> int | tuple[int, ...] | None:
+    if _int(node) is not None:
+        return _int(node)
+    if isinstance(node, ast.Tuple):
+        items = [_int(x) for x in node.elts]
+        return tuple(i for i in items if i is not None) if all(i is not None for i in items) else None
+    return None
+
+
+def _version_value(test: ast.expr, version: tuple[int, int]) -> bool | None:
+    """mypy's value of a `sys.version_info` comparison on Python `version` (its
+    consider_sys_version_info): `sys.version_info[i] <op> int` (i 0 or 1),
+    `sys.version_info[:n] <op> tuple` and `sys.version_info <op> tuple`, either way round; None for
+    any other test (a chained comparison, a tuple longer than what it reads)."""
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
+        return None
+    op = _COMPARE.get(type(test.ops[0]))
+    if op is None:
+        return None
+    part, thing = _version_info_part(test.left), _ints(test.comparators[0])
+    if part is None or thing is None:
+        part, thing, op = _version_info_part(test.comparators[0]), _ints(test.left), _SWAPPED[op]
+    if isinstance(part, int) and isinstance(thing, int):
+        return _OPERATORS[op]((version[part],), (thing,)) if 0 <= part <= 1 else None
+    if isinstance(part, tuple) and isinstance(thing, tuple):
+        lo, hi = 0 if part[0] is None else part[0], 2 if part[1] is None else part[1]
+        value = version[lo:hi] if 0 <= lo < hi <= 2 else None
+        if value is not None and (len(value) == len(thing) or (len(value) > len(thing) and op not in ("==", "!="))):
+            return _OPERATORS[op](value, thing)
+    return None
+
+
+def _static_value(test: ast.expr, version: tuple[int, int], *, checking: bool) -> bool | None:
+    """The value mypy gives a test (its infer_condition_value), read three-valued: True, False, or
+    None when it cannot tell. A name or attribute TYPE_CHECKING or MYPY is True as mypy reads it
+    (`checking`) and False at runtime, PY3 and PY2 are True and False, a `sys.version_info`
+    comparison is read on `version`; then `not`, `and` (one False decides it) and `or` (one True
+    decides it). sys.platform stays None: mypyc compiles on every OS, and another one takes the
+    other branch. A chain of `not` is read in a loop (it takes no parentheses, and a few thousand
+    parse), and/or in recursion: a nested one takes parentheses, at most 200 levels of them."""
+    negate = False
+    while isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        test, negate = test.operand, not negate
+    value: bool | None
+    if isinstance(test, ast.BoolOp):
+        values = {_static_value(v, version, checking=checking) for v in test.values}
+        decides = isinstance(test.op, ast.Or)  # True decides an `or`, False an `and`
+        value = decides if decides in values else None if None in values else not decides
+    else:
+        name = test.id if isinstance(test, ast.Name) else test.attr if isinstance(test, ast.Attribute) else ""
+        if name in ("TYPE_CHECKING", "MYPY"):
+            value = checking
+        elif name in ("PY2", "PY3"):
+            value = name == "PY3"
+        else:
+            value = _version_value(test, version)
+    return None if value is None else value != negate
+
+
+def _reachable(stmt: ast.If, version: tuple[int, int], *, checking: bool) -> list[ast.stmt] | None:
+    """The block of `if` statement `stmt` that runs (`checking`: as mypy reads it, else at
+    runtime), or None when both may: what mypy reads as unreachable is never compiled."""
+    value = _static_value(stmt.test, version, checking=checking)
+    return None if value is None else (stmt.body if value else stmt.orelse)
+
+
+def _runtime_nodes(tree: ast.AST, version: tuple[int, int]) -> list[ast.AST]:
+    """Every node of the compiled module but those that never run in it: under `if
+    TYPE_CHECKING:` (its else, and the body of `if not TYPE_CHECKING:`, do run), and in the branch
+    of a sys.version_info test that is false on the Python mypyc compiles with, which mypy reads as
+    unreachable and mypyc skips (imports.iter_runtime_nodes, with the version)."""
+    out: list[ast.AST] = []
+    stack: list[ast.AST] = [tree]
+    while stack:
+        node = stack.pop()
+        out.append(node)
+        block = _reachable(node, version, checking=False) if isinstance(node, ast.If) else None
+        stack.extend(block if block is not None else ast.iter_child_nodes(node))
+    return out
+
+
+def compile_version(cfg: Config) -> tuple[int, int]:
+    """The Python mypyc compiles with: python.cpython (the tools environment)."""
+    major, _, minor = cfg.python.cpython.partition(".")
+    return int(major), int(minor)
+
+
 def _add_import(aliases: dict[str, str], node: ast.Import | ast.ImportFrom) -> None:
     """Record the names an absolute import binds: local name -> full dotted name.
 
@@ -94,11 +218,12 @@ def _add_import(aliases: dict[str, str], node: ast.Import | ast.ImportFrom) -> N
                 aliases[a.asname or a.name] = f"{node.module}.{a.name}"
 
 
-def _scope_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
+def _scope_statements(body: list[ast.stmt], version: tuple[int, int]) -> Iterator[ast.stmt]:
     """The statements that run in the scope of `body`, in source order: those in its if/try/with/
-    for/while/match blocks too, never those of a nested function or class body. Iterative: an
-    elif chain nests one `orelse` per branch, and 1000 of them (a generated dispatch table)
-    passed Python's recursion limit."""
+    for/while/match blocks too, never those of a nested function or class body, nor those of a
+    block mypy reads as unreachable on `version` (_reachable). Iterative: an elif chain nests one
+    `orelse` per branch, and 1000 of them (a generated dispatch table) passed Python's
+    recursion limit."""
     stack: list[Iterator[ast.stmt]] = [iter(body)]
     while stack:
         stmt = next(stack[-1], None)
@@ -108,12 +233,16 @@ def _scope_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
         yield stmt
         if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             continue
+        reachable = _reachable(stmt, version, checking=True) if isinstance(stmt, ast.If) else None
+        if reachable is not None:
+            stack.append(iter(reachable))
+            continue
         blocks = [inner for name in ("body", "orelse", "finalbody") if isinstance(inner := getattr(stmt, name, None), list)]
         blocks += [block.body for block in (*getattr(stmt, "handlers", ()), *getattr(stmt, "cases", ()))]
         stack.append(itertools.chain.from_iterable(blocks))
 
 
-def _import_aliases(tree: ast.Module) -> dict[ast.ClassDef, dict[str, str]]:
+def _import_aliases(tree: ast.Module, version: tuple[int, int]) -> dict[ast.ClassDef, dict[str, str]]:
     """Each class -> the names its decorators resolve through (what mypy resolves): the absolute
     imports of the scope the class statement runs in over those of the scopes around it. A
     function's own import never decides a module-level decorator."""
@@ -122,7 +251,7 @@ def _import_aliases(tree: ast.Module) -> dict[ast.ClassDef, dict[str, str]]:
     while stack:
         body, outer = stack.pop()
         aliases = dict(outer)
-        statements = list(_scope_statements(body))
+        statements = list(_scope_statements(body, version))
         for stmt in statements:
             if isinstance(stmt, ast.Import | ast.ImportFrom):
                 _add_import(aliases, stmt)
@@ -168,11 +297,11 @@ def _non_native_kind(node: ast.ClassDef, aliases: dict[str, str], local: dict[st
     return None
 
 
-def _non_native_kinds(tree: ast.Module, aliases: dict[ast.ClassDef, dict[str, str]]) -> dict[ast.ClassDef, str]:
+def _non_native_kinds(tree: ast.Module, aliases: dict[ast.ClassDef, dict[str, str]], version: tuple[int, int]) -> dict[ast.ClassDef, str]:
     """_non_native_kind of every class, the module's own classes read in source order."""
     kinds: dict[ast.ClassDef, str] = {}
     local: dict[str, str] = {}
-    for stmt in _scope_statements(tree.body):
+    for stmt in _scope_statements(tree.body, version):
         if isinstance(stmt, ast.ClassDef):
             kind = _non_native_kind(stmt, aliases.get(stmt, {}), local)
             if kind:
@@ -195,13 +324,15 @@ def _within(name: str, package: str) -> bool:
 BLOCK_KEYWORDS: dict[type[ast.stmt], str] = {ast.If: "if", ast.Try: "try", ast.TryStar: "try", ast.With: "with", ast.For: "for", ast.While: "while", ast.Match: "match"}
 
 
-def _block_classes(stmt: ast.stmt) -> Iterator[ast.ClassDef]:
+def _block_classes(stmt: ast.stmt, version: tuple[int, int]) -> Iterator[ast.ClassDef]:
     """The classes in the blocks of a module-level compound statement (BLOCK_KEYWORDS), and in
     theirs. mypyc compiles only the classes of the module's own statements (its build_type_map
     reads module.defs) and stops at any other with "Nested class definitions not supported": a
     version check, a `try:` fallback, an `if TYPE_CHECKING:` Protocol. Never one of a block mypy
-    reads as unreachable, which mypyc skips: the else of `if TYPE_CHECKING:`, the body of `if not
-    TYPE_CHECKING:`. A class in a function or class of such a block is the other rules'."""
+    reads as unreachable, which mypyc skips (_reachable): the else of `if TYPE_CHECKING:`, the
+    body of `if not TYPE_CHECKING:`, and the branch of a sys.version_info test that is false on
+    `version` (a backport class under `else:` of `if sys.version_info >= (3, 12):` compiled on
+    3.14 was a false error). A class in a function or class of such a block is the other rules'."""
     stack: list[ast.stmt] = [stmt]
     while stack:
         node = stack.pop()
@@ -210,9 +341,9 @@ def _block_classes(stmt: ast.stmt) -> Iterator[ast.ClassDef]:
             continue
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             continue
-        checking = type_checking(node.test) if isinstance(node, ast.If) else None
-        if isinstance(node, ast.If) and checking is not None:
-            blocks = [node.body if checking else node.orelse]
+        reachable = _reachable(node, version, checking=True) if isinstance(node, ast.If) else None
+        if reachable is not None:
+            blocks = [reachable]
         else:
             blocks = [inner for name in ("body", "orelse", "finalbody") if isinstance(inner := getattr(node, name, None), list)]
             blocks += [block.body for block in (*getattr(node, "handlers", ()), *getattr(node, "cases", ()))]
@@ -304,9 +435,10 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
     except OSError as e:  # another user's, locked by another program: ruff and mypy say so too
         return [Finding(path, 1, f"cannot read it: {e.strerror or e} (the mypyc rules skipped this file)")]
 
-    aliases = _import_aliases(tree)
-    kinds = _non_native_kinds(tree, aliases)
-    for node in iter_runtime_nodes(tree):
+    version = compile_version(cfg)
+    aliases = _import_aliases(tree, version)
+    kinds = _non_native_kinds(tree, aliases, version)
+    for node in _runtime_nodes(tree, version):
         if isinstance(node, ast.Import | ast.ImportFrom):
             if isinstance(node, ast.Import):
                 names = [a.name for a in node.names]
@@ -364,7 +496,7 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
         if isinstance(stmt, ast.If) and _is_main_check(stmt.test):
             add(stmt, "`if __name__ == \"__main__\"` never runs in a compiled module: put it in src/main.py")
         keyword = BLOCK_KEYWORDS.get(type(stmt))
-        for inner in _block_classes(stmt) if keyword else ():
+        for inner in _block_classes(stmt, version) if keyword else ():
             add(inner, f"class '{inner.name}' defined inside a module-level `{keyword}` block: mypyc does not support it; define it at module level")
         if not relative_file:
             continue

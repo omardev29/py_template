@@ -519,6 +519,76 @@ def test_lintc_flags_classes_mypyc_compiles_as_python_classes_for_their_metaclas
     assert [f.note for f in found] == ([] if kind is None else ["has the metaclass" not in kind])
 
 
+BACKPORT = """\
+import sys
+from enum import Enum
+from functools import total_ordering
+
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:
+
+    class StrEnum(str, Enum):
+        \"\"\"A backport of enum.StrEnum.\"\"\"
+
+if sys.version_info < (3, 11):
+
+    @total_ordering
+    class Old:
+        pass
+"""
+
+
+def test_lintc_skips_the_classes_mypy_reads_as_unreachable_on_python_cpython(tmp_path: Path) -> None:
+    """mypy reads a sys.version_info test for the Python mypyc compiles with (python.cpython), and
+    mypyc skips the branch it finds unreachable: a backport class there was a blocking "defined
+    inside a module-level `if` block" (and a slow-class error for its decorator), though mypyc
+    compiled the module and it ran."""
+    assert _lint(tmp_path, BACKPORT) == []
+    found = _lint(tmp_path, BACKPORT.replace(">= (3, 11)", ">= (3, 99)").replace("< (3, 11)", "< (3, 99)"))
+    assert sorted((f.line, f.message.split(":")[0]) for f in found) == [
+        (9, "class 'StrEnum' defined inside a module-level `if` block"),
+        (9, "class 'StrEnum' is an Enum (metaclass EnumMeta)"),
+        (15, "class 'Old' defined inside a module-level `if` block"),
+        (15, "class 'Old' uses @total_ordering"),
+    ]
+    # the version is python.cpython's
+    source = "import sys\n\nif sys.version_info >= (3, 14):\n    class New: ...\nelse:\n    class Older: ...\n"
+    assert [f.line for f in _lint(tmp_path, source, {"python": {"cpython": "3.14"}})] == [4]
+    assert [f.line for f in _lint(tmp_path, source, {"python": {"cpython": "3.13"}})] == [6]
+
+
+@pytest.mark.parametrize(
+    ("test", "checking", "runtime"),
+    [
+        ("sys.version_info >= (3, 11)", True, True),
+        ("sys.version_info[:2] < (3, 11)", False, False),
+        ("TYPE_CHECKING", True, False),
+        ("typing.TYPE_CHECKING", True, False),
+        ("not TYPE_CHECKING", False, True),
+        ("MYPY", True, False),
+        ("six.PY3", True, True),
+        ("PY2", False, False),
+        ("FLAG", None, None),
+        ("sys.platform == 'win32'", None, None),  # another OS compiles the other branch
+        ("FLAG and sys.version_info < (3, 0)", False, False),  # one False decides an and
+        ("FLAG or sys.version_info >= (3, 0)", True, True),  # one True decides an or
+        ("FLAG and sys.version_info >= (3, 0)", None, None),
+        ("not (sys.version_info >= (3, 11) and sys.version_info[0] == 3)", False, False),
+        ("TYPE_CHECKING and FLAG", None, False),
+        ("not (TYPE_CHECKING or FLAG)", False, None),
+        ("not " * 3001 + "TYPE_CHECKING", False, True),  # a chain that deep parses: read in a loop
+    ],
+)
+def test_lintc_reads_a_test_as_mypy_does(test: str, checking: bool | None, runtime: bool | None) -> None:
+    """The value mypy's infer_condition_value gives a test, as mypy reads it and at runtime
+    (None: it cannot tell, so both branches count); the real mypyc agrees on every class of
+    CLASSES_IN_BLOCKS (test_lintc_flags_every_class_the_locked_mypyc_rejects_as_nested)."""
+    node = ast.parse(test, mode="eval").body
+    assert lintc._static_value(node, (3, 14), checking=True) is checking
+    assert lintc._static_value(node, (3, 14), checking=False) is runtime
+
+
 @needs_venv
 def test_lintc_native_metaclasses_follow_the_locked_mypyc() -> None:
     """A mypy bump that changes what mypyc accepts as the metaclass of a native class, or drops
@@ -620,7 +690,11 @@ def test_lintc_flags_a_lone_module_next_to_a_leftover_folder(src_tree: Path) -> 
         # a class in a module-level block: mypyc compiles only the module's own statements
         ("try:\n    class A: ...\nexcept ImportError:\n    class B: ...\n", [], [(2, "class 'A' defined inside a module-level `try` block"), (4, "class 'B' defined inside")]),
         ("try:\n    pass\nexcept* ValueError:\n    pass\nelse:\n    class E: ...\nfinally:\n    class F: ...\n", [], [(6, "`try` block"), (8, "`try` block")]),
-        ("import sys\nif sys.version_info >= (3, 12):\n    class P: ...\nelif True:\n    class Q: ...\n", [], [(3, "class 'P' defined inside a module-level `if` block"), (5, "class 'Q'")]),
+        ("import sys\nif sys.argv:\n    class P: ...\nelif True:\n    class Q: ...\n", [], [(3, "class 'P' defined inside a module-level `if` block"), (5, "class 'Q'")]),
+        # a sys.version_info test mypy reads on python.cpython (3.14): its false branch is
+        # unreachable, and mypyc skips it (a backport class under the else was a false error)
+        ("import sys\nif sys.version_info >= (3, 12):\n    class P: ...\nelif True:\n    class Q: ...\n", [], [(3, "class 'P' defined inside a module-level `if` block")]),
+        ("import sys\nif sys.version_info < (3, 12):\n    class P: ...\nelse:\n    class Q: ...\n", [], [(5, "class 'Q' defined inside a module-level `if` block")]),
         ("for _ in ():\n    class F: ...\nwhile False:\n    class W: ...\n", [], [(2, "`for` block"), (4, "`while` block")]),
         ("import contextlib\nwith contextlib.nullcontext():\n    if True:\n        class C:\n            class D: ...\n", [], [(4, "class 'C' defined inside a module-level `with` block"), (5, "nested class 'D'")]),
         ("match 1:\n    case 1:\n        class M: ...\n", [], [(3, "class 'M' defined inside a module-level `match` block")]),
@@ -659,9 +733,78 @@ def test_lintc_reports_each_problem_once(tmp_path: Path, source: str, forbid: li
 
 CLASSES_IN_BLOCKS = """\
 import contextlib
+import sys
 from typing import TYPE_CHECKING
 
 FLAG = bool(len(__name__))
+PY3 = True
+PY2 = False
+MYPY = False
+
+# what mypy reads in a sys.version_info test on any Python 3.11 or newer: the false branch is
+# unreachable, and mypyc skips it
+if sys.version_info >= (3, 11):
+    class OnThisPython: ...
+else:
+    class OnOldPython: ...
+
+if sys.version_info < (3, 11):
+    class Backport: ...
+elif (3, 11) <= sys.version_info[:2] and FLAG:
+    class Maybe: ...
+else:
+    class Otherwise: ...
+
+if not sys.version_info[0] == 3:
+    class NeverOnPython3: ...
+
+if sys.version_info >= (4,) or FLAG:
+    class Either: ...
+
+if sys.version_info >= (3, 11, 1):  # longer than what mypy reads: both branches count
+    class LongTuple: ...
+else:
+    class LongTupleElse: ...
+
+if sys.version_info[1:2] >= (11,):
+    class MinorSlice: ...
+else:
+    class MinorSliceElse: ...
+
+# the rest of mypy's reading: `not` of anything, one False decides an `and` and one True an
+# `or` (whatever the other side), PY3 and PY2, MYPY like TYPE_CHECKING
+if not (sys.version_info >= (3, 11) and sys.version_info[0] == 3):
+    class NotBoth: ...
+
+if not not (sys.version_info < (3, 0)):
+    class NotNot: ...
+
+if FLAG and sys.version_info < (3, 0):
+    class AndFalse: ...
+
+if FLAG or sys.version_info >= (3, 0):
+    class OrTrue: ...
+else:
+    class OrTrueElse: ...
+
+if PY3:
+    class Py3: ...
+else:
+    class Py3Else: ...
+
+if PY2:
+    class Py2: ...
+
+if MYPY:
+    class Mypy: ...
+else:
+    class MypyElse: ...
+
+if TYPE_CHECKING and FLAG:
+    class CheckingAndFlag: ...
+
+if not (TYPE_CHECKING or FLAG):
+    class NotCheckingOrFlag: ...
 
 try:
     class InTry: ...

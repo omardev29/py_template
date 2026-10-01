@@ -788,7 +788,7 @@ header rules (with detector tests proving each rule fires).
 | `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `PytError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./pyt __init`; with rollback), `copy_template` (`_tracked_template`: git's tracked files, or every file of the installed template, `_installed`, never its `INSTALL_RECORD`; `_copy_entry` per entry, `_raise_copy_errors`; `rebase_local_sources`: a local library outside the project named from the copy), `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
 | `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`; `copy_writable`, `make_writable`, `remove_tree` for every scratch copy of the app), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
-| `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
+| `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`; what mypy reads as unreachable on `compile_version` (`_static_value`, `_reachable`, `_runtime_nodes`). |
 | `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps` (each once per invocation), cycle detection, `run_task`, `describe`, `list_tasks`. |
 | `cmd_env.py` | `setup` (= `cmd_apply.apply(command="setup")`), `doctor` (`_tools`, then `_project` in a project, which calls `cmd_apply.doctor`, or `_machine` outside one, then the steps of both modes: `cmd_nvim.doctor`), `sync`, `lock`, `add`, `remove`, `clean` (`_env_dirs`, `_remove`, `_is_link`); `ensure_lock`; `_fix_exec_bit`; `_c_compiler` (the one setuptools runs: `$CC`, else the `.venv` Python's sysconfig CC), `_msvc(platform)`, `_xcode_problem`, `_long_paths`. |
 | `cmd_apply.py` | `./pyt apply [--force]` / `setup [--force]` (section 5.8): `make_plan` (every refusal before the first write), `apply`, `_print_plan` (--dry-run), the `applied` record (`load_record`, `save_record`, `trusted_record`, `project_record`, `record_of`, `rename_record`), `state_file`, `applied_state` / `_infer_preset` (the record, else `_traced`: a preset's traces in pyproject.toml, `_block_options`/`_unformat`: the options the managed block was written with, `_marks`: extra tables) / `applied_name` / `_other_package` / `moved_by_hand` (`still_naming`), `dependency_changes` (`DepChanges`, `req_key`), `read_project`, `pending` + `doctor` (changes not applied yet), `reference_problems`, `unused_envs`, `_restore`. |
@@ -2641,7 +2641,15 @@ Formats:
     TYPE_CHECKING:`, which mypyc skips;
     `test_mypyc_core.test_lintc_flags_every_class_the_locked_mypyc_rejects_as_nested` compares
     the lines with the locked mypyc's); t-strings; `if __name__ == "__main__"` (either order) at
-    module level.
+    module level. Every rule skips what mypy reads as unreachable on the Python mypyc compiles
+    with, `python.cpython` (`lintc.compile_version`, `_static_value`: mypy's
+    `infer_condition_value`, read three-valued: TYPE_CHECKING and MYPY, PY3 and PY2,
+    `sys.version_info` comparisons, `not`, one False deciding an `and` and one True an `or`;
+    never `sys.platform`, another OS compiles the other branch): a backport class under the
+    `else:` of `if sys.version_info >= (3, 12):` was a blocking error though mypyc compiled the
+    module (`test_lintc_skips_the_classes_mypy_reads_as_unreachable_on_python_cpython`,
+    `test_lintc_reads_a_test_as_mypy_does`; CLASSES_IN_BLOCKS holds each case for the real
+    mypyc).
   - Module-level `__file__` ONLY when `compile.modules` is one top-level module file, the one
     Python imports (`relative_file_at_import` reads `config.compiled_paths`: a leftover folder
     of that name without `__init__.py` does not turn the rule off): mypyc (>= 1.20.2) sets the
