@@ -1430,7 +1430,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     before the opening quote) is never the name, and an occurrence right after an odd number of
     backslashes is an escape when the string is not raw and its first letter makes one (`\n`,
     `\x89`, `\a`...: skipped) and else (`r"\d"`, `r"src\alpha"`, an invalid `"\myapp"`) kept and
-    reported, never changed (a new name could turn it into an escape or another regex). The
+    reported, never changed (a new name could turn it into an escape or another regex). So is a
+    word in the braces of a `\N{...}` escape (`_named_escape`: a character's name, matched without
+    case, `"\N{greek small letter alpha}"`, an f-string's too: skipped; a raw string's, which the
+    re module reads alike, kept and reported): renamed, `"\N{bullet}"` stopped compiling and alpha
+    -> beta named another character without a word. The
     same for TOML basic and literal strings (`_toml_strings`: pytemplate.toml, pyproject.toml
     and the `.toml` files of src/ and tests/) and JSON strings (`_json_strings`, `DATA_STRINGS`:
     `.json` files, notebooks `.ipynb`, `.jsonc`, `.geojson`, `.jsonl`, `.ndjson`; and YAML's

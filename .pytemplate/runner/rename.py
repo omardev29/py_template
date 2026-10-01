@@ -908,6 +908,24 @@ def _escaped(text: str, start: int, floor: int, *, raw: bool, escapes: frozenset
     return "skip" if not raw and text[start] in escapes else "keep"
 
 
+# A \N{...} escape up to an occurrence inside its braces, and the rest of it after one: a
+# character's name (letters, digits, blanks and hyphens; matched without case: \N{bullet})
+_NAMED_ESCAPE_BEFORE = re.compile(r"(?<!\\)(\\+)N\{[A-Za-z0-9 \-]*\Z")
+_NAMED_ESCAPE_AFTER = re.compile(r"[A-Za-z0-9 \-]*\}")
+
+
+def _named_escape(text: str, start: int, end: int, floor: int, *, raw: bool, unicode: bool) -> Kind | None:
+    """An occurrence inside the braces of a \\N{...} escape of a string that starts at `floor`:
+    "skip" in a str literal that is not raw (an escape, `"\\N{greek small letter alpha}"`: renamed,
+    the file stopped compiling, "unknown Unicode character name", or named another character
+    without a word), else "keep": a raw string's (or an escaped backslash's) \\N{...}, which the re
+    module reads as the same escape, reported, never changed. None: not in one."""
+    m = _NAMED_ESCAPE_BEFORE.search(text, max(floor, start - 100), start)
+    if m is None or _NAMED_ESCAPE_AFTER.match(text, end) is None:
+        return None
+    return "skip" if unicode and not raw and len(m.group(1)) % 2 == 1 else "keep"
+
+
 def _after_an_escape(text: str, start: int, floor: int, *, raw: bool, escapes: frozenset[str]) -> bool:
     """Whether the occurrence at `start` (an _escaped_pattern match, in a string that starts at
     `floor`) follows an escape of one letter (`"Usage:\\nalpha"`): then it starts a word of the
@@ -978,6 +996,10 @@ def _classify(
     quote = _string_quote(text, region)
     if quote is not None and start < quote[0]:
         return "skip"  # the string prefix (f, r, b, rb...): syntax, never the name
+    if quote is not None:  # \N{greek small letter alpha}: a character's name (an f-string's too)
+        named = _named_escape(text, start, end, quote[0], raw="r" in quote[1], unicode="b" not in quote[1])
+        if named is not None:
+            return named
     in_field = region.fstring and _in_fstring_field(text, region, start)
     if escaped_before and (quote is None or in_field):
         return "skip"  # a comment or a field's code: no escape there

@@ -498,6 +498,14 @@ def test_fstring_fields_as_one_token() -> None:
         ("H", 'x = struct.unpack("<2 H", y)\n', 'x = struct.unpack("<2 H", y)\n', 1),
         ("I", 'x = "I am I"\n', 'x = "tool am tool"\n', 0),  # prose: the name
         ("i", 'x = "hi i"\n', 'x = "hi tool"\n', 0),  # no byte order first: the name
+        # a \N{...} escape names a character: never the name (renamed, the file stopped compiling)
+        ("bullet", 'x = "\\N{bullet} "\n', 'x = "\\N{bullet} "\n', 0),
+        ("alpha", 'x = "\\N{greek small letter alpha}"\n', 'x = "\\N{greek small letter alpha}"\n', 0),
+        ("alpha", 'x = f"\\N{greek small letter alpha}{y}"\n', 'x = f"\\N{greek small letter alpha}{y}"\n', 0),
+        ("alpha", 'x = "\\N{greek small letter alpha} alpha"\n', 'x = "\\N{greek small letter alpha} tool"\n', 0),  # prose after it
+        # ... which the re module reads in a raw string, and after an escaped backslash: reported
+        ("alpha", 'x = re.compile(r"\\N{greek small letter alpha}")\n', 'x = re.compile(r"\\N{greek small letter alpha}")\n', 1),
+        ("alpha", 'x = "\\\\N{greek small letter alpha}"\n', 'x = "\\\\N{greek small letter alpha}"\n', 1),
     ],
 )
 @pytest.mark.filterwarnings("ignore::SyntaxWarning", "ignore::DeprecationWarning")  # "\m" is an invalid escape on purpose (3.11: a DeprecationWarning)
@@ -505,6 +513,23 @@ def test_string_prefixes_and_escapes_are_never_the_name(old: str, text: str, exp
     out = rewrite(text, Names(old, "tool"), python=True)
     assert out.text == expected and len(out.kept) == kept
     compile(out.text, "t.py", "exec")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "char"),
+    [("bullet", "shooter", "\N{BULLET}"), ("alpha", "beta", "\N{GREEK SMALL LETTER ALPHA}")],
+)
+def test_a_character_name_escape_keeps_its_character(old: str, new: str, char: str) -> None:
+    """In `"\\N{bullet}"` the name in braces is a character's: renamed from bullet to shooter, the
+    file stopped compiling ("unknown Unicode character name"); from alpha to beta,
+    `"\\N{greek small letter alpha}"` became a beta, silently. Code around it still changes."""
+    text = f'import {old}.core\nMARK = "\\N{{{"greek small letter alpha" if old == "alpha" else old}}}"\nprint(MARK, {old}.core)\n'
+    out = rewrite(text, Names(old, new), python=True)
+    assert out.text == text.replace(f"import {old}.core", f"import {new}.core").replace(f"print(MARK, {old}.core)", f"print(MARK, {new}.core)")
+    assert out.count == 2 and out.kept == []
+    namespace: dict[str, Any] = {}
+    exec(compile(out.text.split("\n", 1)[1].split("\nprint")[0], "t.py", "exec"), namespace)  # the line that holds it
+    assert namespace["MARK"] == char
 
 
 @pytest.mark.parametrize(
