@@ -4313,7 +4313,10 @@ short temp tree and unset `NVIM_APPNAME`.
   - `build <b> --method <m> --no-check` (non-empty `dist/` output, size by `common.tree_bytes`)
     and smoke runs of the headless artifacts of console presets: exe, nuitka (`<app>.bin`
     too), the portable launcher after its folder was moved to `<base>/work` (put back
-    afterwards), `python -S <pyz>` with its cache redirected, the wheel in a scratch venv;
+    afterwards; on Windows `cmd /d /c` gets its path relative to that folder, never the base's
+    own: cmd split an absolute one at the `&` of a profile folder `C:\Users\R&D`, and dropped the
+    quotes around one with a blank and `( ) @ ^`, `test_e2e_run.test_the_portable_smoke_hands_cmd_no_path_of_the_base`),
+    `python -S <pyz>` with its cache redirected, the wheel in a scratch venv;
     the output must contain the preset's text and, for mypyc, the compiled marker. The pyz and
     wheel smokes take the interpreter of whichever `.venv`/`.venv-pypy` (with or without the
     `-wsl` suffix) the project's OWN runner made (`e2e.runtime_python`): under WSL with a Windows

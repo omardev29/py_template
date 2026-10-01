@@ -1107,7 +1107,12 @@ def _smoke(ctx: Context, step: Step, log: Path, target: Path) -> tuple[str, str]
     if step.method in ("exe", "nuitka"):
         commands.append([str(target)])
     elif step.method == "portable":
-        commands.append([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(target)] if IS_WINDOWS else [str(target)])
+        # On Windows through cmd, by its path relative to the working folder it was moved below:
+        # cmd /c read the absolute one, the base's own folders included, as a command line, and
+        # split it at an unquoted & (a profile folder C:\Users\R&D: the default base is in %TEMP%)
+        # or dropped the quotes list2cmdline put around a path with a blank and ( ) @ ^, so the
+        # smoke failed. The relative path holds only the app name, backend, method and target key.
+        commands.append([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", os.path.relpath(target, ctx.work)] if IS_WINDOWS else [str(target)])
     elif step.method == "pyz":
         # -S: no site-packages, so the .pyz must bring its own dependencies. Its bootstrap
         # extracts to the user cache: point that at the scratch dir.

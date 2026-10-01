@@ -407,6 +407,45 @@ def test_a_portable_folder_runs_from_another_path(tmp_path: Path) -> None:
     assert launcher.is_file(), "back in dist/ after a failure too"
 
 
+# A base whose path holds what cmd reads as syntax: a Windows profile folder may hold & ( ) @ ^
+# (C:\Users\R&D, "John (Lab)"), and the default base lives in %TEMP%, below it.
+CMD_SYNTAX_BASE = "R&D (Lab) x^y@z"
+
+
+def test_the_portable_smoke_hands_cmd_no_path_of_the_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows the portable launcher runs as `cmd /d /c <path>`. Absolute, the path carried the
+    base's own characters: list2cmdline leaves a path without a blank unquoted, and cmd split it at
+    & (it ran C:\\Users\\R, then D\\...); quoted for a blank, cmd /c strips the quotes around ( ) @ ^
+    and split it at the blank: every portable smoke failed (A10-05). It is relative to the working
+    folder it runs in, ctx.work: the app name, backend, method and target key only."""
+    ctx = make_ctx(tmp_path / CMD_SYNTAX_BASE)
+    target = ctx.work / "moved" / "e2escript-cpython-portable-cp314-windows-x86_64" / "e2escript.cmd"
+    calls: list[tuple[list[str], Path]] = []
+    monkeypatch.setattr(e2e, "IS_WINDOWS", True)
+    monkeypatch.setattr(e2e, "call", lambda argv, cwd, *_a, **_k: calls.append((list(argv), cwd)) or (PASS, ""))
+    step = Step("script", "smoke cpython portable", "smoke", backend="cpython", method="portable", expect=("Primes",), timeout=60)
+    assert e2e._smoke(ctx, step, ctx.logs / "smoke.log", target) == (PASS, "")
+    ((argv, cwd),) = calls
+    assert argv[1:3] == ["/d", "/c"] and cwd == ctx.work and (cwd / argv[3]) == target, argv
+    line = subprocess.list2cmdline(argv[1:])
+    assert not set(line) & set('&()@^"%') and CMD_SYNTAX_BASE not in line, line
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe")
+def test_a_portable_folder_runs_from_a_base_cmd_reads_as_syntax(tmp_path: Path) -> None:
+    """For real, on Windows: the moved .cmd launcher runs through cmd from a base named with
+    & ( ) @ ^ (A10-05)."""
+    ctx = make_ctx(tmp_path / CMD_SYNTAX_BASE)
+    folder = ctx.project / "dist" / "e2escript-cpython-portable-cp314-windows-x86_64"
+    folder.mkdir(parents=True)
+    (folder / "e2escript.cmd").write_bytes(b"@echo off\r\necho Primes\r\nexit /b 0\r\n")
+    step = Step("script", "smoke cpython portable", "smoke", backend="cpython", method="portable", expect=("Primes",), timeout=60)
+    log = ctx.logs / "smoke.log"
+    status, detail = e2e.do_smoke(ctx, step, log)
+    assert status == PASS, (detail, log.read_text(encoding="utf-8", errors="replace"))
+    assert (folder / "e2escript.cmd").is_file(), "the folder is back in dist/"
+
+
 @POSIX
 def test_build_size_counts_a_symlinked_file_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A bundled runtime's bin/python3 -> python3.14: the size line counted it twice."""
