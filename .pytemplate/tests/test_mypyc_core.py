@@ -2277,6 +2277,72 @@ def test_build_forces_a_rebuild_when_the_compiler_environment_changes(fake_build
     assert fake_build.force  # removed is a change too
 
 
+def test_build_forces_a_rebuild_when_the_locked_mypyc_or_setuptools_moves(fake_build: FakeCompiler, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """mypyc compiles the C runtime of the INSTALLED mypy (lib-rt: CPy.h, init.c...) into every
+    extension, and setuptools drives the compiler; neither is a source setuptools compares, and an
+    app's generated C is often the same under two mypy releases: once the lock moved mypy (./pyt
+    lock --upgrade), the stage kept the old mypyc's binaries (verified with mypy 2.2.0 -> 2.3.1:
+    the pyz shipped the 2.2.0 .so) and every build shipped them."""
+    lock = tmp_path / "uv.lock"
+    monkeypatch.setattr(mypyc, "LOCK", lock)
+
+    def locked(mypy: str, setuptools: str = "84.0.0") -> None:
+        packages = {"mypy": mypy, "setuptools": setuptools, "rich": "15.0.0"}
+        lock.write_text("version = 1\n" + "".join(f'\n[[package]]\nname = "{n}"\nversion = "{v}"\n' for n, v in packages.items()), encoding="utf-8")
+
+    cfg = make({"compile": {"separate": True}})
+    locked("2.2.0")
+    mypyc.build(cfg, "release")
+    mypyc.build(cfg, "release")
+    assert not fake_build.force
+    cache = mypyc.profile(cfg, "release").dir
+    for sub in ("mypy_cache", "c"):
+        (cache / sub).mkdir(exist_ok=True)
+        (cache / sub / "stale").write_text("from mypy 2.2.0", encoding="utf-8")
+    locked("2.3.1")
+    mypyc.build(cfg, "release")
+    assert fake_build.force  # build_ext --force, without the IR and C of the old mypyc
+    assert not (cache / "mypy_cache").exists() and not (cache / "c").exists()
+    mypyc.build(cfg, "release")
+    assert not fake_build.force
+    locked("2.3.1", setuptools="85.0.0")
+    mypyc.build(cfg, "release")
+    assert fake_build.force
+    record = json.loads((cache / mypyc.COMPILED_STAMP).read_text(encoding="utf-8"))
+    assert record["toolchain"] == {"mypy": ["2.3.1"], "setuptools": ["85.0.0"]}  # rich makes no binary
+    assert "toolchain" not in fake_build.specs[-1]  # recorded, not an input of tools/mypyc_build.py
+    lock.write_text(lock.read_text(encoding="utf-8").replace('"rich"', '"pygments"'), encoding="utf-8")
+    mypyc.build(cfg, "release")
+    assert not fake_build.force
+
+
+@needs_venv
+def test_mypycify_leaves_its_runtime_out_of_what_setuptools_compares(tmp_path: Path) -> None:
+    """The locked mypyc, for real (no C compiler needed): Extension.depends names none of the
+    files of its lib-rt, which it compiles into every extension, so setuptools never rebuilds an
+    extension for a new mypyc (mypyc.TOOLCHAIN does). If mypyc ever names them, this fails, and
+    the version record can go (CLAUDE.md 15.1)."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "a.py").write_text("def f(x: int) -> int:\n    return x + 1\n", encoding="utf-8")
+    (tmp_path / "pkg" / "b.py").write_text("from pkg.a import f\n\n\ndef g(x: int) -> int:\n    return f(x) * 2\n", encoding="utf-8")
+    code = (  # as tools/mypyc_build.py calls it: a group, whose shared lib holds the runtime
+        "import os, sys\n"
+        "from mypyc.build import include_dir, mypycify\n"
+        "os.chdir(sys.argv[1])\n"
+        "exts = mypycify(['pkg/a.py', 'pkg/b.py'], target_dir='c', group_name='pkg')\n"
+        "deps = [os.path.abspath(d) for e in exts for d in e.depends]\n"
+        "runtime = os.path.normcase(os.path.abspath(include_dir()))\n"
+        "print('PTDEPS', len(deps), sum(os.path.normcase(d).startswith(runtime) for d in deps))\n"
+    )
+    r = subprocess.run([str(TOOL_PYTHON), "-I", "-c", code, str(tmp_path)], capture_output=True, text=True, timeout=300, check=False)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTDEPS")), None)
+    assert line is not None, r.stdout[-2000:] + r.stderr[-2000:]
+    _, generated, runtime = line.split()
+    assert int(generated) > 0  # what it does name: the headers it generates
+    assert int(runtime) == 0
+
+
 def test_build_does_not_force_for_annotate_or_new_modules(fake_build: FakeCompiler, src_tree: Path) -> None:
     mypyc.build(make({}), "dev")
     mypyc.build(make({"compile": {"annotate": True}}), "dev")

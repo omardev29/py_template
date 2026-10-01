@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import stat
+import tomllib
 import uuid
 from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
@@ -25,9 +26,9 @@ from pathlib import Path
 from typing import TypeVar
 
 from . import envs, proc, render, ui
-from .config import Config, compiled_paths
+from .config import TOML_ERRORS, Config, compiled_paths
 from .imports import PARSE_ERRORS, imports_of, is_local, local_module, module_name, parse_error
-from .project import BUILD, EXT_SUFFIXES, IS_WINDOWS, SRC, TOOLS, rel
+from .project import BUILD, EXT_SUFFIXES, IS_WINDOWS, PYPROJECT, SRC, TOOLS, rel
 from .ui import PytError
 
 SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".hypothesis", ".ruff_cache"}
@@ -48,6 +49,14 @@ _NOT_BINARY = ("annotate", "compile", "files", "force")
 # builds with (CC, CFLAGS: it REPLACES Python's own flags, CPPFLAGS, LDSHARED, LDFLAGS), macOS
 # ARCHFLAGS and MSVC's CL/_CL_. Recorded with the options: a change forces a rebuild too.
 COMPILER_ENV = ("CC", "CFLAGS", "CPPFLAGS", "LDSHARED", "LDFLAGS", "ARCHFLAGS", "CL", "_CL_")
+# The packages whose code goes into every extension besides the generated C: mypyc compiles the
+# C runtime of the INSTALLED mypy (its lib-rt: CPy.h, init.c...) into each one, which mypycify
+# leaves out of Extension.depends, and setuptools drives the compiler. A new release of either
+# with the same generated C (common: the skeleton's C is the same under mypy 2.2.0 and 2.3.1)
+# kept the old binaries. Their versions in LOCK, the lock `uv run --locked` syncs the tools
+# environment to before tools/mypyc_build.py runs, are recorded with the options.
+TOOLCHAIN = ("mypy", "setuptools")
+LOCK = PYPROJECT.with_name("uv.lock")
 # ABI tag at the start of an extension suffix: cpython-314-x86_64-linux-gnu.so,
 # cpython-314-darwin.so, cp314-win_amd64.pyd (a trailing "t" = free-threaded build)
 _ABI_RE = re.compile(r"(?:cpython-|cp)(\d)(\d+)(t?)(?=[-.])")
@@ -418,6 +427,21 @@ def _read_json(path: Path) -> object:
     return data
 
 
+def toolchain() -> dict[str, list[str]]:
+    """The versions LOCK pins for TOOLCHAIN (a lock it cannot read gives none: `uv run --locked`
+    then refuses to compile anyway)."""
+    try:
+        data = tomllib.loads(LOCK.read_text(encoding="utf-8-sig"))
+    except (OSError, *TOML_ERRORS):
+        return {}
+    packages = data.get("package")
+    found: dict[str, set[str]] = {}
+    for package in packages if isinstance(packages, list) else []:
+        if isinstance(package, dict) and package.get("name") in TOOLCHAIN:
+            found.setdefault(str(package["name"]), set()).add(str(package.get("version", "")))
+    return {name: sorted(versions) for name, versions in sorted(found.items())}
+
+
 def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compile_c: bool = True) -> Path:
     """Prepare the stage and compile. Return the stage path.
 
@@ -464,11 +488,13 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
     # setuptools rebuilds an extension only when a source is newer than it: an option that only
     # reaches the C compiler (opt_level, no_semantic_interposition, debug_level, the compiler
     # variables of the environment) leaves the generated C untouched, so the old binary would
-    # be kept. The options of the last SUCCESSFUL compile are recorded (the record is deleted
-    # before compiling: a failed or interrupted build forces the next one); any difference
-    # forces a full rebuild (build_ext --force).
+    # be kept, and so was the binary of an older mypyc or setuptools (TOOLCHAIN). The options of
+    # the last SUCCESSFUL compile are recorded (the record is deleted before compiling: a failed
+    # or interrupted build forces the next one); any difference forces a full rebuild
+    # (build_ext --force).
     options = {k: v for k, v in spec.items() if k not in _NOT_BINARY}
     options["env"] = {name: os.environ[name] for name in COMPILER_ENV if name in os.environ}
+    options["toolchain"] = toolchain()
     stamp = prof.dir / COMPILED_STAMP
     spec["force"] = compile_c and _read_json(stamp) != options
     spec_file = prof.dir / "spec.json"

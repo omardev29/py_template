@@ -2565,7 +2565,11 @@ Formats:
   binary was kept (and shipped). `build` records the options of the last SUCCESSFUL compile of
   a profile in `<profile dir>/compiled-options.json` (`COMPILED_STAMP`: every spec key but
   `annotate`, `compile`, `files`, `force`, plus `env`: the `COMPILER_ENV` variables that are
-  set, `CC CFLAGS CPPFLAGS LDSHARED LDFLAGS ARCHFLAGS CL _CL_`), deletes it
+  set, `CC CFLAGS CPPFLAGS LDSHARED LDFLAGS ARCHFLAGS CL _CL_`, and `toolchain`: the versions
+  uv.lock pins for `mypyc.TOOLCHAIN`, mypy and setuptools, `mypyc.toolchain`: mypyc compiles
+  the C runtime of the installed mypy, its lib-rt, into every extension and leaves it out of
+  `Extension.depends`, so after `./pyt lock --upgrade` moved mypy the stage kept, and every
+  build shipped, the old mypyc's binaries, `test_build_forces_a_rebuild_when_the_locked_mypyc_or_setuptools_moves`), deletes it
   before compiling (a failed or interrupted build forces the next one) and sets
   `spec["force"]` when it differs: `mypyc_build.py` then passes `build_ext --force`, and
   `mypyc.build` first deletes the profile's `mypy_cache` and generated `c` (with
@@ -5770,6 +5774,18 @@ setuptools:
   and `build_ext --force` (9). Test:
   `test_mypyc_core.py::test_build_forces_a_rebuild_for_every_binary_option`,
   `test_build_forces_a_rebuild_when_the_compiler_environment_changes`. Goes: never.
+- **mypycify leaves its own C runtime out of `Extension.depends`** (LIMITATION, mypyc 2.3.1:
+  `resolve_cfile_deps` says `<CPy.h>` and the other lib-rt files "do not change between builds",
+  and mypyc rewrites a C file only when its text changes): every extension includes the lib-rt
+  of the installed mypy (`init.c`, `CPy.h`...), and an app's generated C is often the same under
+  two releases (the script skeleton's under mypy 2.2.0, 2.3.0 and 2.3.1), so after the lock moved
+  mypy setuptools kept every extension the old mypyc had built, and the stage and every build
+  made from it shipped them (2.3.1's NULL checks in `CPyFunction_New` were missing), with "ok
+  compiled". Fix: `mypyc.build` records the versions uv.lock pins for `mypyc.TOOLCHAIN` (mypy,
+  setuptools) with the options of `COMPILED_STAMP`, so a new one forces `build_ext --force` (9).
+  Test: `test_mypyc_core.py::test_build_forces_a_rebuild_when_the_locked_mypyc_or_setuptools_moves`,
+  `test_mypycify_leaves_its_runtime_out_of_what_setuptools_compares` (a pin: the locked mypyc's
+  own `Extension.depends`). Goes: when that pin fails.
 - **mypyc's incremental cache ignores its own options** (LIMITATION, mypyc 2.3.1): with
   `compile.separate = true` (incremental) an unchanged module's IR and C came from the cache,
   so a new `strip_asserts` (`deploy.optimize`) or `strict_dunder_typing` never reached the
@@ -7229,7 +7245,8 @@ Code coupling (rename together):
   `lintc._static_value` <-> mypy's `infer_condition_value` (the classes of `CLASSES_IN_BLOCKS`);
   `lintc._Resolver` <-> how mypy follows a name the app's own modules import;
   `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`
-  <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED`,
+  <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`); `mypyc.TOOLCHAIN` <-> what
+  mypycify leaves out of `Extension.depends` (its lib-rt). `mypyc.MYPYC_REJECTED`,
   `COMPILER_MISSING` and `C_BUILD_FAILED` <-> `tools/mypyc_build.py`; `mypyc.missing_compiler`
   imports that script in `.venv` and calls its `missing_compiler`
   (`test_missing_compiler_asks_the_venv_as_the_build_script_does`); the spec keys the script
