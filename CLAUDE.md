@@ -2712,8 +2712,8 @@ Formats:
   mypy errors that appear only as that version and not as `python.cpython`
   (`PRECHECK_MYPY_FLAGS`: `--config-file=` so the project's `.mypy.ini` is never read,
   where the default `off` profile sets `ignore_errors`, and `--check-untyped-defs`; modules named
-  as `.mypy.ini` names them, `--explicit-package-bases` with MYPYPATH its `mypy_path`,
-  `cmd_mode._precheck_mypypath`: an app package without `__init__.py` was "found twice", mypy
+  as `.mypy.ini` names them, `--explicit-package-bases` with MYPYPATH its `mypy_path` after the
+  caller's own MYPYPATH (check's mypy reads both), `cmd_mode._precheck_mypypath`: an app package without `__init__.py` was "found twice", mypy
   stopped and PyPy could not be enabled,
   `test_mypyc_core.test_precheck_real_mypy_in_a_project_whose_app_package_has_no_init_file`), compared by
   place and error code (`cmd_mode.precheck_key`: typeshed words the same error per version,

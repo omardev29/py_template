@@ -345,11 +345,16 @@ def test_precheck_names_modules_from_src_as_the_projects_mypy_ini(monkeypatch: p
     monkeypatch.setattr(cmd_mode.envs, "sync", lambda env, **_kw: None)
     monkeypatch.setattr(cmd_mode.envs, "uv", uv)
     monkeypatch.setattr(render, "typings_dir", lambda: None)
+    monkeypatch.delenv("MYPYPATH", raising=False)
     cmd_mode._precheck_py311(make({}))
     mypy = [(argv, env) for argv, env in calls if "mypy" in argv]
     assert len(mypy) == 2 and all("--explicit-package-bases" in argv and env == {"MYPYPATH": "src"} for argv, env in mypy), mypy
     monkeypatch.setattr(render, "typings_dir", lambda: tmp_path / "typings")
     assert cmd_mode._precheck_mypypath() == os.pathsep.join(["src", "typings"])
+    # the caller's own MYPYPATH, which ./pyt check's mypy reads before .mypy.ini's mypy_path
+    stubs = str(tmp_path / "stubs")
+    monkeypatch.setenv("MYPYPATH", stubs)
+    assert cmd_mode._precheck_mypypath() == os.pathsep.join([stubs, "src", "typings"])
 
 
 @needs_venv

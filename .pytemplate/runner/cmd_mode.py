@@ -146,10 +146,12 @@ PRECHECK_MYPY_FLAGS = (
 
 
 def _precheck_mypypath() -> str:
-    """The MYPYPATH of the precheck's mypy: .mypy.ini's mypy_path (src, and typings/ when it holds
-    stubs), relative to the project folder mypy runs in (an absolute path would split at a ':' of
-    the project folder's path on POSIX)."""
-    return os.pathsep.join(["src", "typings"] if render.typings_dir() else ["src"])
+    """The MYPYPATH of the precheck's mypy: the caller's own MYPYPATH first, which ./pyt check's
+    mypy reads too (mypy puts it before the config's), then .mypy.ini's mypy_path (src, and
+    typings/ when it holds stubs), relative to the project folder mypy runs in (an absolute path
+    would split at a ':' of the project folder's path on POSIX)."""
+    ours = ["src", "typings"] if render.typings_dir() else ["src"]
+    return os.pathsep.join([*filter(None, [os.environ.get("MYPYPATH")]), *ours])
 
 
 def precheck_key(line: str) -> tuple[str, str]:
