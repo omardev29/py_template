@@ -509,7 +509,8 @@ name). What changes:
   renamed import would hide). Strings, comments and
   other text files there: package paths, dotted names, `-m` arguments, `pkg:function`
   references and module-name arguments (`import_module("<pkg>")`, `resources.files(package=...)`,
-  `pkgutil.get_data`, `runpy.run_module`) get the package; titles and other prose get the name.
+  `pkgutil.get_data`, `runpy.run_module`, `pytest.importorskip`), keys of `sys.modules` and what
+  `__name__` or `__package__` is compared with get the package; titles and other prose get the name.
   A file named after the app (`asset("<name>.png")`, `"<name>.json"`, also passed to a helper
   named like a loader: `read_text("<name>.txt")`) keeps its name, so the
   reference is reported, not changed; so does a folder named after the app outside `src/`

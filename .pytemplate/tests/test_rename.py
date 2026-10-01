@@ -304,6 +304,36 @@ def test_module_name_arguments_of_loader_calls_get_the_package(text: str, expect
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('core = pytest.importorskip("myapp")', 'core = pytest.importorskip("my_game")'),
+        ('core = pytest.importorskip(modname="myapp")', 'core = pytest.importorskip(modname="my_game")'),
+        ('mod = sys.modules["myapp"]', 'mod = sys.modules["my_game"]'),
+        ('mod = sys.modules[f"myapp.{name}"]', 'mod = sys.modules[f"my_game.{name}"]'),
+        ('mod = sys.modules.get("myapp")', 'mod = sys.modules.get("my_game")'),
+        ('sys.modules.pop("myapp", None)', 'sys.modules.pop("my_game", None)'),
+        ('assert "myapp" in sys.modules', 'assert "my_game" in sys.modules'),
+        ('assert "myapp" not in modules', 'assert "my_game" not in modules'),
+        ('monkeypatch.setitem(sys.modules, "myapp", None)', 'monkeypatch.setitem(sys.modules, "my_game", None)'),
+        ('monkeypatch.delitem(sys.modules, "myapp")', 'monkeypatch.delitem(sys.modules, "my_game")'),
+        ('ok = __package__ == "myapp"', 'ok = __package__ == "my_game"'),
+        ('ok = "myapp" != __name__', 'ok = "my_game" != __name__'),
+        ('ok = __spec__.name == "myapp"', 'ok = __spec__.name == "my_game"'),
+        ('ok = __name__.startswith("myapp.")', 'ok = __name__.startswith("my_game.")'),
+        # prose: a class's name, a string next to sys.modules, another mapping
+        ('ok = cls.__name__ == "myapp"', 'ok = cls.__name__ == "My-Game"'),
+        ('print("myapp", sys.modules)', 'print("My-Game", sys.modules)'),
+        ('x = titles["myapp"]', 'x = titles["My-Game"]'),
+    ],
+)
+def test_strings_where_only_a_module_name_goes_get_the_package(text: str, expected: str) -> None:
+    """A key of sys.modules, what a module's own name is compared with and pytest.importorskip's
+    argument are module names: they got the display name (`sys.modules["My-Game"]`, a test that
+    then failed, and an importorskip that skipped its tests without a word)."""
+    assert rewrite(text + "\n", AMBIGUOUS, python=True).text == expected + "\n"
+
+
+@pytest.mark.parametrize(
     ("text", "expected", "kept"),
     [
         ('ICON = asset("rocks.png")', None, True),

@@ -1415,7 +1415,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     `RESOURCE_FUNCTIONS`: `read_text`, `path`, `contents`..., are a project helper's too, so
     their argument keeps the file and folder rules above first: `read_text("alpha.txt")` got the
     new name while the file kept its own,
-    `test_rename.test_a_file_passed_to_a_helper_named_like_a_loader_keeps_its_name`); titles, other prose and artifact names
+    `test_rename.test_a_file_passed_to_a_helper_named_like_a_loader_keeps_its_name`), and the
+    strings that stand where only a module name can (`_module_name_strings`: `pytest.importorskip`,
+    in `LOADERS`; a key of `sys.modules`, its `get`/`pop`/`setdefault`, `in sys.modules`,
+    monkeypatch's `setitem`/`delitem(sys.modules, ...)`; what `__name__`, `__package__` or
+    `__spec__.name` is compared with, `__name__.startswith(...)`: they got the display name, a
+    test failed and an importorskip skipped its tests without a word,
+    `test_rename.test_strings_where_only_a_module_name_goes_get_the_package`); titles, other prose and artifact names
     (`alpha.exe`, `alpha-cpython-exe`) get the name.
   - `pytemplate.toml`: always by context (`contextual`, even when the new name is a package
     name, and when the old name is not its package's spelling: for My-Game or Auto the package

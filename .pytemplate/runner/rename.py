@@ -36,9 +36,12 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   (`alpha` -> `My-Game`, package `my_game`), each text occurrence is either the package or the
   name. Package: path-like (`src/alpha/`, `alpha\\core`), dotted (`alpha.core`, `alpha.*`,
   `alpha:main`), next to the words package/module, after `import` or `-m`, in `from alpha
-  import`, and the module-name arguments of loader calls (LOADERS: `import_module()`,
+  import`, the module-name arguments of loader calls (LOADERS: `import_module()`,
   `find_spec()`, `files()`, the importlib.resources functions, `pkgutil.get_data()`,
-  `runpy.run_module()`; positional or as a `name=`, `package=`, `anchor=`, `mod_name=` keyword).
+  `runpy.run_module()`, `pytest.importorskip()`; positional or as a `name=`, `package=`,
+  `anchor=`, `mod_name=`, `modname=` keyword), and the other strings only a module name can
+  stand for (_module_name_strings: `sys.modules["alpha"]`, `"alpha" in sys.modules`,
+  `__name__ == "alpha"`, `__package__ != "alpha"`, `__name__.startswith("alpha.")`).
   Name: everything else (titles, `\"\"\"alpha\"\"\"`, `f"alpha: ..."`) and artifact names
   (`alpha.exe`, `alpha.pyz`, `alpha-cpython-exe`...).
 - pytemplate.toml: app.name (its comment is kept) and package references only, always chosen
@@ -114,8 +117,9 @@ LOADERS: dict[str, tuple[int, ...]] = {
     "contents": (0,),
     "get_data": (0,),  # pkgutil.get_data(package, resource)
     "run_module": (0,),  # runpy.run_module(mod_name)
+    "importorskip": (0,),  # pytest.importorskip(modname): renamed to a display name, the tests skipped
 }
-MODULE_ARGUMENTS = frozenset({"name", "package", "anchor", "mod_name"})
+MODULE_ARGUMENTS = frozenset({"name", "package", "anchor", "mod_name", "modname"})
 # The loaders of LOADERS whose names a helper of the project may have too (read_text(name),
 # path(name), contents(name)...): their argument is the package only when it names no file or
 # folder named after the app (`read_text("alpha.txt")` keeps its file's name: _classify)
@@ -220,7 +224,7 @@ class _Region:
 
     start: int
     end: int
-    forced: bool = False  # argument of import_module() & co.: a module name
+    forced: bool = False  # argument of import_module() & co., a key of sys.modules...: a module name
     fstring: bool = False  # an f-string or t-string: its {fields} are code, their format specs syntax
     resource: bool = False  # forced by a loader of RESOURCE_FUNCTIONS (or a helper of that name)
 
@@ -512,6 +516,72 @@ def _keep_captured(code: _Code, names: Names) -> None:
     code.refs -= {code.positions.ast(line, col) for line, col in captured}
 
 
+_MODULES_METHODS = frozenset({"get", "pop", "setdefault"})  # sys.modules.get("alpha")
+_MODULE_DUNDERS = frozenset({"__name__", "__package__"})
+
+
+def _module_name_strings(sig: list[tokenize.TokenInfo]) -> set[int]:
+    """Indexes in `sig` (the significant tokens of a file) of the strings that stand where only a
+    module name can: a key of sys.modules (`sys.modules["alpha"]`, its `get`, `pop` and
+    `setdefault`, `"alpha" in sys.modules`, monkeypatch's `setitem(sys.modules, "alpha", m)` and
+    `delitem`) and what a module's own name is compared with (`__name__ == "alpha"`,
+    `__package__ != "alpha"`, `__spec__.name`, `__name__.startswith("alpha.")`). Renamed to a
+    display name (My-Game) they named no module: a test failed, or skipped. A 3.12+ f-string
+    counts from its start token."""
+
+    def name(i: int, *values: str) -> bool:
+        return 0 <= i < len(sig) and sig[i].type == tokenize.NAME and (not values or sig[i].string in values)
+
+    def op(i: int, *values: str) -> bool:
+        return 0 <= i < len(sig) and sig[i].type == tokenize.OP and sig[i].string in values
+
+    def own_name_ends(i: int) -> bool:  # sig[i] ends a bare __name__, __package__ or __spec__.name
+        if name(i, *_MODULE_DUNDERS):
+            return not op(i - 1, ".")  # cls.__name__ is a class's name
+        return name(i, "name", "parent") and op(i - 1, ".") and name(i - 2, "__spec__") and not op(i - 3, ".")
+
+    def own_name_starts(i: int) -> bool:
+        return name(i, *_MODULE_DUNDERS) or (name(i, "__spec__") and op(i + 1, ".") and name(i + 2, "name", "parent"))
+
+    def modules_start(i: int) -> int:  # sig[i] ends `sys.modules` or `modules`: its first index (-1: no)
+        if not name(i, "modules"):
+            return -1
+        return i - 2 if op(i - 1, ".") and name(i - 2, "sys") else i
+
+    def modules_at(i: int) -> bool:  # `sys.modules` or `modules` starts at sig[i]
+        return (name(i, "sys") and op(i + 1, ".") and name(i + 2, "modules")) or name(i, "modules")
+
+    found: set[int] = set()
+    depth = 0
+    first = 0
+    for i, tok in enumerate(sig):
+        kind = tokenize.tok_name.get(tok.type, "")
+        if kind.endswith("STRING_START"):
+            if depth == 0:
+                first = i
+            depth += 1
+            continue
+        if kind.endswith("STRING_END"):
+            depth -= 1
+            if depth:
+                continue
+            a, b = first, i
+        elif tok.type == tokenize.STRING and depth == 0:
+            a = b = i
+        else:
+            continue
+        keyed = op(a - 1, "[") and name(a - 2, "modules")
+        method = op(a - 1, "(") and name(a - 2, *_MODULES_METHODS) and op(a - 3, ".") and name(a - 4, "modules")
+        start = modules_start(a - 2) if op(a - 1, ",") else -1
+        patched = start >= 0 and op(start - 1, "(") and name(start - 2, "setitem", "delitem")
+        member = (name(b + 1, "in") and modules_at(b + 2)) or (name(b + 1, "not") and name(b + 2, "in") and modules_at(b + 3))
+        compared = (op(a - 1, "==", "!=") and own_name_ends(a - 2)) or (op(b + 1, "==", "!=") and own_name_starts(b + 2))
+        prefix = op(a - 1, "(") and name(a - 2, "startswith") and op(a - 3, ".") and own_name_ends(a - 4)
+        if keyed or method or patched or member or compared or prefix:
+            found.add(a)
+    return found
+
+
 def _python_code(text: str, pkg: str) -> _Code | None:
     """Tokenize a Python source: NAME tokens, package references and string/comment regions.
 
@@ -597,6 +667,7 @@ def _python_code(text: str, pkg: str) -> _Code | None:
             refs.add(idx)
 
     regions: list[_Region] = []
+    module_names = {offset(sig[i].start) for i in _module_name_strings(sig)}  # sys.modules["alpha"]...
     depth = 0
     fstart = 0
     floader = ""
@@ -622,14 +693,16 @@ def _python_code(text: str, pkg: str) -> _Code | None:
         elif kind.endswith("STRING_END"):
             depth -= 1
             if depth == 0:  # {fields} are code, as on 3.11
-                regions.append(_Region(fstart, offset(tok.end), bool(floader), fstring=True, resource=floader in RESOURCE_FUNCTIONS))
+                forced = bool(floader) or fstart in module_names
+                regions.append(_Region(fstart, offset(tok.end), forced, fstring=True, resource=floader in RESOURCE_FUNCTIONS))
         elif depth == 0 and tok.type in (tokenize.STRING, tokenize.COMMENT):
             loader, fstring = "", False
             if tok.type == tokenize.STRING:
                 loader = loader_argument()
                 prefix = re.match(r"[A-Za-z]*", tok.string)
                 fstring = prefix is not None and "f" in prefix.group().lower()
-            regions.append(_Region(offset(tok.start), offset(tok.end), bool(loader), fstring, resource=loader in RESOURCE_FUNCTIONS))
+            forced = bool(loader) or offset(tok.start) in module_names
+            regions.append(_Region(offset(tok.start), offset(tok.end), forced, fstring, resource=loader in RESOURCE_FUNCTIONS))
         elif depth == 0 and tok.type == tokenize.OP:
             if tok.string in "([{":
                 called = tok.string == "(" and last and last[-1].type == tokenize.NAME
