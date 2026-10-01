@@ -1324,14 +1324,15 @@ def test_new_refuses_the_template_folder_whatever_spelling_names_it(tmp_path: Pa
     """new compared realpath(DEST) with ROOT as strings: another spelling of the template's folder
     (another case on macOS's case-insensitive volume, where ROOT keeps the case typed; a bind
     mount) passed, and new made its project inside the template's work tree. A link stands in for
-    that other spelling here: ROOT names the folder through it, DEST through the folder itself."""
+    that other spelling here (named apart from the folder: on macOS another case is the same name):
+    ROOT names the folder through it, DEST through the folder itself."""
     template = tmp_path / "template"
     template.mkdir()
     try:
-        (tmp_path / "Template").symlink_to(template, target_is_directory=True)
+        (tmp_path / "alias").symlink_to(template, target_is_directory=True)
     except OSError as e:  # Windows without the privilege to make links
         pytest.skip(f"cannot make a symbolic link here: {e}")
-    monkeypatch.setattr(cmd_mode, "ROOT", tmp_path / "Template")
+    monkeypatch.setattr(cmd_mode, "ROOT", tmp_path / "alias")
     monkeypatch.setattr(proc, "DRY_RUN", dry_run)
     made: list[str] = []
     monkeypatch.setattr(presets, "new", lambda dest, preset, name, python=None: made.append(name))
