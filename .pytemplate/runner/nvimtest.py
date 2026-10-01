@@ -350,6 +350,15 @@ def _prepare_dir(layout: Layout) -> None:
         resolved = base.resolve()
         if resolved == ROOT or ROOT in resolved.parents:
             raise PytError(f"--dir must be outside the template ({base}): Neovim would find its .lazy.lua")
+        # The projects are made below it (layout.projects), and spec.lua switches the whole ./pyt
+        # integration off in a folder Neovim cannot put on its runtimepath: every smoke check failed
+        # after minutes of installs, naming .lazy.lua's trust. Checked as `nvim trust` checks ROOT.
+        unsafe = cmd_nvim.rtp_unsafe_char(resolved)
+        if unsafe:
+            raise PytError(
+                f"--dir {resolved} holds `{unsafe}`, which Neovim cannot put on its 'runtimepath': the ./pyt "
+                f"integration could not load in the projects made below it. Pick a --dir without {cmd_nvim.rtp_unsafe_text()}"
+            )
         if base.exists() and not base.is_dir():
             raise PytError(f"--dir {base} is not a folder: pick another --dir")
         check_private_dir(base, "--dir")

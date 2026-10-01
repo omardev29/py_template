@@ -597,6 +597,31 @@ def test_prepare_dir_refuses_foreign_dirs(tmp_path: Path) -> None:
     assert (fresh.base / nvimtest.DIR_MARKER).is_file()
 
 
+@pytest.mark.parametrize("char", sorted(cmd_nvim.RTP_UNSAFE_WINDOWS if sys.platform == "win32" else cmd_nvim.RTP_UNSAFE))
+def test_prepare_dir_refuses_a_dir_neovim_cannot_put_on_its_runtimepath(char: str, tmp_path: Path) -> None:
+    """The projects are made below --dir, and spec.lua switches the ./pyt integration off where
+    Neovim cannot put the plugin on its runtimepath (`nvim trust` refuses such a project): after
+    minutes of installs every smoke check failed, blaming .lazy.lua's trust. Refused first, with
+    the character, before anything is made."""
+    base = tmp_path / f"d{char}x"
+    with pytest.raises(PytError, match=re.escape(f"holds `{char}`, which Neovim cannot put on its 'runtimepath'")) as e:
+        nvimtest._prepare_dir(nvimtest.Layout(base))
+    assert e.value.code == 2 and "\n" not in str(e.value) and not base.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX: Neovim's cwd is the physical folder (symbolic links need privileges on Windows)")
+def test_prepare_dir_checks_the_folder_a_linked_dir_names(tmp_path: Path) -> None:
+    """Neovim runs in the projects' physical folder (getcwd), where spec.lua reads the path: a
+    --dir that is a link to a folder named with `[` is refused like the folder itself."""
+    target = tmp_path / "x[1]"
+    target.mkdir(mode=0o700)
+    link = tmp_path / "clean"
+    link.symlink_to(target)
+    with pytest.raises(PytError, match=re.escape("holds `[`")):
+        nvimtest._prepare_dir(nvimtest.Layout(link))
+    assert not any(target.iterdir())
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes (Windows %TEMP% is per user)")
 def test_prepare_dir_refuses_a_dir_another_user_can_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The isolated LazyVim runs from --dir: a /tmp/pt-nvim made by another user, or one every

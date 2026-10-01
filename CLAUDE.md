@@ -3312,8 +3312,9 @@ Files:
   `C:\Users\O'Brien` was refused): the plugin cannot go on the runtimepath from such a path
   (require fails, E79), so the whole integration is skipped and the other LazyVim plugins whose
   `opts` delegate to it keep working. `cmd_nvim.rtp_unsafe_char` names the same characters
-  (`RTP_UNSAFE`, `RTP_UNSAFE_WINDOWS`), and `nvim doctor` (a problem line) and `nvim trust`
-  (refused) report them (`test_the_runtimepath_rule_is_the_same_in_spec_lua_and_cmd_nvim`: both
+  (`RTP_UNSAFE`, `RTP_UNSAFE_WINDOWS`), and `nvim doctor` (a problem line), `nvim trust`
+  (refused) and `selftest --nvim` (a `--dir` refused, `nvimtest._prepare_dir`, 13.1) report them
+  (`test_the_runtimepath_rule_is_the_same_in_spec_lua_and_cmd_nvim`: both
   sets through spec.lua with `has('win32')` faked). The `call` delegates are wrapped in `pcall` so a module that fails to load never breaks
   another plugin's config.
 - Trusting `.lazy.lua` also trusts `.pytemplate/nvim/**` (`spec.lua` and the plugin), loaded as a
@@ -3856,7 +3857,12 @@ short temp tree and unset `NVIM_APPNAME`.
   it, and checked again once it exists, `project.make_private_dir`, as for `--e2e`): `<dir>/x/{config,data,state,cache}` = the `XDG_*` homes,
   `<dir>/base.json` = the base is complete, `<dir>/p/<preset>` = scratch projects,
   `<dir>/logs/` = one log per step. It stops unless Neovim reports every stdpath inside
-  `<dir>/x`, refuses a `--dir` inside the template or one that is a file (exit 2), and only
+  `<dir>/x`, refuses a `--dir` inside the template or one that is a file (exit 2), and one whose
+  physical path (Neovim's cwd in the projects below it) holds a character Neovim cannot put on
+  its runtimepath (`cmd_nvim.rtp_unsafe_char`, as `nvim trust` refuses such a project: spec.lua
+  switches the integration off there, and after minutes of installs every smoke check failed
+  blaming `.lazy.lua`'s trust;
+  `test_cmd_nvim.test_prepare_dir_refuses_a_dir_neovim_cannot_put_on_its_runtimepath`), and only
   wipes a dir carrying its marker `.pytemplate-nvim-test`. One run at a time per `--dir`: `_run`
   holds `project.base_lock` on `<dir>/lock` around the run (a second run is refused, "another run
   is using <dir>", instead of deleting the first's logs or its base as it installs). Its `./pyt` steps get

@@ -1783,8 +1783,11 @@ regenerate the root (CLAUDE.md, section 11).
   yours, with LazyVim and its plugins at pinned commits (minutes the first time). Its projects
   get git repositories of their own, even when `--dir` is inside one of yours; a `--dir` (or an
   `--e2e --base`) whose parent path holds `:` (`;` on Windows), which git cannot keep apart
-  from a repository around it, is refused. `--fresh`
-  reinstalls that LazyVim; `--require` fails instead of skipping when nvim or git is missing.
+  from a repository around it, is refused, and so is a `--dir` whose path holds a character
+  Neovim cannot put on its runtimepath (`[ ] { } , \ ' $` or a backtick; on Windows `[ , $`),
+  where the `./pyt` integration cannot load, as `./pyt nvim trust` says of such a project.
+  `--fresh` reinstalls that LazyVim; `--require` fails instead of skipping when nvim or git is
+  missing.
 - `--e2e [PRESET ...] [--backends B,..] [--methods M,..] [--quick|--full]`
   `[--gui auto|on|off] [--keep] [--reuse] [--json] [--base DIR]`: creates a project of each preset
   with `./pyt new` in a short temporary folder and checks what it got, then works in it like a

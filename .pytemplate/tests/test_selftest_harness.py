@@ -467,6 +467,17 @@ def test_nvim_dir_git_cannot_be_kept_inside_is_refused(nvim_run: dict[str, Any],
     assert e.value.code == 2 and nvim_run["ran"] == [] and not d.parent.exists()
 
 
+def test_nvim_dir_neovim_cannot_put_on_its_runtimepath_is_refused(nvim_run: dict[str, Any], tmp_path: Path) -> None:
+    """spec.lua switches the ./pyt integration off in a project whose path Neovim cannot put on
+    its runtimepath, as `nvim trust` refuses one: a --dir named with `[` installed the isolated
+    LazyVim, made and synced every project, then failed every smoke check with "is .lazy.lua
+    trusted?". Refused before anything is made."""
+    d = tmp_path / "rtp[2]" / "w"
+    with pytest.raises(PytError, match="holds `\\[`, which Neovim cannot put on its 'runtimepath'") as e:
+        nvimtest.selftest(make(), ["script", "--dir", str(d)])
+    assert e.value.code == 2 and nvim_run["ran"] == [] and not d.parent.exists()
+
+
 def test_nvim_dir_that_would_hide_the_templates_repository_is_refused(nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A --dir next to a template that is a subfolder of a bigger repository: git there must not
     see a repository around --dir, which hides the template's own (new would copy its untracked
