@@ -1012,8 +1012,8 @@ def chain_advice(repo: Repo) -> str:
 def show_status(cfg: Config, project: Path = ROOT) -> int:
     try:
         repo = find_repo(project)
-    except NotInGit as e:
-        ui.info(f"hooks: {e} (no git hook)")
+    except NotInGit as e:  # the answer, as the status line is in a repository: -q never hides it
+        ui.report(f"hooks: {e} (no git hook)")
         return 0
     ui.step(f"git hooks: {_show(repo.hooks_dir, repo)}")
     passed, label, hint = _status_line(cfg, repo)

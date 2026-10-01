@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_apply, cmd_dev, config, envs, hooks, lintc, mypyc, proc, render  # noqa: E402
+from runner import cmd_apply, cmd_dev, config, envs, hooks, lintc, mypyc, proc, render, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import IS_WINDOWS, ROOT, TEMPLATE  # noqa: E402
 from runner.ui import PytError  # noqa: E402
@@ -249,6 +249,19 @@ def test_find_repo_reports_other_git_errors(tmp_path: Path, monkeypatch: pytest.
     assert len(lines) == 1 and lines[0][0] is None and "dubious ownership" in lines[0][2]
     with pytest.raises(PytError, match="dubious ownership"):
         hooks.show_status(make(), tmp_path)
+
+
+@needs_git
+def test_status_outside_git_answers_under_q(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`./pyt -q hooks` (status) outside a git work tree printed nothing at all: its answer was
+    progress for -q, which hides progress, never what was asked for (in a repository the status
+    line prints)."""
+    folder = tmp_path / "plain"
+    folder.mkdir()
+    monkeypatch.setattr(ui, "QUIET", True)
+    assert hooks.show_status(make(), folder) == 0
+    err = capsys.readouterr().err
+    assert "is not inside a git work tree" in err and "(no git hook)" in err, err
 
 
 # --- install / uninstall / status --------------------------------------------------------------------
