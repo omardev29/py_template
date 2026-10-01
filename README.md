@@ -1146,7 +1146,8 @@ about 7 minutes, the next ones about 3.
   file). Its Python runs in the browser (Pyodide, loaded from a CDN with the page), where the
   skeleton's core runs in the page's event loop. Android (`apk`, `aab`) builds need a JDK 17
   (`JAVA_HOME`) and the Android SDK (`ANDROID_HOME`); Flet installs whichever is missing.
-- `flet build` ignores `uv.lock`: the runner pins the locked versions in its build project. It
+- `flet build` ignores `uv.lock`: the runner pins the locked versions in its build project, and
+  a local library (`./pyt add ./libs/x`) goes in as its code is when the build runs. It
   reads `[tool.flet]` and the `[project] description` of `pyproject.toml`, where `org`,
   `company` and `copyright` are placeholders that end up in the app; `[tool.flet.app] path` is
   always `src`.
