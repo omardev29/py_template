@@ -2034,12 +2034,27 @@ class Tidy:
     those are tidied afterwards: a file you keep unformatted or unsorted stays as you wrote it."""
 
     formatted: set[str]  # `ruff format --check` passed
-    sorted_imports: set[str]  # no I001 (import block un-sorted) under the project's typing profile
+    sorted_imports: set[str]  # no I001 (import block un-sorted), when the import order is checked
+
+
+def _checks_import_order(cfg: Config) -> bool:
+    """Whether `check all` (and the generated CI, which runs it) checks the import order: a typing
+    profile of a supported backend selects ruff's I001. Only the active one's was asked, and every
+    preset's defaults (`off` on cpython: no I; `mypyc` on mypyc: I) left the imports a new name
+    moved unsorted, and check all failed with I001 that no ./pyt command fixed."""
+    def selects(prefixes: object) -> bool:
+        return isinstance(prefixes, list) and any(isinstance(p, str) and (p == "ALL" or "I001".startswith(p)) for p in prefixes)
+
+    for profile in {cfg.profile_for(b) for b in cfg.backend.supported}:
+        ruff = render.load_profile(profile).get("ruff", {})
+        if selects(ruff.get("select")) and not selects(ruff.get("ignore")):
+            return True
+    return False
 
 
 def tidy_before(cfg: Config, plan_: Plan, root: Path | None = None) -> Tidy | None:
     """Before the rename: which rewritten Python files ruff accepts as they are (formatting, and
-    the import order when the typing profile selects ruff's I rules). None: ruff cannot run."""
+    the import order when check all checks it: _checks_import_order). None: ruff cannot run."""
     from .cmd_dev import _profile_file, config_arg
 
     root = root or ROOT
@@ -2047,10 +2062,15 @@ def tidy_before(cfg: Config, plan_: Plan, root: Path | None = None) -> Tidy | No
     if not files or proc.DRY_RUN or not envs.tool_env(cfg).python.is_file():
         return None
     paths = [root / f for f in files]
+    order = _checks_import_order(cfg)
     try:
         config_file = config_arg(_profile_file(cfg, cfg.profile_for(), "ruff"))
         fmt_code, fmt_out = _ruff(cfg, ["format", "--check", "--config", config_file, "--force-exclude", "--output-format", "concise"], paths)
-        lint_code, lint_out = _ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--no-fix", "--output-format", "concise"], paths)
+        lint_code, lint_out = (
+            _ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--no-fix", "--select", "I001", "--output-format", "concise"], paths)
+            if order
+            else (0, "")
+        )
     except (PytError, OSError):
         return None
     unformatted = {_same_path(m.group("old") or m.group("path")) for m in _UNFORMATTED.finditer(fmt_out)}
@@ -2059,13 +2079,14 @@ def tidy_before(cfg: Config, plan_: Plan, root: Path | None = None) -> Tidy | No
     unsorted = {_same_path(m.group("path")) for m in _UNSORTED.finditer(lint_out)}
     return Tidy(
         formatted={f for f in files if _same_path(root / f) not in unformatted},
-        sorted_imports={f for f in files if _same_path(root / f) not in unsorted} if lint_code in (0, 1) else set(),
+        sorted_imports={f for f in files if _same_path(root / f) not in unsorted} if order and lint_code in (0, 1) else set(),
     )
 
 
 def tidy_after(cfg: Config, plan_: Plan, clean: Tidy | None, root: Path | None = None) -> None:
-    """After the rename: sort the imports the new name moved (only when the typing profile selects
-    ruff's I rules) and re-format, each only in the files that were clean before. Best effort: it
+    """After the rename: sort the imports the new name moved (when check all checks their order,
+    whatever the active profile selects: `--select I001`) and re-format, each only in the files
+    that were clean before. Best effort: it
     never fails the rename. It runs right after the files are written, before the re-lock (the
     ruff of the environment as it is: `--no-sync`): a re-lock that failed or was interrupted
     left the rename to `./pyt apply`, which finds the names in line and tidies nothing."""
@@ -2086,7 +2107,8 @@ def tidy_after(cfg: Config, plan_: Plan, clean: Tidy | None, root: Path | None =
         config_file = config_arg(_profile_file(cfg, cfg.profile_for(), "ruff"))
         codes = [0]
         if sortable:
-            codes.append(_ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--fix-only", "--fixable", "I001", "--quiet"], sortable, sync=False)[0])
+            argv = ["check", "--config", config_file, "--force-exclude", "--fix-only", "--select", "I001", "--fixable", "I001", "--quiet"]
+            codes.append(_ruff(cfg, argv, sortable, sync=False)[0])
         if formatted:
             codes.append(_ruff(cfg, ["format", "--config", config_file, "--force-exclude", "--quiet"], formatted, sync=False)[0])
     except (PytError, OSError) as e:

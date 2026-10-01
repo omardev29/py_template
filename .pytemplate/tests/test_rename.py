@@ -2528,3 +2528,45 @@ def test_ruff_tidy_in_a_project_folder_named_like_a_variable(tmp_path: Path, mon
     rename.apply_plan(root, planned)
     rename.tidy_after(rename.validate_config(planned.config.new), planned, clean, root)
     assert all(len(line) <= 100 for line in wrap.read_text(encoding="utf-8").splitlines())
+
+
+@pytest.mark.parametrize("supported", [["cpython", "mypyc"], ["cpython"]], ids=["the preset's backends", "no profile checks the order"])
+def test_the_tidy_up_sorts_the_imports_check_all_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, supported: list[str]) -> None:
+    """Every preset's default: `off` on cpython (no I rules, the active profile) and `mypyc` on
+    mypyc (I), which `check all` and the generated CI run too. The tidy-up asked only the active
+    profile and never sorted: renamed from zzz to alpha, `import helpers` stayed before
+    `import alpha...`, check all failed with I001, and `./pyt lint --fix` (the active profile)
+    fixed nothing. Where no profile of a supported backend checks the order, it stays as it was.
+    The real ruff of .venv, started in the project as rename starts it."""
+    ruff = ROOT / ".venv" / ("Scripts/ruff.exe" if sys.platform == "win32" else "bin/ruff")
+    if not ruff.is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "zzz")
+    toml = root / "pytemplate.toml"
+    toml.write_text(config.set_value(toml.read_text(encoding="utf-8"), "backend", "supported", supported), encoding="utf-8", newline="\n")
+    for module, name, value in ((render, "ROOT", root), (cmd_dev, "ROOT", root), (cmd_dev, "BUILD", root / ".build"), (rename, "_RUNNER_CWD", root)):
+        monkeypatch.setattr(module, name, value)
+
+    def uv(_env: envs.PyEnv, argv: list[Any], *, cwd: Path, **_kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        return subprocess.run([str(ruff), *args[args.index("ruff") + 1 :]], cwd=cwd, capture_output=True, text=True, timeout=120, check=False)
+
+    monkeypatch.setattr(envs, "uv", uv)
+    (root / "src" / "helpers.py").write_text('def greet() -> str:\n    return "hello"\n', encoding="utf-8")
+    test = root / "tests" / "test_helpers.py"
+    test.write_text("import helpers\nimport zzz.core.bench as bench\n\n\ndef test_greet() -> None:\n    assert helpers.greet() and bench\n", encoding="utf-8")
+    planned = rename.plan(root, "zzz", "alpha")
+    clean = rename.tidy_before(_load(root), planned, root)
+    assert clean is not None
+    rename.apply_plan(root, planned)
+    rename.tidy_after(rename.validate_config(planned.config.new), planned, clean, root)
+    text = test.read_text(encoding="utf-8")
+    if "mypyc" in supported:  # sorted: check all's mypyc profile finds no I001
+        assert text.index("import alpha.core.bench") < text.index("import helpers"), text
+        mypyc_profile = cmd_dev._profile_file(_load(root), "mypyc", "ruff")
+        r = subprocess.run([str(ruff), "check", "--config", cmd_dev.config_arg(mypyc_profile), "--select", "I001", "tests/test_helpers.py"], cwd=root, capture_output=True, text=True, timeout=120, check=False)
+        assert r.returncode == 0, r.stdout + r.stderr
+    else:  # nothing checks the order: the file keeps it
+        assert text.index("import helpers") < text.index("import alpha.core.bench"), text

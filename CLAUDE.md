@@ -1549,8 +1549,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     link and a half-renamed project was the only other way,
     `test_rename.test_a_linked_src_folder_stops_the_plan`).
 - ruff tidy-up (`tidy_before`/`tidy_after`; best effort, never fails the rename): the new name
-  has another length and sort position, so `ruff check --fix-only --fixable I001` (acts only when
-  the active typing profile selects I) and `ruff format` run on the rewritten Python files, each
+  has another length and sort position, so `ruff check --fix-only --select I001` (when a typing
+  profile of a supported backend selects I001, `_checks_import_order`: `check all` and the
+  generated CI check the order with each of them; only the active one was asked, and every
+  preset's default, `off` on cpython, left check all failing with I001 after a rename) and `ruff
+  format` run on the rewritten Python files, each
   only on the files ruff accepted BEFORE the rename (`Tidy`: a file kept unformatted or unsorted
   stays so), with the active profile's `.build/cfg/ruff-*.toml` (`cmd_dev._profile_file`), like
   the hook. `tidy_after` runs right after the files are written (rename and apply), before the
