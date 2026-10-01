@@ -943,7 +943,9 @@ header rules (with detector tests proving each rule fires).
   global mode, 5.2); 3 = missing requirement (uv, a uv older than
   `envs.MIN_UV`, a program (or the interpreter a script's `#!` line names: `proc._not_found`;
   a `#!` line that ends in a carriage return, a CRLF checkout used from WSL, is named as that,
-  never as a missing `/bin/sh`: `test_cli_core.test_a_script_with_windows_line_endings_says_so`),
+  never as a missing `/bin/sh`: `test_cli_core.test_a_script_with_windows_line_endings_says_so`;
+  the `.gitattributes` line it suggests names the file relative to the project, which a task's
+  absolute program was not: `test_the_crlf_hint_names_a_gitattributes_line_git_applies`),
   a C compiler mypyc cannot start, an interpreter, Neovim/git with `--require`, the runner
   itself started on Python < 3.11 by `pyt.py`'s check; what uv itself reports missing, an
   interpreter it can neither find nor download or a program `uv run` cannot spawn (a `uv =

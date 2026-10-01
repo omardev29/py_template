@@ -363,11 +363,19 @@ def _not_found(program: str, workdir: Path, env: Mapping[str, str]) -> str:
         interpreter = words[0] if words else "(empty)"
         if len(words) == 1 and first.rstrip(b"\n").endswith(b"\r"):
             # A CRLF checkout (a Windows checkout used from WSL): exec looks for "/bin/sh\r",
-            # and split() dropped the CR, so the message named a /bin/sh that exists.
+            # and split() dropped the CR, so the message named a /bin/sh that exists. The
+            # .gitattributes line names the file relative to the project (a pattern is relative to
+            # the folder of its .gitattributes): a task's program reaches here absolute, and git
+            # matched no line that named it so.
+            inside = rel(path)
+            if os.path.isabs(inside):  # outside the project: the .gitattributes of its own repository
+                shown, keep = program, "git keeps them with a `text eol=lf` line for it in the .gitattributes of its repository"
+            else:
+                shown, keep = inside, f"git keeps them with a line such as `{inside} text eol=lf` in .gitattributes"
             return (
-                f"cannot run {program}: its #! line ends with a carriage return (Windows line endings), "
+                f"cannot run {shown}: its #! line ends with a carriage return (Windows line endings), "
                 f"so the interpreter it names is {interpreter!r} plus that CR, which does not exist: save it "
-                f"with LF line endings (git keeps them with a line such as `{program} text eol=lf` in .gitattributes)"
+                f"with LF line endings ({keep})"
             )
         return f"cannot run {program}: the interpreter of its #! line was not found: {interpreter}"
     return f"cannot run {program}: it exists, but what it needs to start (its loader or interpreter) was not found"

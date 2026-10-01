@@ -673,6 +673,34 @@ def test_a_script_with_windows_line_endings_says_so(tmp_path: Path) -> None:
     assert "was not found: /bin/sh" not in str(e.value)
 
 
+@posix
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_the_crlf_hint_names_a_gitattributes_line_git_applies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A task's program reaches proc.run absolute (run_task anchors tools/crlf to the task's
+    cwd), and the hint said to add `/home/.../tools/crlf text eol=lf` to .gitattributes, a pattern
+    git never matches (patterns are relative to their .gitattributes). It names the file
+    relative to the project; git applies the line it suggests. The real proc.run: the script
+    fails to start."""
+    monkeypatch.setattr(project, "ROOT", tmp_path)
+    monkeypatch.setattr(tasks, "ROOT", tmp_path)
+    (tmp_path / "tools").mkdir()
+    script = tmp_path / "tools" / "crlf"
+    script.write_bytes(b"#!/bin/sh\r\necho crlf\r\n")
+    script.chmod(0o755)
+    cfg = make({"tasks": {"t5": {"cmd": ["tools/crlf"], "uv": False}}})
+    with pytest.raises(PytError) as e:
+        tasks.run_task(cfg, "t5", [], lambda argv: 0)
+    message = str(e.value)
+    assert e.value.code == 3 and message.startswith("cannot run tools/crlf: its #! line ends with a carriage return"), message
+    line = re.search(r"a line such as `([^`]+)` in \.gitattributes", message)
+    assert line is not None and line.group(1) == "tools/crlf text eol=lf", message
+    git = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "no-gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, env=git, check=True)
+    (tmp_path / ".gitattributes").write_text(line.group(1) + "\n", encoding="utf-8")
+    attrs = subprocess.run(["git", "check-attr", "eol", "--", "tools/crlf"], cwd=tmp_path, env=git, capture_output=True, text=True, check=True).stdout
+    assert attrs.strip() == "tools/crlf: eol: lf", attrs
+
+
 @pytest.mark.parametrize(("name", "message"), [("missing", "folder not found"), ("a-file", "not a folder")])
 def test_a_bad_working_folder_is_named(name: str, message: str, tmp_path: Path) -> None:
     (tmp_path / "a-file").write_text("x", encoding="utf-8")
