@@ -1107,6 +1107,36 @@ def test_sync_tree_handles_type_changes_and_removed_packages(tmp_path: Path) -> 
     assert (dst / "pkg" / "__pycache__").is_dir()  # the caches of live folders are kept
 
 
+def _case_insensitive(folder: Path) -> bool:
+    """Whether the file system of `folder` finds a name in another case (macOS's and Windows'
+    default volumes)."""
+    probe = folder / "CaseProbe"
+    probe.mkdir()
+    try:
+        return (folder / "caseprobe").exists()
+    finally:
+        probe.rmdir()
+
+
+def test_sync_tree_follows_a_case_only_rename(tmp_path: Path) -> None:
+    """A case-only rename in src/ (`git mv Data.py data.py`, a folder Core/ -> core/) on a
+    case-insensitive volume, where the copy is still found under its old name: Windows kept that
+    spelling, which Python's case-sensitive import never finds, and macOS deleted the copy as a
+    file src/ no longer has, so the first build after the rename shipped without the module."""
+    if not _case_insensitive(tmp_path):
+        pytest.skip("a case-sensitive file system (the macOS and Windows runs take this test)")
+    src, dst = _project(tmp_path / "src", {"pkg/Data.py": "X = 1\n", "pkg/Core/m.py": "Y = 2\n"}), tmp_path / "dst"
+    for path in (src / "pkg" / "Data.py", src / "pkg" / "Core" / "m.py"):
+        os.utime(path, (1_700_000_000, 1_700_000_000))  # whole seconds, which every file system keeps
+    mypyc.sync_tree(src, dst)
+    for old, new in (("Data.py", "data.py"), ("Core", "core")):
+        (src / "pkg" / old).rename(src / "pkg" / "renaming")  # in two steps, which any file system takes
+        (src / "pkg" / "renaming").rename(src / "pkg" / new)
+    mypyc.sync_tree(src, dst)
+    assert _snapshot(dst) == {"pkg": None, "pkg/core": None, "pkg/core/m.py": b"Y = 2\n", "pkg/data.py": b"X = 1\n"}
+    assert mypyc.sync_tree(src, dst) == 0  # stable
+
+
 def test_sync_tree_leaves_the_tool_caches_out(tmp_path: Path) -> None:
     """pytest, Hypothesis, mypy or ruff run from inside src/ leave their caches there: the stage
     and the payloads (what the builds ship) never get them."""

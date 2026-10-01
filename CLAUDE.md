@@ -2308,7 +2308,14 @@ Formats:
   vendored native library, which must be `git add -f`ed past `.gitignore`) is app content and
   synced like any file, so `run mypyc` and every payload see what `run cpython` sees.
   `mypyc.build` passes `owned=modules`; `cmd_build.payload` and `methods/flet.py` use the
-  default. Not handled: a case-only rename on a case-insensitive file system. Every copy is
+  default. A copy spelled otherwise than its source is made again (`_spelled_otherwise`: the file
+  system finds it while its folder lists no entry of exactly that name, a case-only rename in
+  `src/` on a case-insensitive volume, `Data.py` -> `data.py` or `Core/` -> `core/`): Windows,
+  whose paths compare without case, kept the old spelling, which Python's case-sensitive import
+  never finds, until `./pyt clean`, and macOS, whose paths compare with case, deleted the copy as
+  a file `src/` no longer has, so the first build after the rename shipped without the module
+  and said ok (`test_sync_tree_follows_a_case_only_rename`, where the temporary folder is
+  case-insensitive). Every copy is
   owner-writable (`copy_writable`; an unchanged read-only copy an older build left is fixed in
   place): copy2 kept the mode of a read-only file of `src/` (a Perforce checkout, a link into
   the Nix store), and once it changed the next build could not replace the copy (Windows: not
@@ -6221,9 +6228,13 @@ Windows:
   maps `proc.STATUS_CONTROL_C_EXIT` to 130 (5.3). Test:
   `test_cli_core.py::test_main_maps_every_outcome_to_its_exit_code`. Goes: never.
 - **Case-insensitive file systems** (LIMITATION, macOS too): a case-only rename needs two moves,
-  and `Lib/` also matches `lib/`. Fix: `rename.apply_plan`; `portable.runtime_stdlib` looks for
-  `lib/pythonX.Y` first (5.7, 10). Test:
-  `test_rename.py::test_case_only_folder_fix_on_a_case_insensitive_file_system`. Goes: never.
+  `Lib/` also matches `lib/`, and after a case-only rename in `src/` the stage's and the
+  payloads' copy is still found under its old spelling (Python's import is case-sensitive). Fix:
+  `rename.apply_plan`; `portable.runtime_stdlib` looks for `lib/pythonX.Y` first;
+  `mypyc.sync_tree` makes a copy its folder lists under another spelling again
+  (`mypyc._spelled_otherwise`) (5.7, 9, 10). Test:
+  `test_rename.py::test_case_only_folder_fix_on_a_case_insensitive_file_system`,
+  `test_mypyc_core.py::test_sync_tree_follows_a_case_only_rename`. Goes: never.
 - **A venv is specific to its OS** (LIMITATION, WSL on a Windows checkout): Fix: `.venv*-wsl`
   and `.build/wsl` (`project.ENV_SUFFIX`), WSL read from the kernel and the checkout from its
   mount (`project.detect_wsl`: `project.wsl_kernel`, `project.windows_checkout`; 7). Test:
@@ -6390,8 +6401,6 @@ Behaviour:
   portable and wheel carry them; PyInstaller/Nuitka only bundle what they detect (a library
   loaded with ctypes needs `[deploy.exe] extra_args = ["--add-binary", ...]`), pyz leaves
   extensions out of `common/`, and a cpython/pypy wheel stays tagged `py3-none-any`.
-- `sync_tree` does not detect a case-only rename (`Data.py` -> `data.py`) on a
-  case-insensitive file system: the stage keeps the old spelling until `./pyt clean`.
 - The name check (`presets.check_name_free`) knows the import names of a dependency the user
   added (not pinned by a preset, so not in `presets.IMPORT_NAMES`) only while an environment
   of the project has it installed (`presets._installed_import_names`): in a clone without

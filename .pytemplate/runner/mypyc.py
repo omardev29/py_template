@@ -256,6 +256,24 @@ def _source(path: Path, step: Callable[[], _T]) -> _T:
         raise PytError(f"cannot copy {rel(path)}: {e.strerror or e}") from None
 
 
+def _spelled_otherwise(target: Path, listed: dict[str, set[str] | None]) -> bool:
+    """Whether the file system finds `target` while its folder lists no entry of exactly that
+    name: a case-insensitive volume (macOS's and Windows' default) after a case-only rename in
+    src/ (Data.py -> data.py, Core/ -> core/). Kept, the copy went on under its old name: Windows
+    (whose paths compare without case) shipped that spelling, which Python's case-sensitive import
+    never finds, and macOS (whose paths compare with case) deleted it as a file src/ no longer
+    has, so the first build after the rename was without the module. `listed` caches each
+    folder's names; a folder it cannot list counts as spelled right."""
+    folder = os.fspath(target.parent)
+    if folder not in listed:
+        try:
+            listed[folder] = set(os.listdir(folder))
+        except OSError:
+            listed[folder] = None
+    names = listed[folder]
+    return names is not None and target.name not in names and os.path.lexists(target)
+
+
 def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
     """Copy src -> dst: only what changed; remove what was deleted (except mypyc's extensions).
 
@@ -265,15 +283,24 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
     a folder deleted from src goes with its caches (it must not stay importable as a namespace
     package). `owned`: the compiled modules, whose extensions mypyc manages (see _mypyc_output).
     Every copy is owner-writable (copy_writable), and a read-only one an older ./pyt left is
-    made writable before it is replaced or deleted.
+    made writable before it is replaced or deleted. A copy spelled otherwise than its source
+    (a case-only rename on a case-insensitive volume, `_spelled_otherwise`) is made again.
     """
     changed = 0
     dst.mkdir(parents=True, exist_ok=True)
     seen: set[Path] = set()
+    listed: dict[str, set[str] | None] = {}
     for path in walk(src):
         if _mypyc_output(path, src, owned):
             continue
         target = dst / path.relative_to(src)
+        if _spelled_otherwise(target, listed):
+            if target.is_dir() and not target.is_symlink():
+                remove_tree(target)
+            else:
+                _owner_writable(target)  # Windows deletes no read-only file
+                target.unlink()
+            changed += 1
         if path.is_dir():
             seen.add(target)
             if target.is_symlink() or (target.exists() and not target.is_dir()):  # a file became a folder
