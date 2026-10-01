@@ -1524,7 +1524,8 @@ from `~/game-src`, a symlink to `~/code/game/src`, `pyt test` runs that project 
 folder reached through a junction or a symlink counts only by the path you typed: `cd` to the
 folder it points to). A project found by walking up must
 be yours: one another user owns (anyone may create `/tmp/.pytemplate`) is never run, and on
-Windows a drive root never counts; run such a project's launcher by its path if you trust it.
+Windows a drive root, or the root of a network share (`\\server\share`), never counts; run such
+a project's launcher by its path if you trust it.
 Paths given to the runner itself
 (`./pyt new ../game`, `./pyt pyz-merge a.pyz b.pyz --out all.pyz`) are relative to the
 folder where the command was typed; `~` works everywhere, and on Windows `/c/Users/...`,

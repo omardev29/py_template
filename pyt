@@ -210,14 +210,17 @@ _pt_from_launcher() {
 # $1 = a folder holding .pytemplate/$_pt_entry, found by walking up from $PWD
 # (or the installed template). Its code is not run when another user owns it:
 # anyone may create /tmp/.pytemplate/pyt.py (on Windows, whose owners are not
-# read here: a drive root, where any user may create folders). The folder
-# .pytemplate counts too, where the runner's package is imported from: a hard
-# link keeps the owner of the file it links, and on macOS any user may link a
-# pyt.py of yours into a .pytemplate of theirs, next to a runner of theirs.
+# read here: a drive root, where any user may create folders, and so the root
+# of a network share, //server/share, or its server). The folder .pytemplate
+# counts too, where the runner's package is imported from: a hard link keeps
+# the owner of the file it links, and on macOS any user may link a pyt.py of
+# yours into a .pytemplate of theirs, next to a runner of theirs.
 _pt_foreign() {
     if [ -n "$_pt_win" ]; then
         case $1 in
             / | [A-Za-z]: | [A-Za-z]:/ | /[A-Za-z] | /cygdrive/[A-Za-z]) return 0 ;;
+            //*/*/?*) ;;
+            //*) return 0 ;;
         esac
         return 1
     fi

@@ -1679,3 +1679,29 @@ def test_the_walk_up_never_takes_a_drive_root_on_windows(name: str) -> None:
     run = Run([*_shell_argv(name), "-c", 'eval "$PT_CODE"'], ROOT, _clean_env(PT_CODE=prelude + _launcher_functions("_pt_foreign") + calls))
     assert run.rc == 0, run.out + run.err
     assert run.out.splitlines() == ["C:/ refused", "C: refused", "/c refused", "/cygdrive/d refused", "/ refused", "C:/Users/x taken", "/c/Users/x taken"]
+
+
+@needs_posix
+@pytest.mark.parametrize("name", POSIX_SHELLS)
+def test_the_walk_up_never_takes_a_network_share_root_on_windows(name: str) -> None:
+    """The root of a network share (//server/share, as Git Bash, MSYS2, Cygwin and busybox-w32
+    name \\\\server\\share) is a drive root of its own: a share is often writable by many users,
+    and a //server/share/.pytemplate/pyt.py planted there ran as anyone who typed `pyt` in a
+    folder of that share holding no project. pyt.ps1 refuses it (its walk-up's top), and pyt.cmd
+    cannot run in a UNC folder at all. A project in a folder of a share stays a project."""
+    shares = ("//server/share", "//server/share/", "//server", "//localhost/c$", "//server/share/team", "//server/share/team/x")
+    calls = "".join(f"if _pt_foreign '{d}'; then echo '{d} refused'; else echo '{d} taken'; fi\n" for d in shares)
+    # the walk-up from a folder of the share, with a runner at its root only
+    calls += "_pt_entry_in() { [ \"$1\" = //server/share ]; }\n_pt_root=\n_pt_other=\n_pt_walk //server/share/team/sub || :\necho \"root=[$_pt_root] other=[$_pt_other]\"\n"
+    prelude = ("emulate sh\n" if name == "zsh" else "") + "_pt_win=1\n"
+    run = Run([*_shell_argv(name), "-c", 'eval "$PT_CODE"'], ROOT, _clean_env(PT_CODE=prelude + _launcher_functions("_pt_foreign", "_pt_walk") + calls))
+    assert run.rc == 0, run.out + run.err
+    assert run.out.splitlines() == [
+        "//server/share refused",
+        "//server/share/ refused",
+        "//server refused",
+        "//localhost/c$ refused",
+        "//server/share/team taken",
+        "//server/share/team/x taken",
+        "root=[] other=[//server/share]",
+    ]

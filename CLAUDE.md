@@ -181,14 +181,18 @@ implement the same contract: change them together.
    the owner of the file it links, and on macOS any user may link a `pyt.py` of yours, the
    installed template's, into a `.pytemplate` of theirs next to a `runner/` of theirs, which
    `pyt.py` imports from its own folder); on Windows, whose owners are not read
-   (an Administrators-owned checkout would fail), a drive root is never taken. Otherwise exit 2
+   (an Administrators-owned checkout would fail), a drive root is never taken, nor the root of
+   a network share or its server (`//server/share`, `//server`: the sh launcher took a share
+   root many users may write; `pyt.ps1`'s walk-up stops there as at a drive root, and `pyt.cmd`
+   runs in no UNC folder). Otherwise exit 2
    naming it (`pyt` `_pt_foreign`, `pyt.ps1` `Test-Foreign` through `/bin/sh -c '[ -O ... ]'`
    with the path as it is, `Invoke-Sh`: PowerShell 7 globbed it, and in a folder named `p[0-9]`
    the owner of `p1` next to it decided, section 4.5; `pyt.cmd` stops before the drive root;
    `test_launcher_sh.test_a_launcher_outside_a_project_never_runs_another_users_one`,
    `test_a_link_to_your_own_pyt_py_in_another_users_folder_is_never_run`,
    `test_the_ownership_rule_reads_the_folder_it_runs`,
-   `test_the_walk_up_never_takes_a_drive_root_on_windows`).
+   `test_the_walk_up_never_takes_a_drive_root_on_windows`,
+   `test_the_walk_up_never_takes_a_network_share_root_on_windows`).
    No project found: the installed template of `./pyt install` (section 5.9), where
    `cmd_install.snapshot_dir` puts it: `%LOCALAPPDATA%\pytemplate\template` on Windows (else
    below `%USERPROFILE%\AppData\Local`; neither set: none), elsewhere
