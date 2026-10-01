@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 import shlex
-import shutil
+import string
 from collections.abc import Callable, Mapping
 
 from . import config, envs, proc, ui
@@ -110,17 +110,30 @@ def _dep_argv(name: str, dep: str) -> list[str]:
 
 
 def _check_texts(cfg: Config, name: str, seen: set[str]) -> None:
-    """The placeholders of `name` and of every task its deps reach, before anything runs: a typo
-    ({roots}) was reported only once all the deps had run, which can take minutes."""
+    """The placeholders of `name` and of every task its deps reach, the command each deps entry
+    names and the backend each of them runs on, before anything runs: a typo ({roots}, `tset
+    all`) or a backend = "pypy" the project does not support was reported only once the deps
+    before it had run, which can take minutes."""
+    from .cli import COMMANDS, INIT_REMOVED, INTERNAL  # lazily: cli runs this module's tasks
+
     seen.add(name)
     task = cfg.tasks[name]
     every = dict.fromkeys(config.TASK_PLACEHOLDERS, "")  # {python} is resolved when the task runs
-    for text in (*task.cmd, *task.env.values(), *([task.cwd] if task.cwd else [])):
+    texts = (*task.cmd, *task.env.values(), *([task.cwd] if task.cwd else []))
+    for text in texts:
         _format(name, text, every)
+    # the environment of the task's backend: uv = true runs in it, and {python} names its interpreter
+    if task.cmd and (task.uv or any(field == "python" for text in texts for _, field, _, _ in string.Formatter().parse(text))):
+        _task_env(cfg, task.backend or cfg.backend.active)
     for dep in task.deps:
         first = _dep_argv(name, dep)[0]
-        if first in cfg.tasks and first not in seen:
-            _check_texts(cfg, first, seen)
+        if first in cfg.tasks:
+            if first not in seen:
+                _check_texts(cfg, first, seen)
+        elif first == "init":  # what dispatch says once the deps before it have run
+            raise PytError(f"task '{name}': deps entry {dep!r}: {INIT_REMOVED}")
+        elif first not in COMMANDS and first not in INTERNAL and first not in config.RETIRED_COMMANDS:
+            raise PytError(f"task '{name}': deps entry {dep!r}: unknown command: {first}  (./pyt help lists the commands and tasks)")
 
 
 def _format(name: str, text: str, values: Mapping[str, str]) -> str:
@@ -186,8 +199,9 @@ def run_task(
     argv = [_format(name, a, values) for a in task.cmd] + extra
     extra_env = {k: _format(name, v, values) for k, v in task.env.items()}
     cwd = ROOT / _format(name, task.cwd, values) if task.cwd else ROOT
-    if not proc.DRY_RUN and not cwd.is_dir():  # a dep may create it (a dry run skips the deps)
-        raise PytError(f"task '{name}': cwd {task.cwd!r} is not a folder ({cwd})")
+    problem = None if proc.DRY_RUN else proc.folder_problem(cwd, f"its cwd {task.cwd!r} ({cwd})")
+    if problem:  # a dep may create it (a dry run skips the deps)
+        raise PytError(f"task '{name}': {problem}")
     if task.uv:
         env = _task_env(cfg, backend)
         ui.step(f"task {name}")
@@ -204,20 +218,30 @@ def run_task(
         argv[0] = str(cwd / program)
     elif IS_WINDOWS and not os.path.isabs(program):
         # A bare name: CreateProcess only tries `<name>.exe`, so npm, yarn or mvn (npm.cmd...)
-        # were "not found". Search the task's PATH with PATHEXT, as a shell does (not found:
-        # the name stays, and proc.run says so)
-        found = shutil.which(program, path=base.get("PATH", ""))
+        # were "not found". Search the task's PATH with PATHEXT, as a shell does. Not found
+        # there, the name never reaches CreateProcess bare: it looks in the runner's own folder,
+        # the folder ./pyt was typed in and the runner's PATH first, and a mytool.exe there ran.
+        # A dry run keeps the name (a dep may make the program, as it may make the cwd).
+        found = proc.on_path(program, base.get("PATH", ""), base.get("PATHEXT", ""), relative_to=cwd)
         if found:
-            argv[0] = os.path.abspath(found)
+            argv[0] = found
+        elif not proc.DRY_RUN:
+            raise PytError(f"program not found: {program}  (looked for on the task's PATH, with the extensions of PATHEXT)", 3)
     if IS_WINDOWS and argv[0].lower().endswith((".cmd", ".bat")):
-        for arg in argv[1:]:
+        # Its own path too: list2cmdline quotes it only for a blank, and C:\Users\R&D\...\x.cmd
+        # reached cmd.exe as two commands.
+        for i, arg in enumerate(argv):
             char = _batch_problem(arg)
             if char is not None:
+                what, way_out = (
+                    (f"its path {arg!r}", "Move it to a folder whose path holds no such character (a path with a space is quoted, so ^ & | < > are literal there)")
+                    if i == 0
+                    else (f"the argument {arg!r}", "Pass it without that character (an argument with a space is quoted, so ^ & | < > are literal there)")
+                )
                 raise PytError(
                     f"task '{name}': {os.path.basename(argv[0])} is a batch file, which Windows runs through cmd.exe, "
-                    f"and cmd.exe would change the argument {arg!r} ({char!r}) before the program sees it. "
-                    "Pass it without that character (an argument with a space is quoted, so ^ & | < > are "
-                    "literal there), or run the program behind the batch file directly"
+                    f"and cmd.exe would change {what} ({char!r}) before the program sees it. "
+                    f"{way_out}, or run the program behind the batch file directly"
                 )
     return proc.run(argv, cwd=cwd, env=base, check=False).returncode
 

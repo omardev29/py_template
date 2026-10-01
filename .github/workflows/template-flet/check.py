@@ -353,25 +353,29 @@ def check_apk(project: Path) -> None:
         if missing:
             problems.append(f"lib/{abi}/ lacks {', '.join(missing)}")
     problems += [f"no {n}" for n in APP_ZIPS if n not in zips]
-    app = zips.get("assets/app.zip", {})
-    if app:
+    # Every zip that is there is checked, an empty one too: an empty app.zip, sitepackages.zip or
+    # stdlib.zip skipped the checks of its content, and such an apk passed with the ok line
+    if "assets/app.zip" in zips:
+        app = zips["assets/app.zip"]
         wanted = ("main", f"{pkg}/__init__", f"{pkg}/ui/app", f"{pkg}/core/fractal", f"{pkg}/resources")
         problems += [f"assets/app.zip lacks {w}.py[c] (the app)" for w in wanted if not _module(app, w)]
         problems += [f"assets/app.zip holds the native module {n} (mobile apps ship the .py)" for n in sorted(app) if n.endswith((".so", ".soref"))]
-    site = zips.get("assets/sitepackages.zip", {})
-    if site and not _module(site, "flet/__init__"):
-        problems.append("assets/sitepackages.zip lacks flet")
-    lacking = [n for n in required if n not in _distributions(site)] if site else []
-    if lacking:
-        problems.append(f"assets/sitepackages.zip lacks {', '.join(lacking)} (no .dist-info), which the build project requires on Android")
+    if "assets/sitepackages.zip" in zips:
+        site = zips["assets/sitepackages.zip"]
+        if not _module(site, "flet/__init__"):
+            problems.append("assets/sitepackages.zip lacks flet")
+        lacking = [n for n in required if n not in _distributions(site)]
+        if lacking:
+            problems.append(f"assets/sitepackages.zip lacks {', '.join(lacking)} (no .dist-info), which the build project requires on Android")
     # serious_python moves every native module to lib/<abi>/lib<dotted-name>.so and leaves a
     # `.soref` marker holding that name where the module was
     for zip_name in APP_ZIPS[1:]:
-        entries = zips.get(zip_name, {})
+        if zip_name not in zips:
+            continue  # named above
+        entries = zips[zip_name]
         refs = {n: data.decode("utf-8").strip() for n, data in entries.items() if n.endswith(".soref")}
-        if entries:
-            print(f"  {zip_name}: {len(entries)} entries, {len(refs)} native modules")
-        if entries and not refs:
+        print(f"  {zip_name}: {len(entries)} entries, {len(refs)} native modules")
+        if not refs:
             problems.append(f"{zip_name}: no native module (.soref) at all")
         for marker, lib in sorted(refs.items()):
             lacking = [abi for abi in ABIS if lib not in libs.get(abi, set())]

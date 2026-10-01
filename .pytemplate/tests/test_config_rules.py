@@ -266,7 +266,7 @@ def test_app_assets_on_and_off(assets: str) -> None:
 
 @pytest.mark.parametrize("assets", ["data", "src/assets", "assets/", "../assets", "/tmp/assets", "C:\\x", "Assets", ".."])
 def test_app_assets_only_knows_src_assets(assets: str) -> None:
-    # resources.assets_dir(), portable/boot.py and pyz/__main__.py only look for src/assets/
+    # resources.assets_dir(), portable/boot.py and pyz/_pyz_bootstrap.py only look for src/assets/
     fails({"app": {"assets": assets}}, "app.assets")
 
 
@@ -1091,6 +1091,41 @@ def test_help_and_doctor_with_a_utf16_config(cfg_file: Path, capsys: pytest.Capt
     assert "is UTF-16 text" in err and "internal runner error" not in err and "Traceback" not in err
 
 
+BEYOND_TOMLLIB = [
+    ("an integer of 5000 digits", VALID.replace("schema = 1", "schema = " + "1" * 5000), "Exceeds the limit (4300 digits)"),
+    ("arrays nested 3000 deep", VALID + "\n[vscode.settings]\ndeep = " + "[" * 3000 + "]" * 3000 + "\n", "nested too deeply"),
+]
+
+
+@pytest.mark.parametrize(("label", "text", "message"), BEYOND_TOMLLIB, ids=[n for n, _, _ in BEYOND_TOMLLIB])
+def test_a_config_tomllib_cannot_read_is_a_config_error(cfg_file: Path, capsys: pytest.CaptureFixture[str], label: str, text: str, message: str) -> None:
+    """tomllib raises a plain ValueError for an integer of more than 4300 digits
+    (sys.int_max_str_digits) and a RecursionError for arrays nested about a thousand deep, not
+    its TOMLDecodeError: every command, help included, ended in an internal-error traceback.
+    Now it is the file that is not valid TOML: help still prints, the rest exits 2."""
+    cfg_file.write_text(text, encoding="utf-8")
+    calls = (
+        lambda: config.load(COMMANDS),
+        lambda: config.update_file([("typing", "relaxed", "warn")]),
+        lambda: set_value(text, "typing", "relaxed", "warn"),
+        lambda: cmd_mode._config_from_text(text, "pytemplate.toml"),
+    )
+    for call in calls:
+        with pytest.raises(PytError) as info:
+            call()
+        assert "not valid TOML" in str(info.value) and message in str(info.value), str(info.value)
+        assert info.value.code == 2
+    assert cfg_file.read_text(encoding="utf-8") == text  # nothing rewritten
+    assert cli._python_needed(["check"]) is None and cli._python_needed(["help"]) is None  # dispatch reports it
+    capsys.readouterr()
+    assert cli.main(["help"]) == 0  # help still works (without the custom tasks)
+    out = capsys.readouterr()
+    assert "BACKEND = cpython" in out.out and "custom tasks of pytemplate.toml are not listed" in out.err
+    assert cli.main(["tasks"]) == 2
+    err = capsys.readouterr().err
+    assert "not valid TOML" in err and "internal runner error" not in err and "Traceback" not in err
+
+
 # --- update_file ------------------------------------------------------------------------------------
 
 
@@ -1250,6 +1285,93 @@ def test_mode_rejects_contradictory_arguments(dry: Config, args: list[str], mess
     assert info.value.code == 2
 
 
+@pytest.mark.parametrize(
+    ("command", "args", "repeated"),
+    [
+        ("new", ["{tmp}/p", "--preset", "script", "--preset", "flet"], "--preset"),
+        ("new", ["{tmp}/p", "--name", "a", "--name=bee"], "--name"),
+        ("render", ["--diff", "--diff"], "--diff"),
+        ("__init", ["script", "--name", "a", "--name", "b", "--force"], "--name"),
+    ],
+)
+def test_new_render_and_init_refuse_an_option_given_twice(dry: Config, tmp_path: Path, command: str, args: list[str], repeated: str) -> None:
+    """argparse keeps the last of a repeated option without a word: `new DIR --preset raylib
+    --preset flet --name a --name bee` made a flet project named bee. mode refused it already."""
+    run = {"new": cmd_mode.cmd_new, "render": cmd_mode.cmd_render, "__init": cmd_mode.cmd_init}[command]
+    with pytest.raises(PytError) as info:
+        run(dry, [a.replace("{tmp}", str(tmp_path)) for a in args])
+    assert f"{command}: {repeated} given more than once" in str(info.value) and info.value.code == 2
+    assert not (tmp_path / "p").exists()
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_new_refuses_an_empty_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    """`new DIR --name ""` (a script's "$NAME" with NAME unset) made a project named after the
+    folder without a word, as if --name had been left out: an empty --name is refused before
+    anything is written, in the dry run too."""
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    made: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(presets, "new", lambda dest, preset, name, python=None: made.append((preset, name)))
+    monkeypatch.setattr(cmd_mode.envs, "ensure_python", lambda version: Path(sys.executable))
+    with pytest.raises(PytError) as info:
+        cmd_mode.cmd_new(config.load(set()), [str(tmp_path / "game"), "--name", ""])
+    assert "new: --name is empty" in str(info.value) and info.value.code == 2
+    assert made == [] and not (tmp_path / "game").exists()
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_new_refuses_the_template_folder_whatever_spelling_names_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    """new compared realpath(DEST) with ROOT as strings: another spelling of the template's folder
+    (another case on macOS's case-insensitive volume, where ROOT keeps the case typed; a bind
+    mount) passed, and new made its project inside the template's work tree. A link stands in for
+    that other spelling here (named apart from the folder: on macOS another case is the same name):
+    ROOT names the folder through it, DEST through the folder itself."""
+    template = tmp_path / "template"
+    template.mkdir()
+    try:
+        (tmp_path / "alias").symlink_to(template, target_is_directory=True)
+    except OSError as e:  # Windows without the privilege to make links
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+    monkeypatch.setattr(cmd_mode, "ROOT", tmp_path / "alias")
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    made: list[str] = []
+    monkeypatch.setattr(presets, "new", lambda dest, preset, name, python=None: made.append(name))
+    monkeypatch.setattr(cmd_mode.envs, "ensure_python", lambda version: Path(sys.executable))
+    for dest in (template, template / "game", template / "deep" / "er" / "game"):
+        with pytest.raises(PytError) as info:
+            cmd_mode.cmd_new(config.load(set()), [str(dest), "--name", "game"])
+        assert "the destination folder cannot be inside" in str(info.value) and info.value.code == 2
+    assert made == [] and sorted(p.name for p in template.iterdir()) == []
+    assert not cmd_mode._inside_the_template(tmp_path / "elsewhere" / "game")
+    assert not cmd_mode._inside_the_template(tmp_path)
+
+
+def test_init_refuses_an_empty_name(dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`__init PRESET --name ""` (what `new` runs in the copy) planned the init under the current
+    app name, and presets.new named the project after its folder: an empty name is no name, and
+    refused like any invalid one."""
+    with pytest.raises(PytError) as info:
+        cmd_mode.cmd_init(dry, [dry.app.preset, "--name", "", "--force"])
+    assert "'' is not a valid app name" in str(info.value) and info.value.code == 2
+
+    def no_copy(dest: Path) -> None:
+        raise AssertionError(f"new copied the template into {dest} for an empty name")
+
+    monkeypatch.setattr(presets, "copy_template", no_copy)
+    with pytest.raises(PytError, match="'' is not a valid app name"):
+        presets.new(tmp_path / "game", dry.app.preset, "")
+    assert not (tmp_path / "game").exists()
+
+
+@pytest.mark.parametrize("supported", [["cpython"], ["pypy"], ["cpython", "mypyc"]])
+def test_mode_names_the_compiled_modules_only_where_mypyc_is_supported(supported: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    """`./pyt mode` in a PyPy-only or CPython-only project said "mypyc compiles p1.core"."""
+    cfg = make({"backend": {"active": supported[0], "supported": supported}})
+    assert cmd_mode.cmd_mode(cfg, []) == 0
+    err = capsys.readouterr().err
+    assert ("mypyc compiles myapp.core" in err) is ("mypyc" in supported), err
+
+
 def test_mode_leaves_values_that_are_already_set(dry: Config, capsys: pytest.CaptureFixture[str]) -> None:
     assert cmd_mode.cmd_mode(dry, ["--editor", dry.typing.editor]) == 0
     assert "pytemplate.toml  unchanged" in capsys.readouterr().err
@@ -1284,6 +1406,20 @@ def test_dry_run_new_says_what_git_will_do(git_sandbox: Path, monkeypatch: pytes
     assert "warning: " in err and ".github/workflows/ci.yml" in err and "working-directory" in err
     assert "apps/sub" in err  # the folder the steps must run in
     assert not (outer / "apps").exists()  # a dry run creates nothing
+    # A work tree that ignores the folder (a home folder kept in git, `*` in its .gitignore)
+    # never holds the project: it gets a repository of its own, and no CI advice for that one
+    (outer / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
+    assert cmd_mode.cmd_new(cfg, [str(outer / "code" / "game"), "--name", "game"]) == 0
+    err = capsys.readouterr().err
+    assert "and `git init -b main`" in err and "inside the git work tree" not in err and "ci.yml" not in err, err
+    # ... whatever pathspec setting the user exported: check-ignore refuses each one (exit 128),
+    # which read as "not ignored" (no git init, and the warning that the CI would not run)
+    for name in ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"):
+        monkeypatch.setenv(name, "1")
+        assert cmd_mode.cmd_new(cfg, [str(outer / "code" / "game"), "--name", "game"]) == 0
+        err = capsys.readouterr().err
+        assert "and `git init -b main`" in err and "inside the git work tree" not in err and "ci.yml" not in err, (name, err)
+        monkeypatch.delenv(name)
 
 
 class _Relock:
@@ -1369,6 +1505,37 @@ def test_mode_under_uv_frozen_refuses_the_relock_and_puts_everything_back(tmp_pa
     assert fake.snapshot() == fake.before and fake.synced == []
 
 
+@pytest.mark.parametrize("name", ["UV_FROZEN", "UV_LOCKED"])
+@pytest.mark.parametrize("stale", [False, True])
+def test_mode_dry_run_under_uv_frozen_says_the_relock_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], name: str, stale: bool
+) -> None:
+    """The plan printed "uv.lock would re-lock (uv lock)", exit 0, where the real run refuses that
+    re-lock under the user's UV_FROZEN or UV_LOCKED: for new managed parts (+pypy) and for a lock
+    that `uv lock --check` finds stale (a backend change that leaves pyproject.toml alone)."""
+    cfg = config.load(set())
+    if not stale and cfg.pypy_enabled:
+        pytest.skip("the test adds PyPy support")
+    fake = _Relock(tmp_path, monkeypatch, "none")  # `uv lock --check` fails: a stale lock
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    monkeypatch.setenv(name, "1")
+    if stale:
+        monkeypatch.setattr(render, "pyproject_outdated", lambda c: False)  # only `uv lock --check` decides
+        supported = cfg.backend.supported
+        args = ["--supports", "+mypyc" if "mypyc" not in supported else "-mypyc" if len(supported) > 1 else "+cpython"]
+    else:
+        args = ["--supports", "+pypy"]
+    with pytest.raises(PytError) as info:
+        cmd_mode.cmd_mode(cfg, args)
+    assert f"{name} is set" in str(info.value) and info.value.code == 2, info.value
+    assert "would re-lock" not in capsys.readouterr().err
+    assert fake.snapshot() == fake.before
+    monkeypatch.delenv(name)  # without it the plan still promises the re-lock (render.apply: nothing to compare)
+    monkeypatch.setattr(render, "apply", lambda *a, **k: ([], []))
+    assert cmd_mode.cmd_mode(cfg, args) == 0
+    assert "uv.lock          would re-lock (uv lock)" in capsys.readouterr().err
+
+
 def test_mode_after_a_hand_edit_that_adds_pypy_checks_the_code_and_creates_its_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1411,6 +1578,32 @@ def test_mode_names_the_hand_edited_files_it_leaves_as_they_were(
     err = capsys.readouterr().err
     assert "render: updated .vscode/extensions.json" in err
     assert "not overwriting hand-edited generated files: .vscode/settings.json (./pyt render --force)" in err
+
+
+def test_mode_leaves_out_a_button_of_a_retired_command_as_every_command_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rule 1.11: a [vscode] button of a retired command (shell-setup) is left out with a warning
+    by every command, but mode validated the new configuration (and its dry run's plan) without
+    the builtin commands: it rendered a `pyt: shell-setup` task into tasks.json, which render
+    --check, the generated CI and the pre-commit hook then refused."""
+    _Relock(tmp_path, monkeypatch, "none")
+    cfg_file = tmp_path / "pytemplate.toml"
+    buttons = [*config.load(COMMANDS).vscode.buttons, "shell-setup"]
+    cfg_file.write_text(config.set_value(cfg_file.read_text(encoding="utf-8"), "vscode", "buttons", buttons), encoding="utf-8", newline="\n")
+    cfg = config.load(COMMANDS)  # as dispatch loads it: the button is left out
+    assert "shell-setup" not in cfg.vscode.buttons
+    rendered: list[list[str]] = []
+
+    def apply(new_cfg: Config, *_a: Any, **_k: Any) -> tuple[list[str], list[str]]:
+        rendered.append(list(new_cfg.vscode.buttons))
+        return [], []
+
+    monkeypatch.setattr(render, "apply", apply)
+    other = "pylance" if cfg.typing.editor == "basedpyright" else "basedpyright"
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert cmd_mode.cmd_mode(cfg, ["--editor", other]) == 0
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    assert cmd_mode.cmd_mode(cfg, ["--editor", other]) == 0
+    assert rendered == [cfg.vscode.buttons, cfg.vscode.buttons]  # the plan, then the real render
 
 
 # --- mode: real runs in a throwaway copy of this project ----------------------------------------------
@@ -1545,11 +1738,14 @@ def test_mode_edits_a_taplo_formatted_config(project: Path) -> None:
     path.write_bytes(text.encode("utf-8"))
     before = tomllib.loads(text)
     supported = before["backend"]["supported"]
-    keep = [before["backend"]["active"]]
+    active = before["backend"]["active"]
+    # A change of the expanded array: only the active backend, or, in a project that supports
+    # that one alone (`mode --supports cpython`), another one next to it (never PyPy: no precheck
+    # nor sync). Asking for the list it has, the dry run said "unchanged" and the test failed there
+    other = "cpython" if active == "mypyc" else "mypyc"
+    keep = [active] if supported != [active] else [b for b in config.BACKENDS if b in (active, other)]
     stderr = _ok(project, "--dry-run", "mode", "--supports", ",".join(keep))
     assert f"[backend] supported = {toml_value(keep)}" in stderr
-    if supported == keep:
-        return
     _ok(project, "mode", "--supports", ",".join(keep))
     after = tomllib.loads(path.read_text(encoding="utf-8"))
     assert after == _expected(before, "backend", "supported", keep)

@@ -27,7 +27,7 @@
     "files.watcherExclude": {
         "**/.venv*/**": true,
         "**/.build/**": true,
-        "**/dist/**": true
+        "dist/**": true
     },
     "terminal.integrated.automationProfile.windows": {
         "path": "${env:windir}\\System32\\cmd.exe"

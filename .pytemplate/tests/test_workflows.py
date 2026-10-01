@@ -139,6 +139,9 @@ def test_selftest_workflow_covers_every_os_and_both_floors() -> None:
     assert 0 < linux.index("./pyt render --check") < linux.index("./pyt setup") < linux.index("run: ./pyt selftest -rs")
     floor = image["python-floor"]
     assert "--python 3.11 --with \"$pytest\" --with \"$hypothesis\" python -m pytest" in floor and ".pytemplate/tests" in floor
+    # the suite's own pytest settings, as ./pyt selftest passes them (cli.cmd_selftest): the
+    # project's pyproject.toml gives its app's tests another pythonpath and addopts
+    assert "-c .pytemplate/tests/pytest.ini --rootdir=." in floor
     assert "grep '^hypothesis==' " in floor  # the locked Hypothesis: the property tests need it
     assert "uv run --quiet --python 3.11 --script .pytemplate/pyt.py help" in floor
     new = image["new-project"]
@@ -323,6 +326,72 @@ def test_the_busybox_step_refuses_a_file_that_is_not_the_pinned_one(tmp_path: Pa
                 assert gh_path.read_text(encoding="utf-8").strip().replace("\\", "/") == str(temp / "busybox").replace("\\", "/"), case
             else:
                 assert "not the pinned" in r.stdout + r.stderr and not gh_path.exists(), case
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_nvim_workflow_installs_a_pinned_fd() -> None:
+    """The pinned Windows row of template-nvim.yml ("a red run is a regression, not upstream
+    drift") ran whatever fd Chocolatey served that day (A9-08). One release, the zip scoop and
+    winget install, checked against its SHA-256 before it is unpacked and put on PATH."""
+    text = _text("template-nvim.yml")
+    nvim = jobs(text)["nvim"]
+    assert "choco install" not in nvim
+    assert re.search(r"(?m)^      FD_VERSION: v\d+\.\d+\.\d+$", nvim), nvim
+    assert re.search(r"(?m)^      FD_SHA256: [0-9a-f]{64}$", nvim), nvim
+    step = _step(text, "fd (a pinned release")
+    assert '"https://github.com/sharkdp/fd/releases/download/$env:FD_VERSION/$name.zip"' in step
+    assert step.index("Get-FileHash") < step.index("Expand-Archive") < step.index("GITHUB_PATH"), step
+
+
+def test_the_fd_step_refuses_a_file_that_is_not_the_pinned_one(tmp_path: Path) -> None:
+    """The fd step's own PowerShell against a local server: the pinned zip is unpacked and its
+    folder put on PATH; another file fails the step, is removed and is never unpacked."""
+    import hashlib
+    import http.server
+    import threading
+    import zipfile
+
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("pwsh is not installed")
+    text = _text("template-nvim.yml")
+    script = "\n".join(line[10:] for line in _step(text, "fd (a pinned release").split("        run: |\n", 1)[1].splitlines())
+    version = re.search(r"FD_VERSION: (\S+)", jobs(text)["nvim"])
+    assert version and "https://github.com/sharkdp/fd/releases/download/" in script
+    name = f"fd-{version[1]}-x86_64-pc-windows-msvc"
+    served = tmp_path / "served" / version[1]
+    served.mkdir(parents=True)
+    with zipfile.ZipFile(served / f"{name}.zip", "w") as z:
+        z.writestr(f"{name}/fd.exe", b"not really fd\n")
+    good = hashlib.sha256((served / f"{name}.zip").read_bytes()).hexdigest()
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), lambda *a: Quiet(*a, directory=str(served.parent)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/"
+        ps1 = tmp_path / "step.ps1"
+        ps1.write_text("$ErrorActionPreference = 'stop'\n" + script.replace("https://github.com/sharkdp/fd/releases/download/", url), encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if "proxy" not in k.lower()}
+        for case, digest, ok in (("pinned", good, True), ("other file", "0" * 64, False)):
+            temp = tmp_path / case
+            temp.mkdir()
+            gh_path = tmp_path / f"path-{case}"
+            run_env = {**env, "FD_VERSION": version[1], "FD_SHA256": digest, "RUNNER_TEMP": str(temp), "GITHUB_PATH": str(gh_path)}
+            r = subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-File", str(ps1)], env=run_env, capture_output=True, text=True, timeout=120, check=False)
+            assert (r.returncode == 0) is ok, (case, r.stdout + r.stderr)
+            assert (temp / name / "fd.exe").is_file() is ok, case
+            if ok:
+                # the step's Windows path; pwsh on Linux and macOS reads its `\` as `/` too
+                assert gh_path.read_text(encoding="utf-8").strip().replace("\\", "/") == str(temp / name).replace("\\", "/"), case
+            else:
+                assert "not the pinned" in r.stdout + r.stderr and not gh_path.exists(), case
+                assert not (temp / f"{name}.zip").exists(), case
     finally:
         server.shutdown()
         server.server_close()
@@ -897,6 +966,40 @@ def test_flet_apk_check_reads_serious_pythons_layout(tmp_path: Path, capsys: pyt
     _write_apk(project, _apk_entries(), "app-debug.apk")
     with pytest.raises(check.Failed, match=r"2 \.apk files, not one"):
         check.check_apk(project)
+
+
+@pytest.mark.parametrize(
+    ("empty", "reasons"),
+    [
+        ("assets/app.zip", ["assets/app.zip lacks main.py[c] (the app)", "assets/app.zip lacks pt_flet/ui/app.py[c] (the app)"]),
+        (
+            "assets/sitepackages.zip",
+            [
+                "assets/sitepackages.zip lacks flet",
+                "assets/sitepackages.zip lacks flet, msgpack, httpx, tomli-w, typing-extensions (no .dist-info), which the build project requires on Android",
+                "assets/sitepackages.zip: no native module (.soref) at all",
+            ],
+        ),
+        ("assets/stdlib.zip", ["assets/stdlib.zip: no native module (.soref) at all"]),
+    ],
+)
+def test_flet_apk_check_reads_an_empty_asset_zip_too(tmp_path: Path, capsys: pytest.CaptureFixture[str], empty: str, reasons: list[str]) -> None:
+    """An empty app.zip, sitepackages.zip or stdlib.zip skipped every check of its content, and
+    such an apk passed with the ok line naming the app, flet and the packages it requires."""
+    pytest.importorskip("packaging.requirements")
+    check = _flet_check()
+    project = tmp_path / FLET_PROJECT
+    _flet_project(project)
+    _write_build_project(project)
+    entries = _apk_entries()
+    entries[empty] = {}
+    _write_apk(project, entries)
+    with pytest.raises(check.Failed) as e:
+        check.check_apk(project)
+    lines = [line.strip() for line in str(e.value).splitlines()]
+    for reason in reasons:
+        assert reason in lines, str(e.value)
+    assert "ok   " not in capsys.readouterr().out
 
 
 class _FletPage:

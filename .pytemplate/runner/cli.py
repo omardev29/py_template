@@ -53,7 +53,7 @@ COMMANDS: dict[str, Command] = {
     "hooks": Command("hooks", "cmd_hooks", "Install or remove the git pre-commit hook, or run its checks on the staged files", "[install [--force]|uninstall|run|status]", render=False, group="Environment"),
     # mode and template
     "mode": Command("cmd_mode", "cmd_mode", "Show or change the mode (backend, supported, typing, editor)", "[BACKEND] [--supports +B|-B|B,B...] [--typing auto|off|warn|strict|mypyc] [--editor pylance|basedpyright]", group="Mode"),
-    "render": Command("cmd_mode", "cmd_render", "Regenerate the files derived from pytemplate.toml (.mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua, editor.json, ci.yml)", "[--check] [--diff] [--force]", render=False, group="Mode"),
+    "render": Command("cmd_mode", "cmd_render", "Regenerate the files derived from pytemplate.toml (.python-version, .mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua, editor.json, ci.yml)", "[--check] [--diff] [--force]", render=False, group="Mode"),
     "rename": Command("rename", "cmd_rename", "Rename the app: src/<pkg>, imports, pytemplate.toml, pyproject.toml, uv.lock", "NEW_NAME [--force]", render=False, group="Mode"),
     "new": Command("cmd_mode", "cmd_new", "Create a new project from this template", "DIR [--preset P] [--name NAME]", render=False, group="Mode"),
     "install": Command("cmd_install", "cmd_install", "Install the `pyt` command for use in any folder (run it in a clone of the template)", render=False, group="Mode"),
@@ -248,6 +248,8 @@ def cmd_help(cfg: object, args: list[str]) -> int:
                 print(f"  Needs a project: {NEEDS_A_PROJECT}")
             return 0
         if project.GLOBAL:  # the installed template's own [tasks] are not the user's: never read
+            if name in config.RETIRED_COMMANDS:  # what replaced it, as typing it says
+                raise PytError(_retired(name))
             raise PytError(INIT_OUTSIDE if name == "init" else _unknown_outside(name))
         # Not a builtin: a [tasks] entry, a typo, or a pytemplate.toml that does not load (that
         # error is the answer then: it says why the task is unknown)
@@ -257,6 +259,8 @@ def cmd_help(cfg: object, args: list[str]) -> int:
             return 0
         if name == "init":
             raise PytError(INIT_REMOVED)
+        if name in config.RETIRED_COMMANDS:  # what replaced it, as typing it says (dispatch)
+            raise PytError(_retired(name))
         raise PytError(f"unknown command: {name}  (./pyt help lists the commands and tasks)")
     if project.GLOBAL:
         return _help_outside_a_project()
@@ -300,7 +304,7 @@ def cmd_tasks(cfg: object, args: list[str]) -> int:
 def cmd_selftest(cfg: object, args: list[str]) -> int:
     from . import e2e, envs, mutation, nvimtest, shells
     from .config import Config
-    from .project import TEMPLATE
+    from .project import ROOT, TEMPLATE
 
     assert isinstance(cfg, Config)
     suites: dict[str, Callable[[Config, list[str]], int]] = {
@@ -319,7 +323,19 @@ def cmd_selftest(cfg: object, args: list[str]) -> int:
             )
         return suites[args[0]](cfg, args[1:])
     tool = envs.tool_env(cfg)
-    code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", TEMPLATE / "tests", *args], check=False).returncode
+    # The suite's own settings (-c): pytest looked for them itself and read the project's (its
+    # pyproject.toml, pytest.ini, tox.ini or setup.cfg, and its root conftest.py), so a coverage
+    # gate, python_files or a plugin the project gives its app's tests failed the runner's.
+    # --rootdir=. (the project folder, the cwd) keeps the test ids: .pytemplate/tests/test_x.py::y.
+    # Paths relative to it: pytest 9 reads a '[' in a collection argument as a parametrization, and
+    # in a project folder such as `Projects [2026]` the absolute one stopped the suite (exit 4)
+    tests = TEMPLATE.relative_to(ROOT) / "tests"
+    suite: list[str | Path] = ["-c", tests / "pytest.ini", "--rootdir=.", tests]
+    # Nor the settings the environment gives the app's tests (a CI job's PYTEST_ADDOPTS for
+    # ./pyt test: a coverage gate, --ff), as for selftest --mutation's runs: pytest reads an empty
+    # value as none (envs.uv only adds variables)
+    no_app_settings = {name: "" for name in e2e.PYTEST_VARIABLES}
+    code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", *suite, *args], cwd=ROOT, check=False, extra_env=no_app_settings).returncode
     if any(a in SELFTEST_INFO_FLAGS for a in args):
         return code  # pytest printed its help or version: no mypy of the whole runner after it
     typed = envs.uv_run(
@@ -384,9 +400,10 @@ def dispatch(argv: list[str]) -> int:
             raise PytError(f"unknown command: {name}  (./pyt help)")
         if not task.cmd and _asks_help(args):
             return cmd_help(cfg, [name])  # a deps-only task has no program to pass -h on to
-        if not _OPTS["no_render"]:
-            render.auto(cfg)
-        return tasks.run_task(cfg, name, args, dispatch)
+        with render.once_per_task():  # its builtin deps render again: each line once
+            if not _OPTS["no_render"]:
+                render.auto(cfg)
+            return tasks.run_task(cfg, name, args, dispatch)
     if command.render and not _OPTS["no_render"]:
         render.auto(cfg)
     module = importlib.import_module(f"{__package__}.{command.module}")
@@ -513,7 +530,7 @@ def _python_needed(rest: list[str]) -> str | None:
     name, args = rest[0], rest[1:]
     try:
         data = tomllib.loads(config.read_text())
-    except (PytError, OSError, tomllib.TOMLDecodeError):
+    except (PytError, OSError, *config.TOML_ERRORS):
         return None
     tasks = data.get("tasks")
     if not (isinstance(tasks, dict) and name in tasks):

@@ -14,9 +14,9 @@ import time
 
 import raylib as rl
 
-from {{pkg}} import gfx
-from {{pkg}}.core import render, world
-from {{pkg}}.core.world import SPRITE, World
+from . import gfx
+from .core import render, world
+from .core.world import SPRITE, World
 
 WIDTH = 1280
 HEIGHT = 720
@@ -70,7 +70,11 @@ def main(argv: list[str] | None = None) -> int:
     limit, bunnies = _options(sys.argv[1:] if argv is None else argv)
     backend = _backend()
     rl.SetTraceLogLevel(rl.LOG_WARNING)
-    rl.InitWindow(WIDTH, HEIGHT, b"{{name}}")
+    rl.InitWindow(
+        WIDTH,
+        HEIGHT,
+        b"{{name}}",
+    )
     rl.SetTargetFPS(0 if limit else 144)
 
     texture = gfx.bunny_texture(SPRITE)

@@ -244,7 +244,20 @@ def test_verify_checks_what_new_made(tmp_path: Path) -> None:
     p = ctx.project
     for launcher in ("pyt", "pyt.ps1"):
         (p / launcher).write_text("#!/bin/sh\n", encoding="utf-8")
-    shutil.copyfile(presets.LOCK, p / "uv.lock")  # the template's own versions
+    # A hermetic uv.lock holding exactly the versions do_verify checks (the preset's constraints,
+    # each overridden by a single-version package of the running project's own lock, as
+    # lock_problems resolves them). Copying the running project's lock verbatim failed do_verify
+    # wherever it differs from the preset's tested pins - a removed plain dependency (rich), a
+    # transitive package `./pyt lock --upgrade` dropped, or one the lock forked into two versions -
+    # so the test broke in real projects (CLAUDE.md 13.1: selftest must pass in every one).
+    pins = presets.constraints(info.name)
+    tested = e2e.lock_versions(presets.LOCK) or {}
+    packages = []
+    for name, version in sorted(pins.items()):
+        single = tested.get(name)
+        resolved = next(iter(single)) if single and len(single) == 1 else version
+        packages.append(f'[[package]]\nname = "{name}"\nversion = "{resolved}"\n')
+    (p / "uv.lock").write_text("version = 1\nrequires-python = \">=3.11\"\n\n" + "\n".join(packages), encoding="utf-8")
     description = str(presets.load(info.name)["description"])
     (p / "pyproject.toml").write_text(f"[project]\nname = \"{info.app}\"\ndescription = {json.dumps(description)}\n", encoding="utf-8")
     (p / "README.md").write_text(f"# {info.app}\n", encoding="utf-8")
@@ -275,6 +288,30 @@ def test_verify_checks_what_new_made(tmp_path: Path) -> None:
     assert "no git repository (new runs git init)" in e2e.do_verify(ctx, step, log)[1]
     ctx.results["new"] = SKIP
     assert e2e.do_verify(ctx, step, log)[0] == SKIP, "--reuse: nothing new to verify"
+
+
+def test_runtime_python_uses_the_env_the_projects_own_runner_made(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The e2e projects live in the base, where their own runner may make .venv while this runner's
+    ENV_SUFFIX is -wsl (WSL with a Windows checkout: the base is on the Linux file system), or the
+    reverse (--base on /mnt/c). runtime_python must find whichever env the project actually made."""
+    ctx = make_ctx(tmp_path)
+
+    def make_env(name: str) -> Path:
+        python = e2e.venv_python(ctx.project / name)
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text("", encoding="utf-8")
+        return python
+
+    monkeypatch.setattr(e2e, "ENV_SUFFIX", "-wsl")  # this runner says -wsl; the project made .venv
+    venv = make_env(".venv")
+    assert e2e.runtime_python(ctx, "cpython") == venv
+    monkeypatch.setattr(e2e, "ENV_SUFFIX", "")  # the reverse: this runner says "", project made .venv-wsl
+    e2e.rmtree(ctx.project / ".venv")
+    venv_wsl = make_env(".venv-wsl")
+    assert e2e.runtime_python(ctx, "cpython") == venv_wsl
+    monkeypatch.setattr(e2e, "ENV_SUFFIX", "-wsl")  # pypy follows the same rule
+    pypy = make_env(".venv-pypy")
+    assert e2e.runtime_python(ctx, "pypy") == pypy
 
 
 @POSIX
@@ -317,6 +354,48 @@ def test_rmtree_reaches_a_base_on_a_network_share(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(e2e.shutil, "rmtree", lambda target, **kwargs: removed.append(target))
     e2e.rmtree(cast(Path, Share()))
     assert removed == [r"\\?\UNC\server\share\pt\e2e"]
+
+
+# Run as a user whom folder modes stop: the folders of `tree` get their modes, then `remove` runs.
+REMOVE_A_LOCKED_TREE = r"""
+import json, os, stat, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from runner import cmd_nvim, e2e
+top, modes = Path(sys.argv[2]), json.loads(sys.argv[3])
+for name, mode in modes.items():
+    os.chmod(top / name, int(mode, 8))
+try:
+    {"e2e.rmtree": e2e.rmtree, "cmd_nvim.remove_tree": cmd_nvim.remove_tree}[sys.argv[4]](top)
+    out = "gone" if not os.path.lexists(top) else "left"
+except Exception as e:
+    out = type(e).__name__ + ": " + str(e)
+print("PTOUT" + out)
+"""
+
+
+@pytest.mark.parametrize("remove", ["e2e.rmtree", "cmd_nvim.remove_tree"])
+def test_rmtree_removes_folders_a_test_left_unreadable(tmp_path: Path, unprivileged_python: Path, remove: str) -> None:
+    """A test of the runner that chmods a folder (0o555, 0o000, 0o311, 0o300) and is stopped, or
+    fails, before it puts the mode back leaves it in selftest --mutation's worker folders. The
+    retry of one step (rmtree is fd-based on POSIX) called os.open(name) without its flags: a
+    TypeError no caller catches, after a chmod to 0o200 that took the folder's read and search
+    bits; the cleanup lost the report of the run, and every later run died on that folder
+    (A10-01). The owner may always change his own folders: they get rwx, and the tree goes."""
+    top = tmp_path / "w0"
+    modes = {"a/ro": "555", "a/none": "000", "b/wx": "311", "b/w": "300", "b/w/deeper": "500"}
+    for name in modes:
+        (top / name).mkdir(parents=True, exist_ok=True)
+        (top / name / "f.txt").write_text("x", encoding="utf-8")
+    deepest = sorted(modes, key=lambda n: n.count("/"), reverse=True)  # chmod the inner ones first
+    r = subprocess.run(
+        [str(unprivileged_python), "-c", REMOVE_A_LOCKED_TREE, str(ROOT / ".pytemplate"), str(top), json.dumps({n: modes[n] for n in deepest}), remove],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    for root, dirs, _ in os.walk(top):  # whatever was left, for pytest's own cleanup
+        for d in dirs:
+            os.chmod(os.path.join(root, d), 0o700)
+    assert "PTOUTgone" in r.stdout, r.stdout + r.stderr
 
 
 @needs_git
@@ -368,6 +447,45 @@ def test_a_portable_folder_runs_from_another_path(tmp_path: Path) -> None:
     launcher.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
     assert e2e.do_smoke(ctx, step, log) == (FAIL, "exit code 3")
     assert launcher.is_file(), "back in dist/ after a failure too"
+
+
+# A base whose path holds what cmd reads as syntax: a Windows profile folder may hold & ( ) @ ^
+# (C:\Users\R&D, "John (Lab)"), and the default base lives in %TEMP%, below it.
+CMD_SYNTAX_BASE = "R&D (Lab) x^y@z"
+
+
+def test_the_portable_smoke_hands_cmd_no_path_of_the_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows the portable launcher runs as `cmd /d /c <path>`. Absolute, the path carried the
+    base's own characters: list2cmdline leaves a path without a blank unquoted, and cmd split it at
+    & (it ran C:\\Users\\R, then D\\...); quoted for a blank, cmd /c strips the quotes around ( ) @ ^
+    and split it at the blank: every portable smoke failed (A10-05). It is relative to the working
+    folder it runs in, ctx.work: the app name, backend, method and target key only."""
+    ctx = make_ctx(tmp_path / CMD_SYNTAX_BASE)
+    target = ctx.work / "moved" / "e2escript-cpython-portable-cp314-windows-x86_64" / "e2escript.cmd"
+    calls: list[tuple[list[str], Path]] = []
+    monkeypatch.setattr(e2e, "IS_WINDOWS", True)
+    monkeypatch.setattr(e2e, "call", lambda argv, cwd, *_a, **_k: calls.append((list(argv), cwd)) or (PASS, ""))
+    step = Step("script", "smoke cpython portable", "smoke", backend="cpython", method="portable", expect=("Primes",), timeout=60)
+    assert e2e._smoke(ctx, step, ctx.logs / "smoke.log", target) == (PASS, "")
+    ((argv, cwd),) = calls
+    assert argv[1:3] == ["/d", "/c"] and cwd == ctx.work and (cwd / argv[3]) == target, argv
+    line = subprocess.list2cmdline(argv[1:])
+    assert not set(line) & set('&()@^"%') and CMD_SYNTAX_BASE not in line, line
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe")
+def test_a_portable_folder_runs_from_a_base_cmd_reads_as_syntax(tmp_path: Path) -> None:
+    """For real, on Windows: the moved .cmd launcher runs through cmd from a base named with
+    & ( ) @ ^ (A10-05)."""
+    ctx = make_ctx(tmp_path / CMD_SYNTAX_BASE)
+    folder = ctx.project / "dist" / "e2escript-cpython-portable-cp314-windows-x86_64"
+    folder.mkdir(parents=True)
+    (folder / "e2escript.cmd").write_bytes(b"@echo off\r\necho Primes\r\nexit /b 0\r\n")
+    step = Step("script", "smoke cpython portable", "smoke", backend="cpython", method="portable", expect=("Primes",), timeout=60)
+    log = ctx.logs / "smoke.log"
+    status, detail = e2e.do_smoke(ctx, step, log)
+    assert status == PASS, (detail, log.read_text(encoding="utf-8", errors="replace"))
+    assert (folder / "e2escript.cmd").is_file(), "the folder is back in dist/"
 
 
 @POSIX
@@ -521,6 +639,35 @@ def test_selftest_refuses_a_selection_that_tests_nothing(tmp_path: Path, faked: 
         e2e.selftest(None, ["--quick", "--full", "--base", str(base)])  # type: ignore[arg-type]
 
 
+def test_a_base_git_cannot_be_kept_inside_is_refused_before_anything_is_made(tmp_path: Path, faked: tuple[dict[str, object], list[str]]) -> None:
+    """A --base below a folder named with os.pathsep (`a:b`) inside the user's repository: the git
+    ceiling could not hold it, `new` skipped git init and `setup` installed pytemplate's hook in the
+    user's repository, where it stayed (the run failed and kept the base). Refused with exit 2."""
+    _, ran = faked
+    base = tmp_path / f"a{os.pathsep}b" / "e2e"
+    with pytest.raises(PytError, match="GIT_CEILING_DIRECTORIES") as e:
+        e2e.selftest(None, ["script", "--quick", "--base", str(base)])  # type: ignore[arg-type]
+    assert e.value.code == 2 and ran == [] and not base.parent.exists()
+
+
+@POSIX
+def test_a_passing_run_on_a_symlinked_base_leaves_the_folder_it_names_as_it_was(tmp_path: Path, faked: tuple[dict[str, object], list[str]]) -> None:
+    """A symlinked --base loses only its link and what the run put in the folder it names:
+    selftest cleans up with _cleanup(remove_base=False), then _remove_base once the lock is
+    released, and that unlinked only the link: the marker and the lock file stayed in the user's
+    folder (the test of a symlinked base took _cleanup's other path, which selftest never takes)."""
+    import stat
+
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    assert e2e.selftest(None, ["script", "--quick", "--base", str(link)]) == 0  # type: ignore[arg-type]
+    assert not os.path.lexists(link), "the link stayed"
+    assert real.is_dir() and sorted(p.name for p in real.iterdir()) == [], "the run left files in the folder the link names"
+    assert stat.S_IMODE(real.stat().st_mode) == 0o700
+
+
 def test_selftest_interrupted_returns_130_and_keeps_the_base(tmp_path: Path, faked: tuple[dict[str, object], list[str]], capsys: pytest.CaptureFixture[str]) -> None:
     outcomes, _ = faked
     outcomes["test all"] = KeyboardInterrupt()
@@ -536,25 +683,52 @@ def test_selftest_interrupted_returns_130_and_keeps_the_base(tmp_path: Path, fak
 def test_termination_handlers_are_restored() -> None:
     import signal
 
-    before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
-    with e2e.termination_as_interrupt():
-        assert all(signal.getsignal(sig) != handler for sig, handler in before.items())
-    assert {sig: signal.getsignal(sig) for sig in before} == before
+    watched = (signal.SIGTERM, signal.SIGHUP)
+    outside = {sig: signal.signal(sig, signal.SIG_DFL) for sig in watched}  # as a terminal session has them
+    try:
+        with e2e.termination_as_interrupt():
+            assert all(signal.getsignal(sig) is not signal.SIG_DFL for sig in watched)
+        assert all(signal.getsignal(sig) is signal.SIG_DFL for sig in watched)
+    finally:
+        for sig, handler in outside.items():
+            signal.signal(sig, signal.SIG_DFL if handler is None else handler)
 
 
 @POSIX
-@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
-def test_termination_signal_kills_the_running_step(tmp_path: Path, signame: str) -> None:
-    """SIGTERM/SIGHUP (`timeout`, a closed terminal, `kill`, uv forwarding either) end the running
-    step, which lives in its own session, and the run reports 'interrupted' (130) like Ctrl+C.
-    Without the handlers the runner died at once and the step (a build) went on as an orphan."""
+def test_a_signal_the_run_started_with_ignored_stays_ignored() -> None:
+    """nohup ignores SIGHUP, and uv hands that to the runner: the handler replaced SIG_IGN, and a
+    closed terminal ended a nohup'ed run (a day-long --mutation pass) with 130. It stays ignored,
+    as proc.run and cmd_install leave it; SIGTERM at its default handler is still taken."""
     import signal
 
-    pidfile = tmp_path / "step.pid"
+    outside = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        try:
+            with e2e.termination_as_interrupt():
+                assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+                assert signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL
+                os.kill(os.getpid(), signal.SIGHUP)
+                time.sleep(0.05)  # a signal's Python handler runs between two bytecodes
+        except KeyboardInterrupt:
+            pytest.fail("the hang-up of a run started with SIGHUP ignored interrupted it")
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN and signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    finally:
+        for sig, handler in outside.items():
+            signal.signal(sig, signal.SIG_DFL if handler is None else handler)
+
+
+def _selftest_with_a_sleeping_step(tmp_path: Path, pidfile: Path) -> str:
+    """A `selftest --e2e` whose one step sleeps (its pid in `pidfile`), started with SIGTERM and
+    SIGHUP as a terminal session has them, whatever this suite runs under, or with SIGHUP ignored
+    as nohup starts it (and uv hands it on) when PT_NOHUP is set."""
     step = f"import os, pathlib, time; pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(120)"
-    script = "\n".join(
+    return "\n".join(
         [
-            "import sys",
+            "import os, signal, sys",
+            "signal.signal(signal.SIGTERM, signal.SIG_DFL)",
+            "signal.signal(signal.SIGHUP, signal.SIG_IGN if 'PT_NOHUP' in os.environ else signal.SIG_DFL)",
             f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})",
             "from runner import e2e, proc",
             "proc.find_uv = lambda: sys.executable",
@@ -567,20 +741,66 @@ def test_termination_signal_kills_the_running_step(tmp_path: Path, signame: str)
             f"sys.exit(e2e.selftest(None, ['script', '--quick', '--base', {str(tmp_path / 'base')!r}]))",
         ]
     )
+
+
+def _wait_for_the_step(runner: subprocess.Popen[bytes], pidfile: Path, log: Path) -> int:
+    deadline = time.monotonic() + 60
+    while not (pidfile.is_file() and pidfile.read_text()):
+        assert runner.poll() is None, log.read_text()
+        assert time.monotonic() < deadline, log.read_text()
+        time.sleep(0.05)
+    return int(pidfile.read_text())
+
+
+@POSIX
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+def test_termination_signal_kills_the_running_step(tmp_path: Path, signame: str) -> None:
+    """SIGTERM/SIGHUP (`timeout`, a closed terminal, `kill`, uv forwarding either) end the running
+    step, which lives in its own session, and the run reports 'interrupted' (130) like Ctrl+C.
+    Without the handlers the runner died at once and the step (a build) went on as an orphan."""
+    import signal
+
+    pidfile = tmp_path / "step.pid"
+    script = _selftest_with_a_sleeping_step(tmp_path, pidfile)
     log = tmp_path / "runner.log"
+    env = {k: v for k, v in os.environ.items() if k != "PT_NOHUP"}
     with log.open("wb") as out:
-        runner = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.DEVNULL, stdout=out, stderr=out)
+        runner = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env)
     child = 0
     try:
-        deadline = time.monotonic() + 60
-        while not (pidfile.is_file() and pidfile.read_text()):
-            assert runner.poll() is None, log.read_text()
-            assert time.monotonic() < deadline, log.read_text()
-            time.sleep(0.05)
-        child = int(pidfile.read_text())
+        child = _wait_for_the_step(runner, pidfile, log)
         runner.send_signal(getattr(signal, signame))
         assert runner.wait(timeout=60) == 130, log.read_text()
         assert "interrupted" in log.read_text()
+        assert gone(child), "the step outlived the runner"
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+        if child and not gone(child, wait=0):
+            os.kill(child, signal.SIGKILL)
+
+
+@POSIX
+def test_a_run_started_under_nohup_survives_a_hang_up(tmp_path: Path) -> None:
+    """`nohup ./pyt selftest --e2e --full &` then the terminal closes: the runner starts with
+    SIGHUP ignored (uv hands it on) and must go on, its step too; a SIGTERM still stops it."""
+    import signal
+
+    pidfile = tmp_path / "step.pid"
+    script = _selftest_with_a_sleeping_step(tmp_path, pidfile)
+    log = tmp_path / "runner.log"
+    env = {**os.environ, "PT_NOHUP": "1"}
+    with log.open("wb") as out:
+        runner = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env)
+    child = 0
+    try:
+        child = _wait_for_the_step(runner, pidfile, log)
+        runner.send_signal(signal.SIGHUP)
+        time.sleep(1)
+        assert runner.poll() is None, "a hang-up ended a run started under nohup:\n" + log.read_text()
+        assert not gone(child, wait=0), "a hang-up killed the step of a run started under nohup"
+        runner.send_signal(signal.SIGTERM)
+        assert runner.wait(timeout=60) == 130, log.read_text()
         assert gone(child), "the step outlived the runner"
     finally:
         if runner.poll() is None:

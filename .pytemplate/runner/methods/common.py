@@ -14,14 +14,15 @@ import sys
 import sysconfig
 import tempfile
 import tomllib
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .. import envs, proc, ui
-from ..config import Config
+from ..config import Config, toml_value
 from ..imports import PARSE_ERRORS, iter_runtime_nodes, parse
-from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, host_os, rel
+from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, ROOT, SRC, host_os, rel, write_whole
 from ..ui import PytError
 
 NATIVE_SUFFIXES = (*EXT_SUFFIXES, ".dll", ".dylib")
@@ -45,7 +46,8 @@ UV_PLATFORMS = {
 # sets it) so a uv upgrade or a newer build machine cannot move it
 MACOS_FLOOR = "13.0"
 # uv's names of an architecture: platform.machine() spellings, sysconfig's on Windows, and a
-# 32-bit interpreter on a 64-bit kernel. templates/pyz/__main__.py (_arch) mirrors host_arch
+# 32-bit interpreter on a 64-bit kernel. templates/pyz/_pyz_bootstrap.py (_arch) mirrors
+# host_arch
 ARCH_NAMES = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64", "x86": "x86", "i386": "x86", "i686": "x86"}
 WINDOWS_ARCH = {"win-amd64": "x86_64", "win-arm64": "aarch64", "win32": "x86"}
 ARCH_32BIT = {"x86_64": "x86", "aarch64": "armv7l"}
@@ -163,21 +165,74 @@ def targets_for(cfg: Config, backend: str, keys: list[str]) -> list[Target]:
 
 
 def export_requirements(cfg: Config) -> Path:
-    """Export the runtime dependencies (no dev) with exact versions and hashes from uv.lock.
+    """Export the runtime dependencies (no dependency group) with exact versions and hashes from uv.lock.
 
     --locked, never --frozen: a uv.lock older than pyproject.toml (a dependency added by hand, a
     merge) is refused like every `uv run --locked`; --frozen exported the old lock and the pyz or
     portable build shipped without the new dependency. --no-editable: a workspace or path
     dependency (`./pyt add ./libs/x`) is exported as a path and installed as a real package;
     editable, `uv pip install --target` left only a .pth naming this machine's source folder.
+    --no-default-groups, never --no-dev: [tool.uv] default-groups can name other groups than dev
+    (a lint group of tools), and --no-dev exported them into every pyz and portable lib/.
+
+    The same lock is exported next to it as pylock.toml (pylock_path), which install_deps
+    installs from: each file from the URL uv.lock names. A requirements.txt keeps no index and uv
+    pip reads no [tool.uv.sources], so a package taken from an `explicit = true` index (a private
+    one, PyTorch's) was looked for elsewhere: "No solution found" for every target. The
+    requirements.txt stays what skipped_requirements and requirements_digest read.
     """
     out = BUILD / "deploy" / "requirements.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
-    envs.uv(
-        envs.tool_env(cfg),
-        ["export", "--locked", "--no-dev", "--no-editable", "--no-emit-project", "--format", "requirements.txt", "--output-file", out, "--quiet"],
-    )
+    tool = envs.tool_env(cfg)
+    export = ["export", "--locked", "--no-default-groups", "--no-editable", "--no-emit-project"]
+    envs.uv(tool, [*export, "--format", "requirements.txt", "--output-file", out, "--quiet"])
+    lock = pylock_path(out)
+    envs.uv(tool, [*export, "--format", "pylock.toml", "--output-file", lock, "--quiet"])
+    _rebase_paths(lock, LOCK.parent)
     return out
+
+
+def pylock_path(requirements: Path) -> Path:
+    """The pylock.toml export_requirements writes next to the requirements: what install_deps installs."""
+    return requirements.with_name("pylock.toml")
+
+
+# A local file or folder of a pylock.toml (a directory, archive, sdist or wheel source)
+_PYLOCK_PATH = re.compile(r'(\bpath\s*=\s*)("(?:[^"\\\n]|\\.)*")')
+
+
+def _rebase_paths(lock: Path, project: Path) -> None:
+    """Make the relative paths of a pylock.toml export relative to its own folder.
+
+    uv (0.10.12 to 0.12.19 at least, astral-sh/uv#16299) writes them relative to the project, the
+    folder of uv.lock, but reads them, as PEP 751 says, relative to the file's folder: exported to
+    .build/deploy/pylock.toml, a local library (`./pyt add ./libs/x`) named .build/deploy/libs/x,
+    and the install stopped with "Distribution not found". Only a path that names nothing from the
+    file's folder and something from the project moves: an absolute one, and one a uv that
+    rebases its paths itself already wrote from the file's folder, stay.
+
+    The file is replaced whole (project.write_whole), and only when a path moved: every pyz and
+    portable build of the project exports here, and rewritten in place (truncated, then written)
+    a build started at that moment read it empty ("missing field `lock-version`") or cut after
+    some [[packages]] (fewer packages installed, without an error).
+    """
+    text = lock.read_text(encoding="utf-8")
+
+    def rebase(m: re.Match[str]) -> str:
+        try:
+            path = tomllib.loads(f"path = {m[2]}")["path"]
+        except tomllib.TOMLDecodeError:
+            return m[0]
+        if not isinstance(path, str) or os.path.isabs(path):
+            return m[0]
+        if os.path.exists(os.path.join(lock.parent, path)) or not os.path.exists(os.path.join(project, path)):
+            return m[0]
+        moved = os.path.relpath(os.path.join(project, path), lock.parent)
+        return m[1] + toml_value(moved.replace(os.sep, "/"))
+
+    rebased = _PYLOCK_PATH.sub(rebase, text)
+    if rebased != text:
+        write_whole(lock, rebased.encode("utf-8"))
 
 
 def _version_tuple(text: str) -> tuple[int, int] | None:
@@ -211,20 +266,44 @@ def host_floor(target: Target) -> str | None:
     return None
 
 
+# What uv says when a locked package has no wheel for the --python-platform of a host target's
+# floor: with --only-binary :all: from a pylock.toml ("--no-build" is uv's name for it: uv 0.10.12
+# to 0.12.19), and for a package that publishes no sdist either, from a pylock.toml and from a
+# requirements file
+_NO_FLOOR_WHEEL = re.compile(
+    r"is marked as `--no-build` but has no binary distribution"
+    r"|doesn't have a source distribution or wheel for the current platform|has no wheels with a matching platform tag"
+)
+
+
 def _runs_on(target: Target) -> str:
     if target.os == "linux":
         return f"glibc {platform.libc_ver()[1]}"
     return f"macOS {platform.mac_ver()[0]}"
 
 
+def _needs(site: Path, target: Target) -> str:
+    """What the wheels installed in `site` need of the machine that loads them, for a warning:
+    their floor, as _pyz.json records it (platform_floor: glibc 2.34, macOS 13.0), else this
+    machine's (a wheel built here says no version)."""
+    family, _, version = platform_floor(site).partition(" ")
+    if not version:
+        return _runs_on(target)
+    return f"{'macOS' if family == 'macos' else family} {version}"
+
+
 def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirements: Path) -> Path:
-    """Install the runtime deps for one target (host or cross) with `uv pip install --target`.
+    """Install the runtime deps for one target (host or cross) with `uv pip install --target`,
+    from the pylock.toml export_requirements writes next to `requirements` (each file from the
+    URL uv.lock names: an explicit index's package too).
 
     Cross targets get binary wheels for UV_PLATFORMS (an sdist built here would produce host
     binaries), except the packages that publish no wheel at all (source_only): those are built
-    here, and a native result is refused. The host target gets the same platform floor when this
-    machine can load those wheels (host_floor): without it uv picks the newest the build machine
-    allows, e.g. manylinux_2_34 on Ubuntu 24.04, and the result silently needed that glibc.
+    here, and a native result is refused. The host target gets the same platform floor, wheels
+    only too, when this machine can load those wheels (host_floor): without the floor uv picks the
+    newest the build machine allows, e.g. manylinux_2_34 on Ubuntu 24.04, and the result silently
+    needed that glibc. A package without a wheel for the floor makes the host fall back to its own
+    wheels, with a warning.
     """
     if dest.exists():
         shutil.rmtree(dest)
@@ -234,15 +313,27 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
     own = "pp" if backend == "pypy" else "cp"
     env = envs.runtime_env(cfg, backend) if target.impl == own else envs.tool_env(cfg)
     extra_env = {"MACOSX_DEPLOYMENT_TARGET": _macos_floor()} if target.os == "macos" else {}
-    base: list[str | Path] = ["pip", "install", "--quiet", "--target", dest, "--no-deps", "-r", requirements]
+    # --link-mode copy: `dest` is shipped (a portable lib/, a pyz's sites). uv links the files of
+    # its cache by default (hardlinks on Linux and Windows) and follows the user's link mode
+    # (UV_LINK_MODE, uv.toml, [tool.uv] link-mode): with "symlink" every file of lib/ was an
+    # absolute link into this machine's cache, and the folder and its archive failed anywhere
+    # else (or after `uv cache clean`) while the build passed its own smoke test
+    base: list[str | Path] = ["pip", "install", "--quiet", "--link-mode", "copy", "--target", dest, "--no-deps", "-r", pylock_path(requirements)]
+    # A local library is built again from its folder: uv keys the wheel it built from a folder by
+    # the folder's pyproject.toml, setup.py and setup.cfg only, so once the library's code changed
+    # every build installed the cached wheel of the first one (./pyt run had the new code). Never
+    # --refresh-package: uv refuses it next to --offline or UV_OFFLINE
+    for name in sorted(set(_local_names(LOCK).values())):
+        base += ["--reinstall-package", name]
     if not target.is_host:
         # Wheels only: an sdist built here for another OS gives this machine's binaries. Except
         # the packages that publish no wheel at all (docopt, a workspace library): built here,
         # and kept only when the result is pure Python
         build_here = source_only(LOCK)
+        python = ensure_env(envs.tool_env(cfg)).python
         argv = [
             *base,
-            "--python", ensure_env(envs.tool_env(cfg)).python,
+            "--python", python,
             "--python-platform", UV_PLATFORMS[(target.os, target.arch)],
             "--python-version", target.version,
             "--only-binary", ":all:",
@@ -264,20 +355,41 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
         # The interpreter's full version: uv reads 3.14 as 3.14.0, and a requirement marked
         # python_full_version >= '3.14.1' was left out of the build for this very interpreter
         version = str(envs.interpreter_info(python)["version"])
-        try:
-            # no --only-binary: the host can still build an sdist
-            envs.uv(env, [*base, "--python-platform", floor, "--python-version", version] if floor else base, extra_env=extra_env)
-        except proc.CommandFailed:
-            if not floor:
-                raise
-            ui.warn(
-                f"{target.key}: a dependency has no wheel for {floor} (see above); using the wheels this "
-                f"machine prefers, so the build needs {_runs_on(target)} or newer where it runs"
-            )
-            shutil.rmtree(dest)
-            dest.mkdir(parents=True)
+        if not floor:
             envs.uv(env, base, extra_env=extra_env)
-    drop_install_junk(dest)
+        else:
+            # Wheels only, as for a cross target (a package that publishes none is built here): uv
+            # built the sdist of a package whose wheels all need more than the floor (a
+            # manylinux_2_34 wheel and an sdist), which failed without the toolchain it needs, or
+            # shipped a binary built here instead of the locked wheel. Captured: only uv's "no wheel
+            # for this platform" drops the floor; any other failure (the network, an index, a hash, a
+            # failed build) is raised as it is, and a transient one never loses the floor silently
+            build_here = source_only(LOCK)
+            at_floor = [
+                *base,
+                "--python-platform", floor,
+                "--python-version", version,
+                "--only-binary", ":all:",
+                *(arg for name in build_here for arg in ("--no-binary", name)),
+            ]
+            tried = envs.uv(env, at_floor, extra_env=extra_env, capture=True, check=False)
+            output = ((tried.stderr or "") + (tried.stdout or "")).rstrip()
+            if tried.returncode != 0:
+                if output:
+                    ui.report(output)  # uv's reason, shown even with -q
+                if not _NO_FLOOR_WHEEL.search(output):
+                    raise proc.CommandFailed(tried.args, tried.returncode)
+                shutil.rmtree(dest)
+                dest.mkdir(parents=True)
+                envs.uv(env, base, extra_env=extra_env)
+                # what those wheels need, as _pyz.json records it: it named this machine's glibc
+                ui.warn(
+                    f"{target.key}: a dependency has no wheel for {floor} (see above); using the wheels this "
+                    f"machine prefers, so the build needs {_needs(dest, target)} or newer where it runs"
+                )
+            elif output:
+                ui.report(output)  # a warning of a successful install
+    drop_install_junk(dest, python)
     return dest
 
 
@@ -407,12 +519,14 @@ def _entry_points(dest: Path) -> set[str]:
     return names
 
 
-def drop_install_junk(dest: Path) -> None:
+def drop_install_junk(dest: Path, python: Path | None = None) -> None:
     """Remove what `uv pip install --target` leaves that no app needs: its .lock file, the venv
     hooks (_virtualenv*) and the console/GUI script wrappers in bin/ (Scripts/), whose shebang
     or .exe trampoline holds this machine's absolute .venv path (dead elsewhere, and it leaks the
-    developer's folder). Other files in bin/ stay: wheels such as ruff or uv ship a native binary
-    there and find it at <target>/bin; a real package named bin (with __init__.py) stays too.
+    developer's folder), and so do the data scripts (distutils scripts=, awscli's bin/aws) whose
+    `#!python` uv rewrote to `python`, the interpreter it installed with (_names_the_installer).
+    Other files in bin/ stay: wheels such as ruff or uv ship a native binary there and find it at
+    <target>/bin; a real package named bin (with __init__.py) stays too.
     In each *.dist-info: uv's cache files, and a direct_url.json naming a folder of this machine
     (a local library, installed for real since --no-editable), taken out of RECORD too.
     """
@@ -422,14 +536,36 @@ def drop_install_junk(dest: Path) -> None:
     for info in dest.glob("*.dist-info"):
         _drop_build_records(info)
     names = _entry_points(dest)
+    installer = {os.fsencode(str(python)), os.fsencode(os.path.realpath(python))} if python else set()
     for scripts in (dest / "bin", dest / "Scripts"):
         if not scripts.is_dir() or (scripts / "__init__.py").exists():
             continue
         for f in scripts.iterdir():
-            if f.is_file() and (f.name in names or (f.suffix.lower() == ".exe" and f.stem in names)):
+            if f.is_file() and (f.name in names or (f.suffix.lower() == ".exe" and f.stem in names) or _names_the_installer(f, installer)):
                 f.unlink()
         if not any(scripts.iterdir()):
             scripts.rmdir()
+
+
+def _names_the_installer(script: Path, pythons: set[bytes]) -> bool:
+    """Whether `script` starts with the line uv writes in place of a data script's `#!python`:
+    `#!<python>`, or for a long path or one with a blank `#!/bin/sh` and then `'''exec'
+    '<python>' "$0" "$@"` (a quote in the path written '\\''), `python` one of `pythons`."""
+    if not pythons:
+        return False
+    try:
+        with script.open("rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return False
+    if sys.platform == "win32":  # the same file in any case
+        head, pythons = head.lower(), {p.lower() for p in pythons}
+    first, _, rest = head.partition(b"\n")
+    first = first.rstrip(b"\r")
+    if first.startswith(b"#!") and first[2:] in pythons:
+        return True
+    second = rest.partition(b"\n")[0]
+    return first == b"#!/bin/sh" and any(second.startswith(b"'''exec' '" + p.replace(b"'", b"'\\''") + b"' ") for p in pythons)
 
 
 def _drop_build_records(info: Path) -> None:
@@ -458,25 +594,82 @@ def _drop_build_records(info: Path) -> None:
         record.write_text("".join(kept), encoding="utf-8", newline="")
 
 
-def _platform_wheel(wheel: Path) -> bool:
-    """True when a *.dist-info/WHEEL declares an ABI or platform tag (cp314-cp314-..., py3-none-win_amd64)."""
+def _wheel_tags(wheel: Path) -> list[str]:
+    """The Tag lines of a *.dist-info/WHEEL (cp314-cp314-manylinux_2_28_x86_64, py3-none-any...)."""
     try:
         text = wheel.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
-    for line in text.splitlines():
-        key, _, value = line.partition(":")
-        if key.strip().lower() == "tag":
-            parts = value.strip().split("-")
-            if len(parts) == 3 and (parts[1] != "none" or parts[2] != "any"):
-                return True
+        return []
+    return [value.strip() for key, _, value in (line.partition(":") for line in text.splitlines()) if key.strip().lower() == "tag"]
+
+
+def _platform_wheel(wheel: Path) -> bool:
+    """True when a *.dist-info/WHEEL declares an ABI or platform tag (cp314-cp314-..., py3-none-win_amd64)."""
+    for tag in _wheel_tags(wheel):
+        parts = tag.split("-")
+        if len(parts) == 3 and (parts[1] != "none" or parts[2] != "any"):
+            return True
     return False
 
 
-# The extension ABI in a file name (templates/pyz/__main__.py has the same ABI_RE and abi_tag,
-# which read the running interpreter's EXT_SUFFIX with it): cpython-314[t], cp314[t] (Windows),
-# pypy311-pp73. A target key does not tell PyPy 7.3 (pp73) from PyPy 8 (pp80), nor CPython 3.14
-# from its free-threaded build (3.14t)
+def this_libc() -> str:
+    """The C library the running Python uses on Linux: glibc (os.confstr), musl (its EXT_SUFFIX
+    names it) or "" (another one: Android's). The pyz bootstrap's _libc tells them apart alike."""
+    if sys.platform != "win32":
+        with contextlib.suppress(ValueError, OSError):  # no such name (macOS), not glibc (musl)
+            if (os.confstr("CS_GNU_LIBC_VERSION") or "").startswith("glibc "):
+                return "glibc"
+    return "musl" if "musl" in (sysconfig.get_config_var("EXT_SUFFIX") or "") else ""
+
+
+# The glibc of the legacy manylinux tags (PEP 600 names the others manylinux_X_Y)
+_LEGACY_MANYLINUX = {"manylinux1": (2, 5), "manylinux2010": (2, 12), "manylinux2014": (2, 17)}
+
+
+def _tag_floor(tag: str) -> tuple[str, tuple[int, ...]] | None:
+    """What a wheel's platform tag needs of the machine: ("glibc", (2, 28)) for
+    manylinux_2_28_x86_64, ("musl", ()) for musllinux (a Python cannot tell its musl version),
+    ("macos", (13, 0)) for macosx_13_0_arm64, this machine's C library for a wheel built here
+    (linux_x86_64: its version unknown), None for the rest (win_amd64, any)."""
+    if m := re.fullmatch(r"manylinux_(\d+)_(\d+)_\w+", tag):
+        return "glibc", (int(m[1]), int(m[2]))
+    if m := re.fullmatch(r"(manylinux1|manylinux2010|manylinux2014)_\w+", tag):
+        return "glibc", _LEGACY_MANYLINUX[m[1]]
+    if tag.startswith("musllinux_"):
+        return "musl", ()
+    if m := re.fullmatch(r"macosx_(\d+)_(\d+)_\w+", tag):
+        return "macos", (int(m[1]), int(m[2]))
+    if tag.startswith("linux_") and (libc := this_libc()):
+        return libc, ()
+    return None
+
+
+def platform_floor(lib: Path) -> str:
+    """What the platform wheels installed in a --target folder need of the machine that loads them
+    (pyz's _pyz.json "floor", which the bootstrap's _meets compares): "glibc 2.28" (the newest
+    glibc one of them needs), "musl", "macos 13.0", "glibc" (a wheel built on the build machine),
+    or "" (pure or Windows wheels). A wheel with several tags needs only the least of them."""
+    need: dict[str, tuple[int, ...]] = {}
+    for wheel in lib.glob("*.dist-info/WHEEL"):
+        options: dict[str, tuple[int, ...]] = {}
+        for tag in _wheel_tags(wheel):
+            for plat in tag.split("-")[-1].split("."):  # a compressed tag set: a.b
+                if found := _tag_floor(plat):
+                    family, version = found
+                    options[family] = min(options.get(family, version), version)
+        if len(options) == 1:  # a wheel for several C libraries needs none of them in particular
+            ((family, version),) = options.items()
+            need[family] = max(need.get(family, version), version)
+    if len(need) != 1:
+        return ""  # nothing needed, or wheels of two C libraries: no machine has both
+    ((family, version),) = need.items()
+    return f"{family} {'.'.join(map(str, version))}".rstrip()
+
+
+# The extension ABI in a file name (templates/pyz/_pyz_bootstrap.py has the same ABI_RE and
+# abi_tag, which read the running interpreter's EXT_SUFFIX with it): cpython-314[t], cp314[t]
+# (Windows), pypy311-pp73. A target key does not tell PyPy 7.3 (pp73) from PyPy 8 (pp80), nor
+# CPython 3.14 from its free-threaded build (3.14t)
 ABI_RE = re.compile(r"\.(cpython-(\d+t?)|cp(\d+t?)|pypy(\d+)-(pp\d+))[-.]")
 
 
@@ -489,10 +682,29 @@ def abi_tag(name: str) -> str:
 
 
 def extension_abis(folder: Path) -> list[str]:
-    """The ABIs the extension modules below `folder` were built for (abi3 and an untagged
-    .so/.pyd name none: any interpreter of the platform loads them)."""
+    """The ABIs the extension modules below `folder` name in their file names (abi3 and an
+    untagged .so/.pyd name none: wheel_abis reads what their wheels declare)."""
     tags = {abi_tag(p.name) for p in folder.rglob("*") if p.name.endswith(EXT_SUFFIXES) and p.is_file()}
     return sorted(tags - {""})
+
+
+def wheel_abis(lib: Path, key: str) -> list[str]:
+    """The extension ABIs the wheels installed in `lib` declare in their WHEEL tags (cp314,
+    pypy311_pp73), an abi3 one as the CPython of the target `key` (cp314-linux-x86_64: cp314): only
+    a CPython with the GIL loads it, and its files name no version (`.abi3.so`, and on Windows a
+    bare `.pyd`). A free-threaded 3.14t lists `.abi3.so` among its suffixes, took the target of
+    a pyz whose only native dependency was abi3 (bcrypt) and died of a segmentation fault."""
+    python = key.partition("-")[0]
+    out: set[str] = set()
+    for wheel in lib.glob("*.dist-info/WHEEL"):
+        for tag in _wheel_tags(wheel):
+            parts = tag.split("-")
+            for abi in parts[1].split(".") if len(parts) == 3 else []:
+                if abi == "abi3":
+                    out.update([python] if python.startswith("cp") else [])
+                elif abi != "none":
+                    out.add(abi)
+    return sorted(out)
 
 
 def has_native(path: Path) -> bool:
@@ -625,6 +837,26 @@ def requirements_digest(requirements: Path) -> str:
     return hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest()[:16]
 
 
+# What glob reads as a pattern in a path (glob.has_magic). PyInstaller finds its hooks, and Nuitka
+# the package data its configuration names, with a glob of a folder of the project's .venv that
+# escapes nothing: under a folder such as `games [2026]` the pattern matched no file at all
+GLOB_MAGIC = re.compile(r"[*?[]")
+
+
+def refuse_a_globbed_folder(method: str, consequence: str) -> None:
+    """Refuse, before any work (cmd_build, also in --dry-run, and the method itself), a project
+    whose folder holds a character glob reads as a pattern: the packager of `method` would find
+    none of the files it looks for there, and the build would say done without them."""
+    found = GLOB_MAGIC.search(str(BUILD))  # BUILD is in the project's folder, as .venv is
+    if found:
+        raise PytError(
+            f"{method}: the project's folder holds {found[0]!r} ({ROOT}), which glob reads as a pattern: "
+            f"{consequence}.\n"
+            "  Move the project to a folder whose path has no '[', '*' or '?', or build with --method portable, pyz or wheel",
+            2,
+        )
+
+
 def _move(src: Path, dst: Path) -> None:
     os.replace(src, dst)
 
@@ -637,8 +869,11 @@ def remove_output(path: Path, *also: Path) -> None:
     file is in use (the app still running from the folder, a console in it, an open archive), and
     rmtree used to delete half of the folder before it failed with a traceback. When one cannot
     move, the ones already moved come back, so nothing is deleted. What the moved copies still
-    hold (a scanner, an immutable file) is only a warning: the new output has its place.
+    hold (a scanner, an immutable file) is only a warning: the new output has its place. What an
+    earlier call left aside (_remove_asides) goes first.
     """
+    for p in (path, *also):
+        _remove_asides(p)
     present = [p for p in (path, *also) if p.exists() or p.is_symlink()]
     if not present:
         return
@@ -659,20 +894,83 @@ def remove_output(path: Path, *also: Path) -> None:
             what = "a file in it is in use" if p.is_dir() and not p.is_symlink() else "it is in use or read-only"
             raise PytError(f"cannot replace {rel(p)}: {what} ({_why(e)}){hint}", 1) from None
         moved.append(p)
-    shutil.rmtree(aside, ignore_errors=True)
-    if aside.exists():  # read-only files an older build copied from src/ (Windows deletes none)
+    if not _delete(aside):
+        ui.warn(f"could not delete all of the previous output, moved to {rel(aside)}: delete it by hand")
+
+
+def _delete(folder: Path) -> bool:
+    """Delete a folder of dist/ as far as possible; whether it is gone."""
+    shutil.rmtree(folder, ignore_errors=True)
+    if folder.exists():  # read-only files an older build copied from src/ (Windows deletes none)
         from ..mypyc import make_writable
 
         with contextlib.suppress(OSError):
-            make_writable(aside)
-        shutil.rmtree(aside, ignore_errors=True)
-    if aside.exists():
-        ui.warn(f"could not delete all of the previous output, moved to {rel(aside)}: delete it by hand")
+            make_writable(folder)
+        shutil.rmtree(folder, ignore_errors=True)
+    return not folder.exists()
+
+
+def _remove_asides(path: Path) -> None:
+    """Delete the copies of `path` an earlier remove_output left aside (.<name>.old-*): a Ctrl+C,
+    a SIGTERM or a kill while it deleted the previous output (a portable folder of 70 to 190 MB)
+    left that copy, hidden in dist/, and no later build looked for it."""
+    prefix = f".{path.name}.old-"
+    try:
+        stale = [p for p in path.parent.iterdir() if p.name.startswith(prefix) and p.is_dir() and not p.is_symlink()]
+    except OSError:
+        return
+    for folder in stale:
+        _delete(folder)
 
 
 def _why(e: OSError) -> str:
     """The OS error and, when it names one, the file (the one a running app keeps open)."""
     return f"{e.strerror or e}: {e.filename}" if e.filename else str(e.strerror or e)
+
+
+def copy_tree(
+    src: str | Path,
+    dst: str | Path,
+    *,
+    ignore: Callable[[str, list[str]], Iterable[str]] | None = None,
+    symlinks: bool = False,
+    copy_function: Callable[[str, str], object] = shutil.copy2,
+) -> None:
+    """shutil.copytree for a build's copies, raising the first file it could not copy as its own
+    OSError: copytree goes on past such a file and ends with one shutil.Error that holds every
+    failure as text and no errno, so a full disk, a quota or a file-size limit (cli.NO_ROOM)
+    during a pyz, portable, exe or nuitka build ended in an internal-error traceback, where
+    cli.main prints one line naming the file (exit 1). A write that found no room names the file
+    it could not write (shutil's own error named the source, or nothing). What copytree reports
+    besides files (a link, a folder it could not make) stays its shutil.Error."""
+    from ..cli import NO_ROOM
+
+    failed: list[OSError] = []
+
+    def copy(source: str, target: str) -> object:
+        try:
+            return copy_function(source, target)
+        except OSError as e:
+            if not failed:
+                failed.append(OSError(e.errno, e.strerror, target) if e.errno in NO_ROOM else e)
+            raise
+
+    try:
+        shutil.copytree(src, dst, symlinks=symlinks, ignore=ignore, copy_function=copy)
+    except shutil.Error:
+        if failed:
+            raise failed[0] from None
+        raise
+
+
+def copy_failure(e: OSError) -> str:
+    """What went wrong in a copy, as a line a person reads: shutil.Error printed its list of
+    (source, target, why) tuples, which a message cut at 300 characters left in mid-path."""
+    found = e.args[0] if isinstance(e, shutil.Error) and e.args else None
+    if isinstance(found, list) and found and isinstance(found[0], tuple) and len(found[0]) == 3:
+        more = f" (and {len(found) - 1} more)" if len(found) > 1 else ""
+        return f"{found[0][2]}{more}"
+    return str(e)
 
 
 def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
@@ -688,7 +986,7 @@ def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
             skip |= {n for n in names if n.endswith(EXT_SUFFIXES)}
         return skip
 
-    shutil.copytree(app_dir, dest, ignore=ignore, copy_function=copy_writable)
+    copy_tree(app_dir, dest, ignore=ignore, copy_function=copy_writable)
 
 
 def uses_tkinter(*extra: Path) -> bool:

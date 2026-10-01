@@ -36,6 +36,16 @@ from . import common
 MOBILE_WEB = {"apk", "aab", "ipa", "ios-simulator", "web"}
 STAGE_APP = "src"  # build() stages the app in <work>/src: [tool.flet.app] path must point there
 DESKTOP_CLIENT = "flet-desktop"  # the client `flet run` and `flet pack` start: no flet build app does
+# Dart packages the build's Flutter project must get at these versions ([tool.flet.flutter.pubspec]
+# dependency_overrides, unless the project sets its own): Flet 1.0.1's build template overrides
+# jni to 1.0.0 but not jni_flutter, whose 1.0.4 (October 1, 2026) declares jni ^1.0.0 and needs
+# 1.1.0, so every Android build failed in Dart's compile (CLAUDE.md 15.1)
+FLUTTER_OVERRIDES = {"jni_flutter": "1.0.3"}
+# Where flet build (flet_cli 1.0.1, its package step) keeps the hash of the package step's
+# arguments, the build project's requirement lines among them, relative to the folder it builds:
+# when they did not change it passes --skip-site-packages to serious_python, which keeps the
+# site-packages of the previous build (CLAUDE.md 15.1)
+PACKAGE_STAMP = Path("build", ".hash", "package")
 # sys.platform values as platform.system() names the same platform: what target_markers writes
 PLATFORM_SYSTEM = {"android": "Android", "darwin": "Darwin", "emscripten": "Emscripten", "ios": "iOS", "linux": "Linux", "win32": "Windows"}
 _SYS_PLATFORM_MARKER = re.compile(r"\bsys_platform\s*(==|!=)\s*(['\"])([^'\"]*)\2")
@@ -65,15 +75,22 @@ def _pinned_requirements(cfg_tool: envs.PyEnv) -> list[str]:
     `DESKTOP_CLIENT` and what only it needs (`--prune`: what the app requires itself stays): a
     flet build app runs embedded in its own Flutter host (Pyodide on the web), which never starts
     the client of `flet run` and `flet pack`; with rich and pygments it was 3.1 of the 5.6 MB of
-    a web build's app.zip.
+    a web build's app.zip. No dependency group (--no-default-groups, as common.export_requirements:
+    --no-dev kept a group [tool.uv] default-groups names, a lint group's ruff in an apk build).
     """
     out = envs.uv(
         cfg_tool,
-        ["export", "--frozen", "--no-dev", "--no-editable", "--no-emit-project", "--prune", DESKTOP_CLIENT, "--no-hashes", "--no-header", "--no-annotate", "--format", "requirements.txt"],
+        ["export", "--frozen", "--no-default-groups", "--no-editable", "--no-emit-project", "--prune", DESKTOP_CLIENT, "--no-hashes", "--no-header", "--no-annotate", "--format", "requirements.txt"],
         capture=True,
         echo=False,
     ).stdout
     return [common.direct_reference(ln.strip()) for ln in out.splitlines() if ln.strip() and not ln.startswith("#")]
+
+
+def local_pin(pin: str) -> bool:
+    """Whether a pin is a local library or file: `name @ file:...` (common.direct_reference)."""
+    _, at, url = pin.partition(" ;")[0].partition("@")
+    return bool(at) and url.strip().startswith("file:")
 
 
 def target_markers(pins: list[str]) -> list[str]:
@@ -137,7 +154,9 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     its newest Python (3.14), which silently ignored the cp313 extensions. [project] description
     is kept (flet puts it in the app's metadata). With [deploy.flet] cleanup = false,
     [tool.flet.cleanup] app and packages default to false: flet cleans the packages unless told
-    not to, and its --cleanup-* flags have no negative form.
+    not to, and its --cleanup-* flags have no negative form. FLUTTER_OVERRIDES go into
+    [tool.flet.flutter.pubspec] dependency_overrides, which flet merges into the Flutter
+    project's pubspec.yaml, under the project's own entries.
     """
     project = data["project"]
     tool_flet = copy.deepcopy(data.get("tool", {}).get("flet") or {})
@@ -153,6 +172,13 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
             raise PytError("pyproject.toml: [tool.flet] cleanup must be a table ([tool.flet.cleanup])")
         cleanup.setdefault("app", False)
         cleanup.setdefault("packages", False)
+    flutter = tool_flet.setdefault("flutter", {})
+    pubspec = flutter.setdefault("pubspec", {}) if isinstance(flutter, dict) else None
+    overrides = pubspec.setdefault("dependency_overrides", {}) if isinstance(pubspec, dict) else None
+    if not isinstance(overrides, dict):
+        raise PytError("pyproject.toml: [tool.flet] flutter.pubspec.dependency_overrides must be a table")
+    for name, version in FLUTTER_OVERRIDES.items():
+        overrides.setdefault(name, version)
     description = project.get("description")
     lines = [
         "[project]",
@@ -200,7 +226,11 @@ def check_options(cfg: Config) -> None:
     checks and the payload (also in --dry-run), build() again."""
     if cfg.app.preset != "flet":
         raise PytError("--method flet is for the flet preset (pytemplate.toml app.preset)")
-    if IS_WINDOWS and build_target(cfg) == "windows" and not _developer_mode():
+    # Every target: on Windows flet build turns Flutter's Windows desktop on (flet_cli 1.0.1,
+    # install_flutter), and its template holds a windows/ folder, so Flutter links the plugins
+    # there for an apk, aab or web build too, and stopped late ("Building with plugins requires
+    # symlink support"), after the checks, the payload and a first Flutter download
+    if IS_WINDOWS and not _developer_mode():
         raise PytError(
             "flet build on Windows needs Developer Mode (Flutter uses symlinks):\n"
             "  Settings > System > For developers > Developer Mode. Meanwhile, use\n"
@@ -243,6 +273,12 @@ def build(req: BuildRequest) -> Path:
             ui.warn(relaxed_message(target, relaxed))
     text = build_pyproject(cfg, data, pins)
     (work / "pyproject.toml").write_text(text, encoding="utf-8", newline="\n")
+    if any(local_pin(pin) for pin in pins):
+        # A local library's line names its folder, which stays the same when its code changes:
+        # every build after the first shipped the library as the first one installed it. Without
+        # the stamp flet installs the site-packages again ([tool.flet] dev_packages, flet's own
+        # way, drops each one's marker and downloads every package again: --no-cache-dir)
+        (work / PACKAGE_STAMP).unlink(missing_ok=True)
 
     out = dist_path(req, f"-{target}")
     argv: list[str | Path] = ["flet", "build", target, work, "--yes", "--output", out]

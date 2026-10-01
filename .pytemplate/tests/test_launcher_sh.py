@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -663,6 +664,81 @@ def test_a_launcher_reached_through_a_symlink_finds_its_project(name: str, tmp_p
             raise AssertionError(f"{how}: {e}") from None
 
 
+def _through_a_link(tmp: Path, name: str, project: Path, env: dict[str, str], link_name: str = "game-src") -> tuple[Run, Path]:
+    """The launcher of a bin folder (where pyt install puts it), run by the shell `name` (or
+    pwsh) from `<tmp>/game-src/pkg`, where game-src is a symlink to the project's src/: a folder
+    that physically lies in the project, and whose logical parents never reach it."""
+    (project / "src" / "pkg").mkdir(exist_ok=True)
+    link = tmp / link_name
+    link.symlink_to(project / "src", target_is_directory=True)
+    cwd = link / "pkg"
+    (tmp / "bin").mkdir()
+    if name == "pwsh":
+        ps1 = tmp / "bin" / "pyt.ps1"
+        shutil.copyfile(ROOT / "pyt.ps1", ps1)
+        here, script = (str(p).replace("'", "''") for p in (cwd, ps1))
+        # Set-Location keeps the location logical, as a user's cd does.
+        code = f"Set-Location -LiteralPath '{here}'; & '{script}' __probe 5 0 x 'a b'; exit $LASTEXITCODE"
+        return Run([_pwsh(), "-NoProfile", "-NonInteractive", "-EncodedCommand", _ps_encoded(code)], tmp, env), cwd
+    launcher = tmp / "bin" / "pyt"
+    shutil.copyfile(LAUNCHER, launcher)
+    shell = " ".join(q(str(a)) for a in _shell_argv(name))
+    # cd in the calling shell keeps $PWD logical (a subprocess cwd would be physical), and the
+    # shell `name` takes it from the environment, as it does from a user's terminal.
+    code = f"cd {q(str(cwd))} && export PWD && {shell} {q(str(launcher))} __probe 5 0 x 'a b'"
+    return Run(["/bin/sh", "-c", 'eval "$PTCMD"'], tmp, {**env, "PTCMD": code}), cwd
+
+
+@needs_posix
+@pytest.mark.parametrize("name", [*POSIX_SHELLS, "pwsh"])
+def test_a_folder_reached_through_a_symlink_into_a_project_finds_it(name: str, tmp_path: Path) -> None:
+    """The installed pyt (its own folder holds no project) walked up the logical $PWD only: from
+    ~/game-src -> ~/code/game/src no logical parent holds the project, and it said there was
+    none (exit 2), or ran the installed template, whose commands need a project, where git finds
+    the repository. When the logical walk finds nothing, it walks up from the physical folder."""
+    project = _copy_project(tmp_path / "code" / "game")
+    run, cwd = _through_a_link(tmp_path, name, project, _clean_env(**_nothing_installed(tmp_path)))
+    where = f"stdout={run.out!r} stderr={run.err!r}"
+    assert run.rc == 5 and run.probe and run.probe["argv"] == ["x", "a b"], where
+    assert Path(str(run.probe["root"])).resolve() == project.resolve(), where
+    assert run.probe["global"] == "", where
+    assert run.probe["caller_cwd_raw"] == str(cwd) and run.probe["caller_cwd"] == str(cwd), where
+
+
+@needs_posix
+@pytest.mark.parametrize("name", ["sh", "pwsh"])
+def test_a_folder_named_like_a_glob_reached_through_a_symlink_finds_its_project(name: str, tmp_path: Path) -> None:
+    """pyt.ps1 handed the logical folder to /bin/sh's `cd -P` unquoted, and PowerShell 7 globs
+    such an argument off Windows: from g[0-9]/pkg, a link into this project, it walked up from
+    g1/pkg, a link into another one, and ran that project's runner."""
+    project = _copy_project(tmp_path / "code" / "game")
+    other = _copy_project(tmp_path / "code" / "other")
+    (other / "src" / "pkg").mkdir()
+    (tmp_path / "g1").symlink_to(other / "src", target_is_directory=True)  # what g[0-9] matches as a glob
+    run, cwd = _through_a_link(tmp_path, name, project, _clean_env(**_nothing_installed(tmp_path)), "g[0-9]")
+    where = f"stdout={run.out!r} stderr={run.err!r}"
+    assert run.rc == 5 and run.probe and run.probe["argv"] == ["x", "a b"], where
+    assert Path(str(run.probe["root"])).resolve() == project.resolve(), where
+    assert run.probe["caller_cwd"] == str(cwd), where
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not hasattr(os, "geteuid") or os.geteuid() != 0, reason="needs root to make files another user owns")
+@pytest.mark.parametrize("name", ["sh", "bash", "pwsh"])
+def test_the_walk_up_from_the_physical_folder_keeps_the_ownership_rule(name: str, tmp_path: Path) -> None:
+    """A symlink into a folder of another user's project (anyone may create one pointing there)
+    leads the physical walk-up to that project: its runner is refused as on the logical walk."""
+    import pwd
+
+    nobody = pwd.getpwnam("nobody")
+    project = _copy_project(tmp_path / "theirs")
+    (project / "src" / "pkg").mkdir()
+    (project / ".pytemplate" / "pyt.py").write_text("print('PWNED')\n", encoding="utf-8")
+    for path in (project, project / ".pytemplate", project / ".pytemplate" / "pyt.py"):
+        os.chown(path, nobody.pw_uid, nobody.pw_gid)
+    run, _ = _through_a_link(tmp_path, name, project, _clean_env(**_nothing_installed(tmp_path)))
+    assert run.rc == 2 and "is not yours" in run.err and "PWNED" not in run.out + run.err, run.out + run.err
+
+
 def _copy_project(dest: Path) -> Path:
     """The launcher and the runner (enough for __probe) in `dest`."""
     (dest / ".pytemplate").mkdir(parents=True)
@@ -807,6 +883,150 @@ def test_the_installed_template_of_another_user_is_never_run(tmp_path: Path) -> 
         assert r.returncode == 2 and "is not yours" in r.stderr and "PWNED" not in r.stdout + r.stderr, (shell, r.stdout, r.stderr)
 
 
+@pytest.mark.skipif(sys.platform == "win32" or not hasattr(os, "geteuid") or os.geteuid() != 0, reason="needs root to make files another user owns")
+@pytest.mark.parametrize("launcher", ["pyt", "pyt.ps1"])
+def test_a_link_to_your_own_pyt_py_in_another_users_folder_is_never_run(launcher: str, tmp_path: Path) -> None:
+    """The ownership rule read only .pytemplate/pyt.py, and a hard link keeps the owner of the
+    file it links: on macOS (no hard-link protection) any user may link a pyt.py of yours (the
+    installed template's, at a known path) into a .pytemplate of theirs next to a runner/ of
+    theirs, which pyt.py then imports, as you, wherever you type pyt below it (/tmp,
+    /Users/Shared). The folder must be yours too. Here root links (Linux protects hard links)."""
+    import pwd
+
+    nobody = pwd.getpwnam("nobody")
+    mine = tmp_path / "mine" / ".pytemplate"
+    mine.mkdir(parents=True)
+    shutil.copyfile(ROOT / ".pytemplate" / "pyt.py", mine / "pyt.py")
+    theirs = tmp_path / "shared" / ".pytemplate"
+    (theirs / "runner").mkdir(parents=True)
+    os.link(mine / "pyt.py", theirs / "pyt.py")  # owned by the caller, like the file it links
+    (theirs / "runner" / "__init__.py").write_text("print('PWNED')\n", encoding="utf-8")
+    (theirs / "runner" / "cli.py").write_text("def main(argv, entry=False):\n    print('PWNED', argv)\n    return 0\n", encoding="utf-8")
+    for path in (theirs.parent, theirs, theirs / "runner", theirs / "runner" / "__init__.py", theirs / "runner" / "cli.py"):
+        os.chown(path, nobody.pw_uid, nobody.pw_gid)
+    work = theirs.parent / "work"
+    work.mkdir()
+    (tmp_path / "bin").mkdir()
+    shutil.copyfile(ROOT / launcher, tmp_path / "bin" / launcher)
+    if launcher == "pyt":
+        argv: list[str | Path] = ["/bin/sh", tmp_path / "bin" / "pyt", "help"]
+    else:
+        argv = [_pwsh(), "-NoProfile", "-NonInteractive", "-File", tmp_path / "bin" / "pyt.ps1", "help"]
+    run = Run(argv, work, _clean_env(**_nothing_installed(tmp_path)))
+    assert run.rc == 2 and "is not yours" in run.err and "PWNED" not in run.out + run.err, run.out + run.err
+
+
+# Folder names pyt.ps1 once handed to a native program as another folder, with the siblings it
+# named instead: PowerShell 7 globs a native argument that is not a quoted literal (Linux/macOS),
+# and its legacy passing drops the double quotes of one. `p ` sorts before every other sibling a
+# glob matches, so it is the one `p*` and `p?` name first.
+MISREAD = {"p[0-9]": ["p1"], "p*": ["p ", "p1"], "p?": ["p ", "p1"], 'q"r': ["qr"]}
+MISREAD_CASES = [  # (launcher, $PSNativeCommandArgumentPassing, folder name, place)
+    *[(launcher, "", name, "project") for launcher in ("pyt", "pyt.ps1") for name in MISREAD],
+    *[("pyt.ps1", "Legacy", name, "project") for name in ("p[0-9]", 'q"r')],
+    *[(launcher, "", name, "installed") for launcher in ("pyt", "pyt.ps1") for name in ("p[0-9]", "p*")],
+]
+
+
+def _foreign_file() -> str | None:
+    """A regular file another user (root) owns, for a run that is not root's to link to."""
+    for path in ("/etc/passwd", "/etc/group", "/etc/hosts"):
+        try:
+            info = os.stat(path)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_uid != os.geteuid():
+            return path
+    return None
+
+
+def _not_yours(entry: Path) -> None:
+    """Make the runner `entry` (a .pytemplate/pyt.py that exists) another user's, as the
+    launchers read it: its file and folders given to nobody as root; else replaced by a link to
+    a regular file root owns (`test -f` and `test -O` follow the link). A link to /dev/null, no
+    regular file, was no runner at all for pyt's `test -f`: as any user but root the "theirs"
+    cases found nothing to refuse, and ./pyt selftest failed there (the CI's Linux jobs)."""
+    if os.geteuid() == 0:
+        import pwd
+
+        nobody = pwd.getpwnam("nobody")
+        for path in (entry.parent.parent, entry.parent, entry):
+            os.chown(path, nobody.pw_uid, nobody.pw_gid)
+    else:
+        foreign = _foreign_file()
+        assert foreign is not None  # the test skips without one
+        entry.unlink()
+        entry.symlink_to(foreign)
+
+
+def _run_copy(launcher: Path, args: list[str], cwd: Path, env: dict[str, str], mode: str = "") -> Run:
+    """Run the copy `launcher` from `cwd`: pyt with /bin/sh, pyt.ps1 with pwsh (with that
+    $PSNativeCommandArgumentPassing when `mode` names one)."""
+    if launcher.suffix != ".ps1":
+        return Run(["/bin/sh", launcher, *args], cwd, env)
+    words = " ".join("'" + a.replace("'", "''") + "'" for a in [str(launcher), *args])
+    code = (f"$PSNativeCommandArgumentPassing = '{mode}'\n" if mode else "") + f"& {words}\nexit $LASTEXITCODE"
+    return Run([_pwsh(), "-NoProfile", "-NonInteractive", "-EncodedCommand", _ps_encoded(code)], cwd, env)
+
+
+def _misread_setup(tmp: Path, whose: str, name: str, place: str) -> tuple[Path, Path]:
+    """The runner the launcher finds (a project `<tmp>/t/<name>` it walks up to, or the installed
+    template of the data folder `<tmp>/t/<name>`) and the siblings MISREAD names, each with a
+    .pytemplate/pyt.py: `whose` the runner is (another user's runner prints PWNED); the siblings
+    are the other owner's. Returns that folder and the folder to run the launcher from."""
+    base = tmp / "t"
+    folder = base / name
+    if place == "project":
+        root, siblings = folder, [base / s for s in MISREAD[name]]
+    else:
+        root, siblings = folder / "pytemplate" / "template", [base / s / "pytemplate" / "template" for s in MISREAD[name]]
+    if whose == "yours":
+        _copy_project(root)
+    else:
+        (root / ".pytemplate").mkdir(parents=True)
+        (root / ".pytemplate" / "pyt.py").write_text("print('PWNED')\n", encoding="utf-8")
+        _not_yours(root / ".pytemplate" / "pyt.py")
+    for sibling in siblings:
+        (sibling / ".pytemplate").mkdir(parents=True)
+        (sibling / ".pytemplate" / "pyt.py").write_text("print('PWNED')\n" if whose == "yours" else "raise SystemExit(0)\n", encoding="utf-8")
+        if whose == "yours":
+            _not_yours(sibling / ".pytemplate" / "pyt.py")
+    cwd = tmp / "away"
+    if place == "project":
+        cwd = root / "src"
+    cwd.mkdir(parents=True, exist_ok=True)
+    return root, cwd
+
+
+@needs_posix
+@pytest.mark.parametrize("whose", ["theirs", "yours"])
+@pytest.mark.parametrize(("launcher", "mode", "name", "place"), MISREAD_CASES)
+def test_the_ownership_rule_reads_the_folder_it_runs(
+    launcher: str, mode: str, name: str, place: str, whose: str, tmp_path: Path, uv_dirs: dict[str, str]
+) -> None:
+    """pyt.ps1 handed the runner it found to /bin/sh's ownership check unquoted, and PowerShell 7
+    globs such an argument off Windows: in a folder named p[0-9] the owner of p1 next to it
+    decided. Another user's runner there ran, as the user, when p1 was the user's; the user's own
+    project (or installed template) was refused when p1 was another user's. Legacy passing
+    dropped the quotes of q"r: the check read qr, and uv then ran qr's runner. Both launchers
+    check, and run, the folder they found (as root: nobody's files; else links to a file of root's)."""
+    if not (os.geteuid() == 0 or _foreign_file()):
+        pytest.skip("no file of another user to link to")
+    root, cwd = _misread_setup(tmp_path, whose, name, place)
+    (tmp_path / "bin").mkdir()
+    shutil.copyfile(ROOT / launcher, tmp_path / "bin" / launcher)
+    data = str(tmp_path / "t" / name) if place == "installed" else str(tmp_path / "no-data")
+    env = _clean_env(XDG_DATA_HOME=data, **uv_dirs)
+    run = _run_copy(tmp_path / "bin" / launcher, ["__probe", "5", "0", "x"], cwd, env, mode)
+    where = f"stdout={run.out!r} stderr={run.err!r}"
+    assert "PWNED" not in run.out + run.err, where
+    if whose == "theirs":
+        assert run.rc == 2 and "is not yours" in run.err and str(root / ".pytemplate" / "pyt.py") in run.err, where
+    else:
+        assert run.rc == 5 and run.probe and run.probe["argv"] == ["x"], where
+        assert run.probe["root"] == str(root) and run.probe["global"] == ("1" if place == "installed" else ""), where
+
+
 def _old_project(dest: Path) -> Path:
     """A project made before the launchers were renamed: its runner is .pytemplate/deploy.py."""
     project = _copy_project(dest)
@@ -898,6 +1118,48 @@ def test_in_process_run_leaves_no_name_behind(name: str, case: str, tmp_path: Pa
         assert run.probe["global"] == ("1" if case == "installed" else ""), where
     if case == "installed":
         assert run.probe["root"] == str(installed), where
+
+
+@needs_posix
+@pytest.mark.parametrize("name", ["bash", "zsh"])
+def test_an_in_process_run_runs_the_project_it_is_typed_in(name: str, tmp_path: Path, uv_dirs: dict[str, str]) -> None:
+    """niubash runs ./pyt inside the calling shell, where $0 is the caller's. The installed pyt
+    (its own folder holds no project) then took the folder of that $0 for its own: a helper
+    script of project A that runs `cd ../B/src && pyt ...` ran A's runner, whose commands then
+    changed the wrong project. The shell names the file it runs ($BASH_SOURCE, zsh's %x): only
+    that name counts, and the walk-up finds B. Simulated by sourcing the launcher from the script."""
+    argv = _shell_argv(name)
+    a, b = _copy_project(tmp_path / "A"), _copy_project(tmp_path / "B")
+    launcher, away = _outside(tmp_path)
+    script = a / "release.sh"
+    script.write_text(f"cd {q(str(b / 'src'))} || exit 9\nset -- __probe 5 0 x\n. {q(str(launcher))}\n", encoding="utf-8", newline="\n")
+    run = Run([*argv, script], away, _clean_env(__RUBASH_SHELL_NAME="1", **_nothing_installed(tmp_path), **uv_dirs))
+    where = f"stdout={run.out!r} stderr={run.err!r}"
+    assert run.rc == 5 and run.probe and run.probe["argv"] == ["x"], where
+    assert run.probe["root"] == str(b) and run.probe["caller_cwd"] == str(b / "src"), where
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not hasattr(os, "geteuid") or os.geteuid() != 0, reason="needs root to make files another user owns")
+@pytest.mark.parametrize("name", ["bash", "dash", "busybox", "ksh", "mksh", "yash"])
+def test_an_in_process_run_never_takes_the_callers_folder_for_its_own(name: str, tmp_path: Path) -> None:
+    """Under `niu -c "pyt help"` $0 is `niu`: the installed pyt took the current folder for its
+    own and ran the .pytemplate/pyt.py there without the ownership rule of the walk-up (at C:\\,
+    one any user may create). A name that is no file of that folder names no folder of the
+    launcher: the walk-up decides, and refuses another user's runner."""
+    import pwd
+
+    argv = _shell_argv(name)
+    nobody = pwd.getpwnam("nobody")
+    shared = tmp_path / "shared"
+    entry = shared / ".pytemplate" / "pyt.py"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("print('PWNED')\n", encoding="utf-8")
+    for path in (shared, entry.parent, entry):
+        os.chown(path, nobody.pw_uid, nobody.pw_gid)
+    launcher, _ = _outside(tmp_path)
+    env = _clean_env(__RUBASH_SHELL_NAME="1", PTCMD=f"set -- help; . {q(str(launcher))}", **_nothing_installed(tmp_path))
+    run = Run([*argv, "-c", 'eval "$PTCMD"', "niu"], shared, env)  # $0 = niu, as under niu -c
+    assert run.rc == 2 and "is not yours" in run.err and "PWNED" not in run.out + run.err, run.out + run.err
 
 
 @needs_posix
@@ -1068,7 +1330,10 @@ def test_the_runner_starts_on_python_cpython_once_the_project_has_an_environment
 
 # --- the Windows-only helpers are plain sh: run them in every POSIX shell ---------------------------
 
-HELPERS = ("_pt_slashes", "_pt_backslashes", "_pt_drive", "_pt_winpath", "_pt_try_uv", "_pt_try_dir", "_pt_expand", "_pt_uv_in_list", "_pt_uv_from_registry")
+HELPERS = (
+    "_pt_slashes", "_pt_backslashes", "_pt_drive", "_pt_winpath", "_pt_try_uv", "_pt_try_dir", "_pt_getenv", "_pt_expand",
+    "_pt_uv_in_list", "_pt_uv_from_registry",
+)  # fmt: skip
 
 
 def _launcher_functions(*names: str) -> str:
@@ -1169,16 +1434,61 @@ def test_registry_path_quoted_entries(name: str, tmp_path: Path) -> None:
         encoding="ascii", newline="\n",
     )  # fmt: skip
     reg.chmod(0o755)
-    lists = [f"/nope;{uvdir};/x", f'/nope;"{uvdir}";/x', f'"{uvdir}"', '"%PT_Q%"', "/nope;/x"]
+    # The helpers probe absolute Windows folders only (X:\..., \\server\...): here the folder is
+    # written as a share, //tmp/..., which the Linux and macOS kernels read as /tmp/...
+    share = "/" + str(uvdir)
+    lists = [f"/nope;{share};/x", f'/nope;"{share}";/x', f'"{share}"', '"%PT_Q%"', "/nope;/x"]
     calls = "".join(f"_pt_uv=\nif _pt_uv_in_list {q(v)}; then printf 'L:%s\\n' \"$_pt_uv\"; else printf 'L:none\\n'; fi\n" for v in lists)
     calls += "_pt_uv=\nif _pt_uv_from_registry; then printf 'R:%s\\n' \"$_pt_uv\"; else printf 'R:none\\n'; fi\n"
-    env = _clean_env(PATH=f"{fake}:/usr/bin:/bin", PT_Q=str(uvdir), PT_TYPE="REG_EXPAND_SZ", PT_VALUE='%PT_NOPE%\\x;"%PT_Q%";/nope')
-    found = str(uvdir / "uv")
+    env = _clean_env(PATH=f"{fake}:/usr/bin:/bin", PT_Q=share, PT_TYPE="REG_EXPAND_SZ", PT_VALUE='%PT_NOPE%\\x;"%PT_Q%";/nope')
+    found = "/" + str(uvdir / "uv")
     assert _run_helpers(name, calls, env) == [f"L:{found}"] * 4 + ["L:none", f"R:{found}"]
-    env.update(PT_TYPE="REG_SZ", PT_VALUE=f'"{uvdir}"')
+    env.update(PT_TYPE="REG_SZ", PT_VALUE=f'"{share}"')
     assert _run_helpers(name, "_pt_uv=\n_pt_uv_from_registry || :\nprintf 'R:%s\\n' \"$_pt_uv\"\n", env) == [f"R:{found}"]
     env.update(PT_VALUE="/nope")
     assert _run_helpers(name, "_pt_uv=\n_pt_uv_from_registry || :\nprintf 'R:%s\\n' \"$_pt_uv\"\n", env) == ["R:"]
+
+
+@needs_posix
+@pytest.mark.parametrize("name", ["sh", "dash", "bash", "busybox", "ksh", "mksh", "yash", "zsh"])
+def test_registry_path_skips_relative_entries(name: str, tmp_path: Path) -> None:
+    """A relative entry of the PATH stored in the registry names a folder below the current
+    one, which may be anybody's: a uv there ran. So does a root-relative one (\\bin, a folder of
+    the drive root, which any user may create; here the path of the folder with one slash or
+    backslash first). Only absolute folders are probed, X:\\... or a share (here //tmp/..., which
+    the kernel reads as /tmp/...), as pyt.cmd and pyt.ps1 probe them."""
+    rel = tmp_path / "rel"
+    rel.mkdir()
+    (rel / "uv").write_text("#!/bin/sh\n", encoding="ascii")
+    (rel / "uv").chmod(0o755)
+    lists = ["rel", "./rel", "%PT_REL%", str(rel), str(rel).replace("/", "\\"), f"rel;/{rel}"]
+    calls = f"cd {q(str(tmp_path))} || exit 9\n"
+    calls += "".join(f"_pt_uv=\nif _pt_uv_in_list {q(v)}; then printf 'L:%s\\n' \"$_pt_uv\"; else printf 'L:none\\n'; fi\n" for v in lists)
+    assert _run_helpers(name, calls, _clean_env(PT_REL="rel")) == ["L:none"] * 5 + [f"L:/{rel / 'uv'}"]
+
+
+@needs_posix
+@pytest.mark.parametrize("name", ["sh", "dash", "bash", "busybox", "ksh", "mksh", "yash", "zsh"])
+def test_registry_path_reads_a_windows_name_with_parentheses(name: str, tmp_path: Path) -> None:
+    """%ProgramFiles(x86)% names a variable sh cannot spell, which pyt.cmd and pyt.ps1 expand: pyt
+    dropped every such entry. It reads the name with printenv, never eval, from the environment
+    the shell hands its children, where bash, ksh, yash and zsh keep it (dash, busybox and mksh
+    drop it when they start: there the entry is skipped and the next one still counts). A name
+    with other characters is never read, and nothing it holds runs."""
+    if not shutil.which("printenv"):
+        pytest.skip("printenv not found")
+    uvdir = tmp_path / "x86 dir"
+    uvdir.mkdir()
+    (uvdir / "uv").write_text("#!/bin/sh\n", encoding="ascii")
+    (uvdir / "uv").chmod(0o755)
+    share = "/" + str(uvdir)  # a share, //tmp/..., which the kernel reads as /tmp/...
+    env = _clean_env(**{"PT_PF(x86)": share, "PT_UP(X86)": share, "PT_OK": share})
+    kept = Run([*_shell_argv(name), "-c", 'printenv "PT_PF(x86)"'], ROOT, env).out.strip() == share
+    lists = ["%PT_PF(x86)%", "%pt_up(x86)%", "%PT_PF(x86)`printf RAN`%", "%PT_NO(x86)%;%PT_OK%"]
+    calls = "".join(f"_pt_uv=\nif _pt_uv_in_list {q(v)}; then printf 'L:%s\\n' \"$_pt_uv\"; else printf 'L:none\\n'; fi\n" for v in lists)
+    found = f"L:/{uvdir / 'uv'}"
+    want = [found, found] if kept else ["L:none", "L:none"]
+    assert _run_helpers(name, calls, env) == [*want, "L:none", found]
 
 
 # --- the uv search order (CLAUDE.md 4.1), for ./pyt and pyt.ps1 -------------------------------
@@ -1396,3 +1706,29 @@ def test_the_walk_up_never_takes_a_drive_root_on_windows(name: str) -> None:
     run = Run([*_shell_argv(name), "-c", 'eval "$PT_CODE"'], ROOT, _clean_env(PT_CODE=prelude + _launcher_functions("_pt_foreign") + calls))
     assert run.rc == 0, run.out + run.err
     assert run.out.splitlines() == ["C:/ refused", "C: refused", "/c refused", "/cygdrive/d refused", "/ refused", "C:/Users/x taken", "/c/Users/x taken"]
+
+
+@needs_posix
+@pytest.mark.parametrize("name", POSIX_SHELLS)
+def test_the_walk_up_never_takes_a_network_share_root_on_windows(name: str) -> None:
+    """The root of a network share (//server/share, as Git Bash, MSYS2, Cygwin and busybox-w32
+    name \\\\server\\share) is a drive root of its own: a share is often writable by many users,
+    and a //server/share/.pytemplate/pyt.py planted there ran as anyone who typed `pyt` in a
+    folder of that share holding no project. pyt.ps1 refuses it (its walk-up's top), and pyt.cmd
+    cannot run in a UNC folder at all. A project in a folder of a share stays a project."""
+    shares = ("//server/share", "//server/share/", "//server", "//localhost/c$", "//server/share/team", "//server/share/team/x")
+    calls = "".join(f"if _pt_foreign '{d}'; then echo '{d} refused'; else echo '{d} taken'; fi\n" for d in shares)
+    # the walk-up from a folder of the share, with a runner at its root only
+    calls += "_pt_entry_in() { [ \"$1\" = //server/share ]; }\n_pt_root=\n_pt_other=\n_pt_walk //server/share/team/sub || :\necho \"root=[$_pt_root] other=[$_pt_other]\"\n"
+    prelude = ("emulate sh\n" if name == "zsh" else "") + "_pt_win=1\n"
+    run = Run([*_shell_argv(name), "-c", 'eval "$PT_CODE"'], ROOT, _clean_env(PT_CODE=prelude + _launcher_functions("_pt_foreign", "_pt_walk") + calls))
+    assert run.rc == 0, run.out + run.err
+    assert run.out.splitlines() == [
+        "//server/share refused",
+        "//server/share/ refused",
+        "//server refused",
+        "//localhost/c$ refused",
+        "//server/share/team taken",
+        "//server/share/team/x taken",
+        "root=[] other=[//server/share]",
+    ]

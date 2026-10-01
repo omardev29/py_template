@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import errno
 import functools
 import hashlib
 import importlib.util
@@ -22,10 +23,13 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
 import unicodedata
+import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,7 +50,9 @@ TEMPLATE_REPO = (ROOT / ".pytemplate" / "template-repo").is_file()
 template_repo = pytest.mark.skipif(not TEMPLATE_REPO, reason="an invariant of the template repository itself")
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 PRESETS = presets.available()
-NAMES = ["myapp", "My-Game_2", "e2e-raylib"]
+# An app name has no length limit: the last one is longer than a line of ruff's (100 columns)
+LONG_NAME = "Customer-Feedback-Analysis-Dashboard-For-The-Quarterly-Reports-Of-Every-Sales-Region-And-Every-Team_2"
+NAMES = ["myapp", "My-Game_2", "e2e-raylib", LONG_NAME]
 TOKEN = re.compile(r"\{\{\w*\}\}|__pkg__")
 # Non-ASCII folder names, written with escapes so this file stays ASCII
 CAFE = "caf\N{LATIN SMALL LETTER E WITH ACUTE}"
@@ -284,8 +290,8 @@ def test_rendered_skeleton_passes_the_precommit_ruff_checks(preset: str, tmp_pat
     """The pre-commit hook runs `ruff format --check` and ruff with the active profile on the
     staged files: a fresh project must be able to make its first commit (and pass `check`)."""
     failures: list[str] = []
-    for name in NAMES:
-        root = tmp_path / name
+    for i, name in enumerate(NAMES):
+        root = tmp_path / str(i)  # not the name: LONG_NAME twice made a path past Windows' MAX_PATH
         _write(root, presets.skeleton(preset, name))
         data = tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8"))
         variants = {"shipped": data}
@@ -305,6 +311,36 @@ def test_rendered_skeleton_passes_the_precommit_ruff_checks(preset: str, tmp_pat
                     r = subprocess.run([sys.executable, "-m", "ruff", *args], cwd=root, capture_output=True, text=True, timeout=120, check=False)
                     if r.returncode != 0:
                         failures.append(f"[{name} {label} {profile}] ruff {args[0]}:\n{r.stdout}{r.stderr}")
+    assert not failures, "\n\n".join(failures)
+
+
+def _name_of_length(n: int) -> str:
+    """A valid app name of exactly n characters: hyphens inside, a letter or digit last."""
+    text = ("customer-feedback-analysis-dashboard-for-the-quarterly-reports-" * 2)[:n]
+    return text if text[-1].isalnum() else text[:-1] + "s"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("ruff") is None, reason="ruff is not installed here")
+@pytest.mark.parametrize("preset", PRESETS)
+def test_the_rendered_skeleton_is_formatted_whatever_the_length_of_the_name(preset: str, tmp_path: Path) -> None:
+    """An app name has no length limit, and ruff (100 columns) re-wraps a line that holds a long
+    one: from 59 characters on, the first commit of a new project was refused by the hook (ruff
+    format --check, and I001 for the imports), until `./pyt fmt`. Every length up to past a whole
+    line, each skeleton with its own ruff.toml (the strict profile: isort's rules too)."""
+    for n in range(1, 105):
+        name = _name_of_length(n)
+        assert len(name) == n and config.APP_NAME.fullmatch(name), name
+        root = tmp_path / str(n)
+        _write(root, presets.skeleton(preset, name))
+        cfg = _config(tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8")))
+        (root / "ruff.toml").write_text(render.to_toml(render.ruff_config(cfg, "strict")), encoding="utf-8")
+    code_dirs = [f"{n}/{d}" for n in range(1, 105) for d in ("src", "tests")]
+    failures: list[str] = []
+    for args in (["format", "--check", "--no-cache"], ["check", "--no-cache", "--output-format", "concise"]):
+        r = subprocess.run([sys.executable, "-m", "ruff", *args, *code_dirs], cwd=tmp_path, capture_output=True, text=True, timeout=300, check=False)
+        if r.returncode != 0:
+            lengths = sorted({int(m) for m in re.findall(r"(?<![\w.-])(\d+)[/\\](?:src|tests)[/\\]", r.stdout + r.stderr)})
+            failures.append(f"ruff {args[0]} fails for the names of {lengths} characters:\n{(r.stdout + r.stderr)[-4000:]}")
     assert not failures, "\n\n".join(failures)
 
 
@@ -367,9 +403,9 @@ def test_any_folder_name_gives_the_same_words_as_an_app_name(folder: str) -> Non
         ("script", "json", "standard library module 'json'"),
         ("script", "tests", "src/tests/ would collide with the project's own tests/"),
         ("script", "Tests", "src/tests/ would collide"),
-        ("script", "typings", "typings/ (.ruff.toml"),
-        ("script", "build", "build/ (.gitignore"),
-        ("script", "dist", "dist/ (.gitignore"),
+        ("script", "typings", "typings/ (the stubs at the root"),
+        ("script", "build", "build/ (the packagers' output at the root"),
+        ("script", "dist", "dist/ (the builds at the root"),
         ("script", "assets", "src/assets/"),
         ("script", "main", "src/main.py"),
         ("raylib", "Assets", "src/assets/"),
@@ -754,6 +790,21 @@ def test_preset_pins_hold_the_whole_tested_tree(preset: str) -> None:
         assert set(pins) == set(template)
 
 
+@template_repo
+def test_claude_md_counts_the_pins_of_every_preset() -> None:
+    """CLAUDE.md 11 says how many packages each preset's constraints.txt pins: it said 24, 26 and
+    56 while the files held 26, 28 and 58. Regenerating a constraints.txt updates its number."""
+    guide = ROOT / "CLAUDE.md"
+    if not guide.is_file():
+        pytest.skip("no CLAUDE.md")
+    text = " ".join(guide.read_text(encoding="utf-8").split())  # line breaks are layout
+    m = re.search(r"every package a project of the preset locks \(script (\d+): the template's own `uv\.lock`; raylib (\d+); flet (\d+)[;)]", text)
+    assert m, "CLAUDE.md 11 no longer counts the pins of each preset: update this test"
+    documented = dict(zip(("script", "raylib", "flet"), map(int, m.groups()), strict=True))
+    counted = {preset: len(presets.constraints(preset)) for preset in documented}
+    assert documented == counted, f"CLAUDE.md 11 counts {documented}, the constraints.txt files pin {counted}"
+
+
 # --- copy_template ---------------------------------------------------------------------------
 
 
@@ -771,6 +822,66 @@ def git_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
+@template_repo
+def test_the_shipped_gitignore_ignores_only_the_roots_own_outputs(tmp_path: Path, git_env: None) -> None:
+    """The .gitignore every project gets named .build/, dist/, build/ and *.spec at ANY depth: a
+    subpackage or test folder of those names (src/<pkg>/build/, tests/dist/) was never committed,
+    `git add -A` and the hook skipped it without a word, a fresh clone and CI lacked it, and the
+    `git clean -fdx` README calls safe deleted it. Only the root's own outputs are ignored; the
+    environments, caches and compiled extensions stay ignored anywhere."""
+    repo = tmp_path / "p"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    shutil.copyfile(ROOT / ".gitignore", repo / ".gitignore")
+    source = [
+        "src/pkg/build/__init__.py", "src/pkg/dist/__init__.py", "src/pkg/core/build/x.py", "src/pkg/.build/data.txt",
+        "tests/build/test_x.py", "tests/dist/test_y.py", "tests/data/fixture.spec", "src/pkg/__init__.py",
+    ]  # fmt: skip
+    outputs = [
+        "build/x.txt", "dist/app.pyz", ".build/cfg/ruff-off.toml", "app.spec", ".venv/pyvenv.cfg", ".venv-pypy-wsl/pyvenv.cfg",
+        "src/pkg/__pycache__/m.cpython-314.pyc", "src/pkg/core/bench.cpython-314-x86_64-linux-gnu.so", "tests/.pytest_cache/x", ".flet/x",
+    ]  # fmt: skip
+    for rel in (*source, *outputs):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("x\n", encoding="utf-8")
+    r = subprocess.run(["git", "check-ignore", "--stdin", "-z"], cwd=repo, input="\0".join((*source, *outputs)), capture_output=True, text=True, check=False)
+    assert r.returncode in (0, 1), r.stderr
+    ignored = {p for p in r.stdout.split("\0") if p}
+    assert not ignored & set(source), sorted(ignored & set(source))
+    assert ignored == set(outputs), sorted(set(outputs) - ignored)
+    status = _git(repo, "status", "--porcelain", "--untracked-files=all", "-z")
+    assert {e[3:] for e in status.split("\0") if e} == {".gitignore", *source}
+
+
+def test_the_shipped_gitignore_ignores_the_roots_outputs_that_are_links(tmp_path: Path, git_env: None) -> None:
+    """An environment, .build or dist kept on another disk through a link, which ./pyt clean
+    supports (a link loses only the link): the .gitignore named them with a trailing slash, which
+    git reads as folders only, so `git add -A` committed the link, the hook passed, and every other
+    clone got a link to a folder of this machine, over which uv could not make .venv. Ignored at the
+    root whatever they are; a link named so below src/ or tests/ is source like any other."""
+    repo, elsewhere = tmp_path / "p", tmp_path / "fast-disk"
+    repo.mkdir()
+    elsewhere.mkdir()
+    _git(repo, "init", "-q")
+    shutil.copyfile(ROOT / ".gitignore", repo / ".gitignore")
+    links = [".venv", ".venv-pypy", ".venv-wsl", ".venv-pypy-wsl", ".build", "dist", "build"]
+    source = ["src/pkg/dist", "tests/build", "src/pkg/__init__.py", ".venvrc"]  # a file named like an env too
+    (repo / "src" / "pkg").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    (repo / "src/pkg/__init__.py").write_text("", encoding="utf-8")
+    (repo / ".venvrc").write_text("layout python\n", encoding="utf-8")
+    try:
+        for name in (*links, "src/pkg/dist", "tests/build"):
+            (repo / name).symlink_to(elsewhere / name.replace("/", "-"), target_is_directory=True)
+    except OSError as e:  # Windows without the privilege to make links
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+    r = subprocess.run(["git", "check-ignore", "--stdin", "-z"], cwd=repo, input="\0".join((*links, *source)), capture_output=True, text=True, check=False)
+    assert r.returncode in (0, 1), r.stderr
+    assert {p for p in r.stdout.split("\0") if p} == set(links)
+    status = _git(repo, "status", "--porcelain", "--untracked-files=all", "-z")
+    assert {e[3:] for e in status.split("\0") if e} == {".gitignore", *source}
+
+
 TRACKED = {
     ".gitignore": "*.spec\nhtmlcov/\n.venv*/\n/build/\n",
     ".pytemplate/pyt.py": "# entry\n",
@@ -778,6 +889,8 @@ TRACKED = {
     ".pytemplate/runner/x.py": "X = 1\n",
     "src/app/__init__.py": "",
     "sub/build/keep.txt": "kept: build/ is only skipped at the root\n",
+    "site/dist/notes.md": "kept: dist/ is only skipped at the root\n",
+    "tools/.build/keep.txt": "kept: .build/ is only skipped at the root\n",
     ".github/workflows/ci.yml": "name: ci\n",
     ".github/workflows/template-e2e.yml": "name: template\n",
     ".claude/settings.json": "{}\n",
@@ -822,6 +935,8 @@ def test_copy_template_copies_only_what_git_tracks(tmp_path: Path, monkeypatch: 
         ".pytemplate/runner/x.py": "X = 1\n",
         "src/app/__init__.py": "",
         "sub/build/keep.txt": TRACKED["sub/build/keep.txt"],
+        "site/dist/notes.md": TRACKED["site/dist/notes.md"],
+        "tools/.build/keep.txt": TRACKED["tools/.build/keep.txt"],
         ".github/workflows/ci.yml": "name: ci\n",
         "pyt": "#!/bin/sh\n",
         "modified.txt": "new\n",  # the working-tree content
@@ -930,7 +1045,7 @@ def test_copy_template_without_tracked_files_uses_the_skip_rules(tmp_path: Path,
     monkeypatch.setattr(presets, "ROOT", src)
     presets.copy_template(tmp_path / "new")
     copied = set(_files(tmp_path / "new"))
-    assert {".env", "notes.txt", "x.spec", "htmlcov/index.html", "sub/build/keep.txt", "modified.txt"} <= copied
+    assert {".env", "notes.txt", "x.spec", "htmlcov/index.html", "sub/build/keep.txt", "site/dist/notes.md", "tools/.build/keep.txt", "modified.txt"} <= copied
     assert not {".pytemplate/template-repo", ".github/workflows/template-e2e.yml", ".claude/settings.json", "build/out.txt"} & copied
     assert not any(p.startswith((".git/", ".venv")) or "__pycache__" in p for p in copied)
     assert "git does not track" in capsys.readouterr().err
@@ -995,6 +1110,27 @@ def test_copy_template_says_when_git_fails(tmp_path: Path, monkeypatch: pytest.M
         assert ("dubious ownership" in err) is warned
     assert (tmp_path / "new" / ".env").is_file()  # the fallback: every file
     assert locales == ["C"]  # git's messages in English, whatever the user's locale
+    if "dubious ownership" in stderr:  # and how to let git read it
+        assert f"let git read it: git config --global --add safe.directory {src}" in err
+
+
+def test_new_names_a_repository_git_refuses_and_how_to_let_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A clone another user owns: git refuses it (dubious ownership), and `new --dry-run` said
+    "every file, ignored ones included: not a git work tree" with no way out. It says that git
+    refuses the repository, with git's own command to let it read the folder."""
+    src = tmp_path / "t"
+    _write(src, {".pytemplate/pyt.py": b"# entry\n"})
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(shutil, "which", lambda name: "git")
+    stderr = (
+        "fatal: detected dubious ownership in repository at '/x/t'\n"
+        "To add an exception for this directory, call:\n\n\tgit config --global --add safe.directory /x/t\n"
+    )
+    monkeypatch.setattr(proc, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 128, "", stderr))
+    assert presets.copy_scope() == "every file, ignored ones included: git refuses to read this repository"
+    err = capsys.readouterr().err
+    assert "the copy would include files git does not track" in err and "not a git work tree" not in err
+    assert err.rstrip().endswith("let git read it: git config --global --add safe.directory /x/t"), err
 
 
 @pytest.mark.parametrize(
@@ -1023,6 +1159,11 @@ def test_copy_template_says_when_git_fails(tmp_path: Path, monkeypatch: pytest.M
         (".github/workflows/ci.yml", False),
         (".github/template-x.yml", False),
         ("sub/build/x", False),
+        # only the root's own outputs are builds (.gitignore says /.build/ and /dist/): a docs/dist/
+        # or tools/.build/ of the project is source, and was left out of the copy without a word
+        ("docs/dist/notes.md", False),
+        ("tools/.build/keep.txt", False),
+        ("src/app/dist/__init__.py", False),
         ("sub/.claude/x", False),
         ("src/app/core/bench.py", False),
         ("CLAUDE.md", False),
@@ -1056,6 +1197,359 @@ def test_copy_of_the_real_template_is_exactly_its_tracked_files(tmp_path: Path, 
     for rel in (".pytemplate/template-repo", ".claude", ".github/workflows/template-e2e.yml", ".github/workflows/template-ci-image"):
         assert not (dest / rel).exists(), rel
     assert (dest / "pyt").read_bytes() == (ROOT / "pyt").read_bytes()
+
+
+# A project with local libraries (CLAUDE.md 10): inside it, next to it (`./pyt add ../mylib`), a
+# wheel two folders up, one by an absolute path, and the outside library's own local dependency,
+# which uv.lock names from the project too (as every path it writes)
+LOCAL_PYPROJECT = """\
+[project]
+name = "proj"
+version = "0.1.0"
+dependencies = ["mylib", "inner", "wheely", "fixed"]
+
+[tool.uv.sources]
+mylib = { path = "../mylib" }
+inner = { path = "libs/inner", editable = true }
+wheely = { path = "../../wheels/wheely-1.0-py3-none-any.whl" }
+fixed = { path = "ABSOLUTE" }
+
+[tool.flet.app]
+path = "src"
+"""
+LOCAL_LOCK = """\
+version = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "deep"
+version = "0.1.0"
+source = { directory = "../other/deep" }
+
+[[package]]
+name = "inner"
+version = "0.1.0"
+source = { editable = "libs/inner" }
+
+[[package]]
+name = "mylib"
+version = "0.1.0"
+source = { directory = "../mylib" }
+dependencies = [
+    { name = "deep" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "deep", directory = "../other/deep" }]
+
+[[package]]
+name = "wheely"
+version = "1.0"
+source = { path = "../../wheels/wheely-1.0-py3-none-any.whl" }
+wheels = [
+    { filename = "wheely-1.0-py3-none-any.whl", hash = "sha256:00" },
+]
+
+[[package]]
+name = "proj"
+version = "0.1.0"
+source = { virtual = "." }
+
+[package.metadata]
+requires-dist = [
+    { name = "inner", editable = "libs/inner" },
+    { name = "mylib", directory = "../mylib" },
+    { name = "wheely", path = "../../wheels/wheely-1.0-py3-none-any.whl" },
+]
+"""
+
+
+def _sources(data: Any) -> list[tuple[str, str]]:
+    """Every (key, value) of a local source in parsed TOML, in order."""
+    found: list[tuple[str, str]] = []
+    if isinstance(data, dict):
+        for k, v in data.items():
+            found += [(k, v)] if k in ("path", "directory", "editable", "virtual") and isinstance(v, str) else _sources(v)
+    elif isinstance(data, list):
+        for item in data:
+            found += _sources(item)
+    return found
+
+
+def _local_project(root: Path, absolute: Path, *, bom: bool = False, crlf: bool = False) -> None:
+    root.mkdir(parents=True)
+    for name, text in (("pyproject.toml", LOCAL_PYPROJECT.replace("ABSOLUTE", absolute.as_posix())), ("uv.lock", LOCAL_LOCK)):
+        data = text.replace("\n", "\r\n") if crlf else text
+        (root / name).write_bytes((b"\xef\xbb\xbf" if bom else b"") + data.encode("utf-8"))
+    (root / "libs" / "inner").mkdir(parents=True)
+    (root / "libs" / "inner" / "pyproject.toml").write_text('[project]\nname = "inner"\n', encoding="utf-8")
+
+
+@pytest.mark.parametrize(("bom", "crlf"), [(False, False), (True, True)])
+def test_copy_template_names_local_libraries_outside_the_project_from_the_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bom: bool, crlf: bool) -> None:
+    """`./pyt add ../mylib` names the library from the project, in pyproject.toml and uv.lock
+    alike. `new` copied both as they were, so from a folder at another depth `../mylib` named
+    another one: __init's `uv add` failed ("Distribution not found") and new removed the
+    project, and so did the first step of selftest --e2e and --nvim, and every test that locks
+    a copy of the project. The copy names the same files and folders from its own place, in both
+    files; a source inside the project, an absolute one and every other byte stay as they were
+    (a BOM and CRLF too), and `uv lock --check` passes there (the test after this one)."""
+    src = tmp_path / "a" / "b" / "proj"
+    _local_project(src, tmp_path / "fixed", bom=bom, crlf=crlf)
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(presets, "_git_files", lambda *args: None)  # no git: every file
+    dest = tmp_path / "x" / "y" / "z" / "copy"
+    presets.copy_template(dest)
+    for name in ("pyproject.toml", "uv.lock"):
+        old_raw, new_raw = (src / name).read_bytes(), (dest / name).read_bytes()
+        assert new_raw.startswith(b"\xef\xbb\xbf") == bom and (b"\r\n" in new_raw) == crlf and new_raw.count(b"\n") == old_raw.count(b"\n")
+        old, new = tomllib.loads(old_raw.decode("utf-8-sig")), tomllib.loads(new_raw.decode("utf-8-sig"))
+        pairs = list(zip(_sources(old), _sources(new), strict=True))
+        assert pairs and all(k == k2 for (k, _), (k2, _) in pairs)
+        for (_, before), (_, after) in pairs:
+            if before.startswith(".."):  # outside the project: the same file or folder from the copy
+                assert after != before and os.path.normpath(dest / after) == os.path.normpath(src / before), (before, after)
+            else:  # inside it (the copy holds it at the same place), absolute, or the project itself
+                assert after == before
+        assert len(new_raw) - len(old_raw) == sum(len(after) - len(before) for (_, before), (_, after) in pairs)
+    assert tomllib.loads((dest / "pyproject.toml").read_bytes().decode("utf-8-sig"))["tool"]["flet"]["app"]["path"] == "src"
+    assert (src / "pyproject.toml").read_bytes().count(b'"../mylib"') == 1  # the project itself is never touched
+
+
+@pytest.mark.skipif(shutil.which("uv") is None and not os.environ.get("UV"), reason="uv not found")
+def test_uv_reads_the_renamed_local_libraries_of_a_copy_as_the_same_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv itself agrees: a project that depends on a library next to it locks; its copy two
+    folders deeper, with the library named from there, passes `uv lock --check` (no network:
+    the library has static metadata and no dependency)."""
+    side = tmp_path / "side"
+    (side / "mylib" / "src" / "mylib").mkdir(parents=True)
+    (side / "mylib" / "pyproject.toml").write_text(
+        '[project]\nname = "mylib"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n\n[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n',
+        encoding="utf-8",
+    )
+    src = side / "proj"
+    src.mkdir()
+    (src / "pyproject.toml").write_text(
+        '[project]\nname = "proj"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = ["mylib"]\n\n[tool.uv.sources]\nmylib = { path = "../mylib" }\n',
+        encoding="utf-8",
+    )
+    uv = shutil.which("uv") or os.environ["UV"]
+    env = _child_env(tmp_path)
+    locked = subprocess.run([uv, "lock", "--offline"], cwd=src, env=env, capture_output=True, text=True, check=False)
+    if locked.returncode != 0:
+        pytest.skip(f"uv cannot lock offline here: {locked.stderr.strip()[-300:]}")
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(presets, "_git_files", lambda *args: None)
+    dest = tmp_path / "far" / "away" / "copy"
+    presets.copy_template(dest)
+    assert '"../../../side/mylib"' in (dest / "uv.lock").read_text(encoding="utf-8")
+    check = subprocess.run([uv, "lock", "--check", "--offline"], cwd=dest, env=env, capture_output=True, text=True, check=False)
+    assert check.returncode == 0, check.stderr
+
+
+WHEELHOUSE_PYPROJECT = """\
+[project]
+name = "proj"
+version = "0.1.0"
+dependencies = ["tinylib", "flatlib", "pypilib"]
+
+[tool.uv]
+find-links = [
+    "../wheels",  # the team's wheelhouse
+    "https://example.com/wheels/",
+    "vendor/wheels",
+]
+index-url = '../../simple'
+extra-index-url = ["../more"]
+
+[tool.uv.pip]
+find-links = ["../wheels"]
+
+[[tool.uv.index]]
+name = "local"
+url = "../flat"
+format = "flat"
+explicit = true
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+
+[tool.uv.sources]
+flatlib = { index = "local" }
+
+[tool.other]
+find-links = ["../wheels"]
+"""
+WHEELHOUSE_UV_TOML = """\
+find-links = ["../wheels"]
+
+[[index]]
+name = "local"
+url = "../flat"
+"""
+WHEELHOUSE_LOCK = """\
+version = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "flatlib"
+version = "1.0"
+source = { registry = "../flat" }
+wheels = [
+    { path = "flatlib-1.0-py3-none-any.whl" },
+]
+
+[[package]]
+name = "pypilib"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "tinylib"
+version = "1.0"
+source = { registry = "../wheels" }
+wheels = [
+    { path = "tinylib-1.0-py3-none-any.whl" },
+]
+
+[[package]]
+name = "vendored"
+version = "1.0"
+source = { registry = "vendor/wheels" }
+"""
+
+
+def _strings(data: Any) -> list[str]:
+    """Every string of parsed TOML, in order."""
+    if isinstance(data, dict):
+        return [s for v in data.values() for s in _strings(v)]
+    if isinstance(data, list):
+        return [s for item in data for s in _strings(item)]
+    return [data] if isinstance(data, str) else []
+
+
+def test_copy_template_names_local_wheelhouses_outside_the_project_from_the_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local wheelhouse or index is named from the project too: `find-links = ["../wheels"]`,
+    an index `url = "../flat"` (pyproject.toml's [tool.uv] and [tool.uv.pip], or a uv.toml next
+    to it), and uv.lock's `source = { registry = "../wheels" }` of a package found there. Only
+    the local sources were renamed, so from a copy at another depth they named a missing folder:
+    `new` stopped in __init's `uv add` ("Failed to read `--find-links` directory") and removed the
+    project. Each such value names the same folder from the copy; a URL, a folder inside the
+    project, another tool's table, the comments and every other byte stay as they were."""
+    src = tmp_path / "a" / "b" / "proj"
+    src.mkdir(parents=True)
+    files = {"pyproject.toml": WHEELHOUSE_PYPROJECT, "uv.toml": WHEELHOUSE_UV_TOML, "uv.lock": WHEELHOUSE_LOCK}
+    for name, text in files.items():
+        (src / name).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(presets, "_git_files", lambda *args: None)  # no git: every file
+    dest = tmp_path / "x" / "y" / "z" / "copy"
+    presets.copy_template(dest)
+    moved: list[str] = []
+    for name, text in files.items():
+        new_text = (dest / name).read_text(encoding="utf-8")
+        old, new = tomllib.loads(text), tomllib.loads(new_text)
+        if name == "pyproject.toml":  # another tool's table, not uv's settings: never touched
+            assert new["tool"].pop("other") == old["tool"].pop("other") == {"find-links": ["../wheels"]}
+        for before, after in zip(_strings(old), _strings(new), strict=True):
+            if before.startswith(".."):
+                assert after != before and os.path.normpath(dest / after) == os.path.normpath(src / before), (name, before, after)
+                moved.append(f"{name}: {before}")
+            else:
+                assert after == before, (name, before, after)
+        assert new_text.count("\n") == text.count("\n")
+    assert sorted(moved) == sorted(
+        [f"pyproject.toml: {v}" for v in ("../wheels", "../../simple", "../more", "../wheels", "../flat")]
+        + ["uv.toml: ../wheels", "uv.toml: ../flat", "uv.lock: ../flat", "uv.lock: ../wheels"]
+    )
+    assert "# the team's wheelhouse" in (dest / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def _tiny_wheel(folder: Path, name: str) -> None:
+    """A pure wheel `name`-1.0 with no dependency, written by hand (no build backend, no network)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    meta = f"{name}-1.0.dist-info"
+    files = {
+        f"{name}/__init__.py": "",
+        f"{meta}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n",
+        f"{meta}/WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    record = [f"{path},," for path in [*files, f"{meta}/RECORD"]]
+    with zipfile.ZipFile(folder / f"{name}-1.0-py3-none-any.whl", "w") as whl:
+        for path, text in files.items():
+            whl.writestr(path, text)
+        whl.writestr(f"{meta}/RECORD", "\n".join(record) + "\n")
+
+
+@pytest.mark.skipif(shutil.which("uv") is None and not os.environ.get("UV"), reason="uv not found")
+@pytest.mark.parametrize("where", ["find-links", "flat index", "uv.toml"])
+def test_uv_reads_the_renamed_wheelhouse_of_a_copy_as_the_same_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str) -> None:
+    """uv itself agrees: a project that takes a package from a wheelhouse next to it (find-links,
+    a flat index, or find-links in a uv.toml) locks; its copy two folders deeper, the wheelhouse
+    named from there, passes `uv lock --check` (no network: the wheel is local)."""
+    side = tmp_path / "side"
+    _tiny_wheel(side / "wheels", "tinylib")
+    src = side / "proj"
+    src.mkdir()
+    settings = {
+        "find-links": '[tool.uv]\nfind-links = ["../wheels"]\n',
+        "flat index": '[[tool.uv.index]]\nname = "local"\nurl = "../wheels"\nformat = "flat"\nexplicit = true\n\n[tool.uv.sources]\ntinylib = { index = "local" }\n',
+        "uv.toml": "",
+    }[where]
+    (src / "pyproject.toml").write_text(
+        f'[project]\nname = "proj"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = ["tinylib"]\n\n{settings}', encoding="utf-8"
+    )
+    if where == "uv.toml":
+        (src / "uv.toml").write_text('find-links = ["../wheels"]\n', encoding="utf-8")
+    uv = shutil.which("uv") or os.environ["UV"]
+    env = _child_env(tmp_path)
+    locked = subprocess.run([uv, "lock", "--offline"], cwd=src, env=env, capture_output=True, text=True, check=False)
+    if locked.returncode != 0:
+        pytest.skip(f"uv cannot lock offline here: {locked.stderr.strip()[-300:]}")
+    assert 'registry = "../wheels"' in (src / "uv.lock").read_text(encoding="utf-8")
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(presets, "_git_files", lambda *args: None)
+    dest = tmp_path / "far" / "away" / "copy"
+    presets.copy_template(dest)
+    assert 'registry = "../../../side/wheels"' in (dest / "uv.lock").read_text(encoding="utf-8")
+    check = subprocess.run([uv, "lock", "--check", "--offline"], cwd=dest, env=env, capture_output=True, text=True, check=False)
+    assert check.returncode == 0, check.stderr
+
+
+def test_rebase_local_sources_never_writes_what_it_cannot_rewrite_alone(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The edit changes the local sources and nothing else, in the copy's own files: the same
+    value in another tool's table stays as it was (only uv's settings are edited); in a key of
+    uv's settings that names no source (cache-dir) it would change too, so the file stays as it
+    was, with a warning naming it; and a pyproject.toml of the copy that is a link to a file
+    outside it (the project's own) is never written through."""
+    src = tmp_path / "proj"
+    src.mkdir()
+    dest = tmp_path / "deeper" / "copy"
+    dest.mkdir(parents=True)
+    other = '[tool.uv.sources]\nmylib = { path = "../mylib" }\n\n[tool.other]\npath = "../mylib"\n'
+    (src / "pyproject.toml").write_text(other, encoding="utf-8")
+    (dest / "pyproject.toml").write_text(other, encoding="utf-8")
+    presets.rebase_local_sources(src, dest)
+    assert (dest / "pyproject.toml").read_text(encoding="utf-8") == other.replace('"../mylib" }', '"../../mylib" }')
+    assert "warning:" not in capsys.readouterr().err
+    shared = '[tool.uv]\ncache-dir = "../mylib"\n\n[tool.uv.sources]\nmylib = { path = "../mylib" }\n'
+    (src / "pyproject.toml").write_text(shared, encoding="utf-8")
+    (dest / "pyproject.toml").write_text(shared, encoding="utf-8")
+    presets.rebase_local_sources(src, dest)
+    assert (dest / "pyproject.toml").read_text(encoding="utf-8") == shared
+    err = capsys.readouterr().err
+    assert "warning:" in err and "../mylib" in err and str(dest) in err, err
+    (dest / "pyproject.toml").unlink()
+    alone = '[tool.uv.sources]\nmylib = { path = "../mylib" }\n'
+    (src / "pyproject.toml").write_text(alone, encoding="utf-8")
+    try:
+        os.symlink(src / "pyproject.toml", dest / "pyproject.toml")
+    except OSError as e:  # Windows without the right to make links
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+    presets.rebase_local_sources(src, dest)
+    assert (src / "pyproject.toml").read_text(encoding="utf-8") == alone and (dest / "pyproject.toml").is_symlink()
+    assert "warning:" in capsys.readouterr().err
 
 
 # --- new ---------------------------------------------------------------------------------------
@@ -1250,6 +1744,27 @@ def test_new_says_what_comes_next_for_the_callers_shell(monkeypatch: pytest.Monk
     apostrophe = str(Path("/p/it's"))
     assert presets.next_steps(Path(apostrophe))[0] == f"cd {shlex.quote(apostrophe)}"
     assert shlex.split(presets.next_steps(Path(apostrophe))[0]) == ["cd", apostrophe]
+    # cmd expands %NAME% of a typed line inside quotes too: each % goes outside them, as ^%
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "cmd")
+    base = str(Path("/p"))
+    assert presets.next_steps(Path("/p/a%OS%b 50%"))[0] == f'cd /d "{base}{os.sep}a"^%"OS"^%"b 50"^%'
+    assert presets.next_steps(Path("/p/%%x"))[0] == f'cd /d "{base}{os.sep}"^%^%"x"'
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe reads the hint")
+def test_the_cmd_hint_enters_a_folder_whose_name_holds_percent_signs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The line new prints for cmd, run by cmd (/c parses a line as a typed one: an undefined
+    %NAME% stays): `cd /d "...\\a%OS%b"` went to ...\\aWindows_NTb."""
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "cmd")
+    monkeypatch.delenv("XONSH_VERSION", raising=False)
+    monkeypatch.delenv("NU_VERSION", raising=False)
+    comspec = os.environ.get("ComSpec", "cmd.exe")
+    for name in ("a%OS%b", "50%", "%%x", "x %PATH% y", "p&q %OS%^"):
+        folder = tmp_path / name
+        folder.mkdir()
+        line = presets.next_steps(folder)[0]
+        r = subprocess.run(f'"{comspec}" /d /s /c "{line} && cd"', cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False)
+        assert r.returncode == 0 and os.path.samefile(r.stdout.strip(), folder), (line, r.stdout, r.stderr)
 
 
 @pytest.mark.parametrize(("launcher", "expected"), [("cmd", "./pyt.cmd setup"), ("sh:bash", "./pyt setup"), ("", "./pyt setup")])
@@ -1500,6 +2015,134 @@ def test_new_asks_for_python_cpython_before_it_copies_anything(tmp_path: Path, m
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize("variable", ["UV_FROZEN", "UV_LOCKED"])
+@pytest.mark.parametrize("dry", [False, True], ids=["real", "dry run"])
+def test_new_refuses_a_frozen_lock_before_it_copies_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str, dry: bool) -> None:
+    """Every new project is locked anew, which the user's UV_FROZEN or UV_LOCKED forbid: new
+    copied the template, ran __init, and only then uv said `--no-sync` cannot be used with
+    UV_FROZEN (a flag the user never typed) or, for UV_LOCKED, to run `uv lock`; the dry run
+    printed the whole plan and exited 0. Refused before anything is written, naming the variable,
+    as mode, apply and rename refuse such a re-lock."""
+    from runner import envs
+
+    cfg = config.load(set())
+    monkeypatch.setenv(variable, "1")
+    monkeypatch.setattr(proc, "DRY_RUN", dry)
+    monkeypatch.setattr(envs, "ensure_python", lambda v: pytest.fail("asked uv for the interpreter"))
+    monkeypatch.setattr(envs, "find_cpython", lambda v: Path("/uv/python3"))
+    monkeypatch.setattr(presets, "copy_template", lambda dest: pytest.fail("copied"))
+    monkeypatch.setattr(presets, "new", lambda *a, **k: pytest.fail("made a project"))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(PytError, match=rf"{variable} is set, and with it `uv lock` writes nothing: unset {variable}") as e:
+        cmd_mode.cmd_new(cfg, ["demo", "--preset", "script"])
+    assert e.value.code == 2 and "a new project is locked anew" in str(e.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+def _new_stops_before_any_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    from runner import envs
+
+    monkeypatch.setattr(cmd_mode, "_work_tree_top", lambda dest: pytest.fail("git asked"))
+    monkeypatch.setattr(envs, "ensure_python", lambda version: pytest.fail("python.cpython asked"))
+    monkeypatch.setattr(presets, "new", lambda *a, **k: pytest.fail("made a project"))
+
+
+def test_new_names_a_destination_it_cannot_look_into(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`pyt new /root/proj` as a user who may not enter /root: Path.exists raised the
+    PermissionError on Python 3.11-3.13 (an internal error and its traceback), and on 3.14, which
+    reads such a folder as missing, git's start in /root said "cannot run git: Permission denied
+    (is it executable?...)". A folder new may not list, and a name too long for the file system,
+    ended in the same traceback. One error names the destination, exit 2, before any other step.
+    Simulated here (root enters every folder): the next test does it for real."""
+    cfg = config.load(set())
+    locked, unlistable = tmp_path / "locked", tmp_path / "unlistable"
+    locked.mkdir()
+    unlistable.mkdir()
+    real_stat, real_iterdir = os.stat, Path.iterdir
+
+    def fake_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if isinstance(path, (str, os.PathLike)) and Path(path) != locked and Path(path).is_relative_to(locked):
+            raise PermissionError(13, "Permission denied", str(path))  # EACCES: search permission on `locked`
+        return real_stat(path, *args, **kwargs)
+
+    def fake_iterdir(self: Path) -> Any:
+        if self == unlistable:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    _new_stops_before_any_step(monkeypatch)
+    monkeypatch.setattr(os, "stat", fake_stat)
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+    for dest, what in ((locked / "proj", "cannot access"), (locked / "a" / "proj", "cannot access"), (unlistable, "cannot read the folder")):
+        with pytest.raises(PytError, match=re.escape(f"new: {what} {dest}: Permission denied")) as e:
+            cmd_mode.cmd_new(cfg, [str(dest), "--name", "demo"])
+        assert e.value.code == 2
+    monkeypatch.setattr(os, "stat", real_stat)
+    too_long = tmp_path / ("p" * 300)
+    # ENAMETOOLONG on POSIX; Windows gives its own reason (a 300-character name is invalid there)
+    reason = "File name too long" if sys.platform != "win32" else ""
+    with pytest.raises(PytError, match=re.escape(f"new: cannot access {too_long}: {reason}")) as e:
+        cmd_mode.cmd_new(cfg, [str(too_long), "--name", "demo"])
+    assert e.value.code == 2
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["locked", "unlistable"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_new_below_a_folder_it_may_not_enter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same for real, where folder permissions hold for the user (not root: CI's container
+    user, macOS)."""
+    cfg = config.load(set())
+    locked, unlistable = tmp_path / "locked", tmp_path / "unlistable"
+    locked.mkdir()
+    unlistable.mkdir()
+    _new_stops_before_any_step(monkeypatch)
+    locked.chmod(0o000)
+    unlistable.chmod(0o300)  # enter and write, but not list
+    try:
+        try:
+            os.listdir(locked)
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("this user enters every folder (root): test_new_names_a_destination_it_cannot_look_into simulates it")
+        for dest, what in ((locked / "proj", "cannot access"), (unlistable, "cannot read the folder")):
+            with pytest.raises(PytError, match=re.escape(f"new: {what} {dest}: Permission denied")) as e:
+                cmd_mode.cmd_new(cfg, [str(dest), "--name", "demo"])
+            assert e.value.code == 2
+    finally:
+        locked.chmod(0o700)
+        unlistable.chmod(0o700)
+    assert not (locked / "proj").exists() and list(unlistable.iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a symbolic link needs a privilege on Windows")
+@pytest.mark.parametrize("dry_run", [False, True], ids=["real", "dry run"])
+def test_new_names_a_destination_that_is_a_link_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    """`pyt new loop` where loop -> loop: Path.resolve raises RuntimeError("Symlink loop from ...")
+    on Python 3.11 and 3.12, which `new` runs on (any 3.11+: outside a project, or in one without
+    .venv), and the user got an internal-error traceback. One error line names the destination,
+    exit 2, nothing written. Played on every Python: resolve behaves as it does on 3.11."""
+    loop = tmp_path / "loop"
+    loop.symlink_to("loop")
+    real_resolve = Path.resolve
+
+    def resolve(self: Path, strict: bool = False) -> Path:  # pathlib's resolve of Python 3.11 and 3.12
+        try:
+            os.stat(self)
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                raise RuntimeError(f"Symlink loop from {str(self)!r}") from None
+        return real_resolve(self, strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    _new_stops_before_any_step(monkeypatch)
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    with pytest.raises(PytError) as e:
+        cmd_mode.cmd_new(config.load(set()), [str(loop), "--name", "demo"])
+    assert e.value.code == 2 and str(e.value).startswith(f"new: cannot access {loop}: "), str(e.value)
+    assert [p.name for p in tmp_path.iterdir()] == ["loop"]
+
+
 def test_new_runs_the_copys_init_on_the_python_cpython_uv_gave(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The copy's runner starts on the interpreter envs.ensure_python returned: its __init runs
     there, and uv's cached environment of the new project's runner holds python.cpython from
@@ -1542,6 +2185,60 @@ def test_new_never_touches_a_folder_with_content(tmp_path: Path, monkeypatch: py
         presets.new(tmp_path / "sub" / "demo", "script", "demo")
     assert not (tmp_path / "sub").exists()
     assert (tmp_path / "p" / "keep.txt").read_text(encoding="utf-8") == "user data"
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["real", "dry run"])
+def test_new_refuses_a_destination_it_cannot_use_before_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    """A folder new cannot list (mode d-wx--x--x, an ACL) ended in an internal-error traceback,
+    and a path below a file in a bare `[Errno 20] Not a directory` followed by "the half-made
+    project ... was removed", for a project it never made (and its dry run promised a copy).
+    Both are one line naming the folder, exit 2, before anything is written."""
+    monkeypatch.setattr(presets, "copy_template", lambda dest: pytest.fail("copied"))
+    monkeypatch.setattr(proc, "run", lambda *a, **k: pytest.fail("ran a command"))
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.delenv("PYTEMPLATE_CALLER_CWD", raising=False)
+    cfg = config.load(set())
+    afile = tmp_path / "afile"
+    afile.write_text("a file", encoding="utf-8")
+    unlistable = tmp_path / "unlistable"
+    unlistable.mkdir()
+    real = Path.iterdir
+
+    def iterdir(self: Path) -> Any:
+        if self == unlistable:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    cases = [
+        (afile / "x", f"{afile} is not a folder: {afile / 'x'} cannot be made in it"),
+        (afile / "x" / "y", f"{afile} is not a folder: {afile / 'x' / 'y'} cannot be made in it"),
+        (unlistable, f"cannot read the folder {unlistable}: Permission denied"),
+    ]
+    for dest, message in cases:
+        with pytest.raises(PytError) as e:
+            cmd_mode.cmd_new(cfg, [str(dest), "--name", "demo"])
+        assert e.value.code == 2 and str(e.value) == f"new: {message}"
+        with pytest.raises(PytError) as e:
+            presets.new(dest, "script", "demo")
+        assert e.value.code == 2 and str(e.value) == message
+    assert sorted(p.name for p in real(tmp_path)) == ["afile", "unlistable"] and afile.read_text(encoding="utf-8") == "a file"
+
+
+def test_new_says_nothing_was_written_when_the_copy_made_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A copy that fails before it made the folder (a parent the user may not write) said "the
+    half-made project in ... was removed", after `[Errno 13] Permission denied: '...'`."""
+    dest = tmp_path / "ro" / "demo"
+
+    def copy(path: Path) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(path.parent))
+
+    monkeypatch.setattr(presets, "copy_template", copy)
+    monkeypatch.setattr(proc, "run", lambda *a, **k: pytest.fail("ran a command"))
+    with pytest.raises(PytError) as e:
+        presets.new(dest, "script", "demo")
+    assert e.value.code == 1 and str(e.value) == f"{dest.parent}: Permission denied\n  nothing was written"
+    assert list(tmp_path.iterdir()) == []
 
 
 @needs_git
@@ -1587,17 +2284,32 @@ def test_git_init_in_a_monorepo_stages_the_launchers_executable(tmp_path: Path, 
 
 
 @needs_git
-def test_git_init_in_a_monorepo_that_ignores_the_project(tmp_path: Path, git_env: None) -> None:
+@pytest.mark.parametrize("pathspecs", [None, "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"])
+@pytest.mark.parametrize("ignore", ["apps/", "*\n!.gitignore\n"], ids=["a monorepo's apps/", "a home folder kept in git"])
+def test_git_init_in_a_repository_that_ignores_the_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_env: None, ignore: str, pathspecs: str | None) -> None:
+    """A work tree that ignores the folder (a dotfiles repository of the home folder with `*` in
+    its .gitignore, a monorepo that ignores apps/) never holds the project: it used to get no
+    repository at all there (setup then said to `git init` it, and new advised a workflow for the
+    outer repository). It gets one of its own, as outside any work tree, whatever pathspec
+    setting the user exported: check-ignore refuses every one of them (exit 128, read as "not
+    ignored"), and the project got no repository again."""
+    if pathspecs is not None:
+        monkeypatch.setenv(pathspecs, "1")
     mono = tmp_path / "mono"
     mono.mkdir()
     _git(mono, "init", "--quiet")
     _git(mono, "config", "core.filemode", "false")
-    (mono / ".gitignore").write_text("apps/\n", encoding="utf-8")
+    (mono / ".gitignore").write_text(ignore, encoding="utf-8")
     dest = mono / "apps" / "game"
     dest.mkdir(parents=True)
-    (dest / "pyt").write_text("#!/bin/sh\n", encoding="utf-8")
-    presets._git_init(dest)  # git refuses to add an ignored path: nothing staged, no error
+    for script in ("pyt", "pyt.ps1"):
+        (dest / script).write_text("#!/bin/sh\n", encoding="utf-8")
+    presets._git_init(dest)
     assert _git(mono, "ls-files", "-s") == ""
+    assert (dest / ".git").is_dir() and os.path.samefile(_git(dest, "rev-parse", "--show-toplevel").strip(), dest)
+    assert _git(dest, "symbolic-ref", "HEAD").strip() == "refs/heads/main"
+    modes = {line.split()[3]: line.split()[0] for line in _git(dest, "ls-files", "-s").splitlines()}
+    assert modes == {"pyt": "100755", "pyt.ps1": "100755"}
 
 
 def test_git_init_falls_back_without_b(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2200,6 +2912,66 @@ def test_name_check_reads_the_import_names_of_installed_dependencies(fake: Fake)
     assert presets._installed_import_names()["compiled"] == {"fastmod"}
 
 
+@pytest.mark.parametrize("how", ["simulated", "for real"])
+def test_an_environment_this_user_may_not_enter_holds_no_names(fake: Fake, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """A .venv this user may not enter (a root-owned 0700 one, from `sudo ./pyt setup` under a
+    restrictive umask): Python 3.11-3.13's pathlib raised PermissionError at its site-packages,
+    so new, rename and an apply that renames (check_name_free) ended in an internal-error
+    traceback. Such an environment holds nothing to read; the others still name their modules.
+    "simulated": os.stat refuses what is below it, with 3.11's pathlib on any Python; "for real":
+    a folder of mode 0 (POSIX, not root), which fails on the base only on 3.11-3.13."""
+    text = FAKE_PYPROJECT.replace('"rich>=15.0.0",', '"rich>=15.0.0",\n    "python-dateutil",')
+    (fake.root / "pyproject.toml").write_text(text, encoding="utf-8")
+    locked = fake.root / ".venv"
+    (locked / "Lib" / "site-packages").mkdir(parents=True)
+    _install(fake.root / ".venv-pypy" / "lib" / "pypy3.11" / "site-packages", "python_dateutil-2.9.0.post0.dist-info", "dateutil/__init__.py")
+    if how == "simulated":
+        _pathlib_before_3_14(monkeypatch)
+        real_stat, blocked = os.stat, os.path.abspath(locked)
+
+        def no_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            here = "" if isinstance(path, int) else os.path.abspath(os.fsdecode(path))
+            if here.startswith(blocked + os.sep):
+                raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(path))
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", no_stat)
+    elif sys.platform == "win32" or os.geteuid() == 0:
+        pytest.skip("a mode that keeps this user out: POSIX, not root (root enters every folder)")
+    else:
+        locked.chmod(0)
+    try:
+        assert presets._installed_import_names() == {"python-dateutil": {"dateutil"}}
+        with pytest.raises(PytError, match="would shadow the module 'dateutil' of python-dateutil"):
+            presets.check_name_free(fake.cfg, "script", "dateutil")
+    finally:
+        locked.chmod(0o755)
+
+
+def _pathlib_before_3_14(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path.exists, is_file and is_dir as Python 3.11-3.13 have them, on any Python: they swallow
+    only ENOENT, ENOTDIR, EBADF and ELOOP, so the PermissionError of a path inside a folder this
+    user may not enter comes through (3.14 asks os.path, which says False)."""
+
+    def check(test: Callable[[int], bool]) -> Callable[..., bool]:
+        def method(self: Path, *, follow_symlinks: bool = True) -> bool:
+            try:
+                mode = self.stat(follow_symlinks=follow_symlinks).st_mode
+            except OSError as e:
+                if e.errno not in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
+                    raise
+                return False
+            except ValueError:
+                return False
+            return test(mode)
+
+        return method
+
+    monkeypatch.setattr(Path, "exists", check(lambda mode: True))
+    monkeypatch.setattr(Path, "is_file", check(stat.S_ISREG))
+    monkeypatch.setattr(Path, "is_dir", check(stat.S_ISDIR))
+
+
 def test_new_from_another_project_gets_the_tested_versions(fake: Fake) -> None:
     """`new --preset script` from a raylib project resolved rich, markdown-it-py and mdurl to
     the newest release of the day: the pins must reach every package the source lock lacks."""
@@ -2394,7 +3166,16 @@ def test_the_assets_are_the_apps_own_whatever_it_inherits(tmp_path: Path, monkey
     assert resources.assets_dir() == tmp_path / "bundle" / "assets"  # PyInstaller
 
 
-def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "error",
+    [
+        NotImplementedError("This Python build lacks multiprocessing.synchronize"),
+        # sem_open that exists but fails when called: a read-only or missing /dev/shm (some
+        # containers and sandboxes); every Draw ended "Draw failed (see the console)"
+        OSError(30, "Read-only file system"),
+    ],
+)
+def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
     """flet build for the web (Pyodide), Android and iOS: ProcessPoolExecutor raises there, and
     the Draw handler died with the button disabled on 'Computing...'. It draws in-process."""
     import asyncio
@@ -2404,7 +3185,7 @@ def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypa
     app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app", {"flet": _fake_module("flet", **FAKE_FLET)})
 
     def no_processes(*_: Any, **__: Any) -> Any:
-        raise NotImplementedError("This Python build lacks multiprocessing.synchronize")
+        raise error
 
     monkeypatch.setattr(app, "ProcessPoolExecutor", no_processes)
     app._executor.cache_clear()
@@ -2418,6 +3199,64 @@ def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypa
         app._executor.cache_clear()
         assert app._executor() is None
     app._executor.cache_clear()
+
+
+def test_flet_skeleton_replaces_a_worker_that_died(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pool of the Draw handler was made once and kept: after its worker died (killed, out of
+    memory) it ran nothing more, and every later Draw failed with BrokenProcessPool until the
+    app restarted. A real worker, killed."""
+    import asyncio
+    import signal
+
+    if "flet" not in PRESETS:
+        pytest.skip("no flet preset")
+    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app", {"flet": _fake_module("flet", **FAKE_FLET)})
+    app._executor.cache_clear()
+    first = app._executor()
+    if first is None:
+        pytest.skip("no worker process here")
+    try:
+        assert asyncio.run(app._render_png(8, 5, 1)).startswith(b"\x89PNG")
+        for pid in list(first._processes):
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        assert asyncio.run(app._render_png(8, 5, 1)).startswith(b"\x89PNG")  # in a new worker
+        assert app._executor() is not first
+    finally:
+        first.shutdown(wait=True)
+        if (last := app._executor()) is not None:
+            last.shutdown(wait=True)
+        app._executor.cache_clear()
+
+
+def test_flet_skeleton_draws_here_where_no_worker_ever_starts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pool that can be made but whose worker dies at once (a sandbox, a frozen app): a new
+    one is tried once, then the work runs in the event loop, as where no process can start."""
+    import asyncio
+    from concurrent.futures.process import BrokenProcessPool
+
+    if "flet" not in PRESETS:
+        pytest.skip("no flet preset")
+    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app", {"flet": _fake_module("flet", **FAKE_FLET)})
+    made: list[Any] = []
+
+    class DyingPool:
+        def __init__(self, max_workers: int) -> None:
+            self.down = False
+            made.append(self)
+
+        def submit(self, *_: Any) -> Any:
+            raise BrokenProcessPool("A child process terminated abruptly")
+
+        def shutdown(self, wait: bool = True) -> None:
+            self.down = True
+
+    monkeypatch.setattr(app, "ProcessPoolExecutor", DyingPool)
+    app._executor.cache_clear()
+    try:
+        assert asyncio.run(app._render_png(8, 5, 1)) == app.fractal.render_png(8, 5, 1)
+        assert len(made) == 2 and all(pool.down for pool in made)  # a second one, once; both shut down
+    finally:
+        app._executor.cache_clear()
 
 
 def test_flet_skeleton_gives_the_button_back_when_drawing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2455,6 +3294,30 @@ def test_raylib_skeleton_refuses_bad_options(tmp_path: Path, monkeypatch: pytest
     with pytest.raises(SystemExit) as e:
         app._options(argv)
     assert e.value.code == 2 and "usage: demo" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("folder", ["game", "Jos\u00e9 game"])
+def test_raylib_skeleton_hands_raylib_a_textures_bytes_never_its_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str) -> None:
+    """gfx.load_texture gave raylib the path as UTF-8 bytes, which raylib opens with the C fopen:
+    on Windows that reads them in the ANSI code page, and under a folder named with an accent
+    (a user's own name) the texture loaded nothing, silently. Now Python reads the file."""
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def record(name: str) -> Any:
+        def call(*args: Any) -> str:
+            calls.append((name, args))
+            return f"<{name}>"
+
+        return call
+
+    names = ("LoadTexture", "LoadImage", "LoadImageFromMemory", "LoadTextureFromImage", "UnloadImage")
+    fake = _fake_module("raylib", ffi=object(), **{name: record(name) for name in names})
+    gfx = _skeleton_package(tmp_path / folder, monkeypatch, "raylib", "demo.gfx", {"raylib": fake})
+    png = b"\x89PNG\r\n\x1a\nnot really"
+    (tmp_path / folder / "src" / "assets" / "hero.PNG").write_bytes(png)
+    assert gfx.load_texture("hero.PNG") == "<LoadTextureFromImage>"
+    image = "<LoadImageFromMemory>"
+    assert calls == [("LoadImageFromMemory", (b".png", png, len(png))), ("LoadTextureFromImage", (image,)), ("UnloadImage", (image,))]
 
 
 @pytest.mark.parametrize("preset", PRESETS)

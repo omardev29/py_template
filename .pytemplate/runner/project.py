@@ -7,12 +7,11 @@ import errno
 import os
 import platform
 import re
-import shutil
 import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path, PurePath
 
 from . import ui
@@ -211,7 +210,9 @@ def find_cygpath(dll: str) -> str | None:
     shell = os.environ.get("SHELL", "")  # <root>\usr\bin\bash.exe, or Git's <git>\bin\bash.exe
     if _DRIVE_ABS.match(shell):
         dirs += [Path(shell).parent, Path(shell).parent.parent / "usr" / "bin"]
-    found = shutil.which("cygpath")
+    from .proc import find_program  # lazily: proc imports this module
+
+    found = find_program("cygpath")  # never one in the caller's folder
     if found:
         dirs.append(Path(found).parent)
     for d in dirs:
@@ -323,15 +324,78 @@ def scratch_name(name: str) -> str:
 def check_private_dir(path: Path, option: str) -> None:
     """Refuse (POSIX) a scratch folder that another user owns or can write to: the harnesses
     run code from it as this user, and its owner could put their own there between two steps.
-    Both the path itself (a link planted in a shared /tmp) and the folder it names count."""
+    Both the path itself (a link planted in a shared /tmp) and the folder it names count; a
+    link that leads to no folder (its folder gone) is refused too: os.stat's FileNotFoundError
+    ended the harness in an internal-error traceback."""
     if sys.platform != "win32" and os.path.lexists(path):
         uid = os.getuid()
-        for st in (os.lstat(path), os.stat(path)):
-            if st.st_uid != uid:
-                raise PytError(f"{path} belongs to another user (uid {st.st_uid}): code run from it could be theirs; pick another {option}")
-        mode = os.stat(path).st_mode
-        if mode & 0o002:  # group-writable is the norm with a user-private group (umask 002)
-            raise PytError(f"{path} can be written by every user (mode {mode & 0o7777:o}): pick another {option}, or chmod o-w it")
+        st = os.lstat(path)
+        if st.st_uid == uid:
+            try:
+                st = os.stat(path)
+            except OSError as e:
+                raise PytError(f"{path} is a link that leads to no folder ({e.strerror or e}): pick another {option}") from None
+        if st.st_uid != uid:
+            raise PytError(f"{path} belongs to another user (uid {st.st_uid}): code run from it could be theirs; pick another {option}")
+        if st.st_mode & 0o002:  # group-writable is the norm with a user-private group (umask 002)
+            raise PytError(f"{path} can be written by every user (mode {st.st_mode & 0o7777:o}): pick another {option}, or chmod o-w it")
+
+
+def make_private_dir(path: Path, option: str) -> None:
+    """Create the scratch folder `path` (0700, its parents too) and check it once it exists
+    (check_private_dir): checked only before, a folder another user created in between (the
+    default /tmp/pt-e2e-<uid> is predictable) was taken by mkdir(exist_ok=True), and the
+    harness ran code from it. Once it is this user's and closed to others, nobody else can swap
+    it for theirs in a sticky /tmp."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    check_private_dir(path, option)
+
+
+# What a lock taken without waiting raises when another process holds it: flock's EWOULDBLOCK
+# (EAGAIN), msvcrt.locking's EACCES. Any other error (ENOLCK, EOPNOTSUPP, ENOSYS: a file system
+# without locks, some FUSE and network mounts) is no other run.
+_HELD_ELSEWHERE = {errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES}
+
+
+def lock_refusal(what: str, base: Path, error: OSError) -> PytError:
+    """The refusal of base_lock (and mutation.base_lock) for the error the lock call raised: another
+    run, or a folder whose file system takes no lock (it said "another run" for both, and every
+    later run on such a folder said the same)."""
+    if error.errno in _HELD_ELSEWHERE:
+        return PytError(f"{what}: another run is using {base}: wait for it to end")
+    reason = error.strerror or str(error)
+    return PytError(f"{what}: cannot lock {base / 'lock'}: {reason}: its file system takes no locks, use a folder on another one")
+
+
+@contextlib.contextmanager
+def base_lock(base: Path, what: str) -> Iterator[None]:
+    """One run at a time per scratch base/dir: a lock on <base>/lock held for the whole run (the
+    OS drops it when the process ends, however it ends). A second run on the same folder would
+    wipe or delete the first one's files; `what` names the command in the refusal. `base` must
+    exist. (selftest --mutation has its own copy, `mutation.base_lock`.)"""
+    fd = os.open(base / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            raise lock_refusal(what, base, e) from None
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(fd)  # releases the lock (POSIX)
 
 
 def _umask() -> int:

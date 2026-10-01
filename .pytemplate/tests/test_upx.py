@@ -207,14 +207,46 @@ def test_the_upx_cache_and_a_upx_on_path_are_absolute(monkeypatch: pytest.Monkey
     for variable in ("XDG_CACHE_HOME", "LOCALAPPDATA"):
         monkeypatch.setenv(variable, str(tmp_path / "abs"))
     assert upx._cache_dir() == tmp_path / "abs" / "pytemplate" / "tools" / f"upx-{upx.VERSION}"
-    # a upx found through a relative PATH entry reaches the tools absolute
+    # a upx found through a relative PATH entry reaches the tools absolute; on Windows such an
+    # entry is never searched (proc.on_path: it names a folder below the caller's, where the
+    # current folder's own upx.exe is never taken either)
     (tmp_path / "bin").mkdir()
     tool = tmp_path / "bin" / upx._exe_name()
     tool.write_bytes(b"")
     tool.chmod(0o755)
     monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": "bin"})
     found = upx.locate(make({"upx": {"enabled": True}}))
-    assert found is not None and found.is_absolute() and os.path.normcase(found) == os.path.normcase(tool)
+    if WINDOWS:
+        assert found is None
+    else:
+        assert found is not None and found.is_absolute() and os.path.normcase(found) == os.path.normcase(tool)
+
+
+def test_upx_on_path_is_never_the_one_in_the_callers_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """shutil.which searches the current folder before PATH on Windows (unless
+    NoDefaultCurrentDirectoryInExePath is set), and the runner's current folder is the caller's:
+    an upx.exe in the folder `./pyt build` was typed in won over PATH and the pinned download.
+    Windows is simulated: its PATHEXT, and its shutil.which (CPython's: the current folder first)."""
+    here = tmp_path / "here"
+    here.mkdir()
+    (here / "upx.EXE").write_bytes(b"MZ planted")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "upx.EXE").write_bytes(b"MZ on PATH")
+    monkeypatch.chdir(here)
+    monkeypatch.setattr(upx, "IS_WINDOWS", True)
+    monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(bindir), "PATHEXT": ".COM;.EXE"})
+
+    def windows_which(cmd: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
+        for folder in [os.curdir, *(path or "").split(os.pathsep)]:
+            for ext in (".COM", ".EXE"):
+                if os.path.isfile(os.path.join(folder, cmd + ext)):
+                    return os.path.join(folder, cmd + ext)
+        return None
+
+    monkeypatch.setattr(shutil, "which", windows_which)
+    found = upx.locate(make({"upx": {"enabled": True}}))
+    assert found is not None and os.path.normcase(found) == os.path.normcase(bindir / "upx.EXE")
 
 
 # --- the pinned download, with crafted archives (no network) -----------------------------------------
@@ -336,6 +368,21 @@ def test_download_failures_are_clear_and_leave_nothing(monkeypatch: pytest.Monke
         upx._download(tmp_path / "tools")
     assert e.value.code == 3
     assert not (tmp_path / "tools").exists() or not any((tmp_path / "tools").iterdir())
+
+
+def test_a_cache_folder_it_cannot_write_is_a_clear_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # ~/.cache/pytemplate/tools (XDG_CACHE_HOME, LOCALAPPDATA) that cannot be made or written: the
+    # download ended in an "internal runner error" traceback
+    asset = f"upx-{upx.VERSION}-amd64_linux.tar.xz"
+    _serve(monkeypatch, _tar_xz({f"upx-{upx.VERSION}-amd64_linux/upx": b"\x7fELF upx"}), asset, windows=False)
+    (tmp_path / "cache").write_text("a file where the folder must go", encoding="utf-8")
+    with pytest.raises(PytError, match=r"upx: cannot write .*cache.*deploy\.upx\.path") as e:
+        upx._download(tmp_path / "cache" / "tools")
+    assert e.value.code == 3
+    (tmp_path / "tools" / "upx.part").mkdir(parents=True)  # the file cannot be written either
+    with pytest.raises(PytError, match="upx: cannot write") as e:
+        upx._download(tmp_path / "tools")
+    assert e.value.code == 3 and not (tmp_path / "tools" / "upx").exists()
 
 
 def test_files_over_the_limit_are_never_packed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

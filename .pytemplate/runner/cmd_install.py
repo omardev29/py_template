@@ -20,12 +20,13 @@ Neither ever edits PATH, a shell's startup files or the registry: when the bin f
 on PATH they say so and name `uv tool update-shell`. Every refusal comes before the first
 write, all of them in one message; the new copy is written into a folder of its own and
 swapped in whole, and a failure at any step (Ctrl+C, SIGTERM and SIGHUP too) puts the old copy
-and the old launchers back.
+and the old launchers back. One install or uninstall runs at a time (_one_run).
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -41,6 +42,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import envs, presets, proc, project, shells, ui
 from .cmd_dev import only_flags
@@ -64,6 +66,8 @@ SCHEMA = 1
 # launchers in the bin folder (_stage)
 NEW, OLD = ".template-new-", ".template-old-"
 STAGED = re.compile(r"\.pyt(?:\.cmd|\.ps1)?-install-")
+# Next to the installed template while an install or uninstall runs: one at a time (_one_run)
+LOCK_FILE = ".pyt-install.lock"
 UPDATE_SHELL = "uv tool update-shell"
 FROM_A_CLONE = f"./pyt install in a clone of the template, {presets.TEMPLATE_URL}"
 
@@ -144,7 +148,7 @@ def not_ours(path: Path) -> str:
     "" when it is a launcher pyt install wrote."""
     if os.path.islink(path):
         return "a symbolic link, which pyt install never writes"
-    if (path.parent / ".pytemplate").is_dir():
+    if os.path.isdir(path.parent / ".pytemplate"):
         return "a project's own launcher (its folder holds .pytemplate)"
     if not is_launcher(path):
         return "not a pytemplate launcher (no `pytemplate-launcher` line)"
@@ -268,14 +272,22 @@ def _read(path: Path) -> bytes | None:
 
 def run_by_cmd(path: Path, environ: Mapping[str, str] | None = None) -> bool:
     """Whether cmd runs `path` for this very run: pyt.cmd hands over its own path (LAUNCHER_FILE)
-    with PYTEMPLATE_LAUNCHER=cmd, and cmd reads that file again when this run ends."""
+    with PYTEMPLATE_LAUNCHER=cmd, and cmd reads that file again, by that name, when this run ends.
+    The same name spelled otherwise (another case, an 8.3 short name) is it; another name of the
+    same file (a hard link, made by hand to put a project's pyt.cmd on PATH) is not: cmd reads on
+    in its own name, which removing or replacing this one leaves alone (one inode for both, and
+    the stand-in _retire wrote into it replaced the project's pyt.cmd, which cmd then deleted)."""
     env = os.environ if environ is None else environ
     running = env.get(LAUNCHER_FILE, "")
     if not running or not env.get("PYTEMPLATE_LAUNCHER", "").startswith("cmd"):
         return False
     try:
-        return os.path.samefile(running, path)
-    except OSError:
+        if not os.path.samefile(running, path):
+            return False
+        if os.stat(path).st_nlink <= 1:
+            return True  # one name: the one cmd reads, whatever its spelling
+        return os.path.normcase(os.path.realpath(running)) == os.path.normcase(os.path.realpath(path))
+    except (OSError, ValueError):
         return False
 
 
@@ -323,7 +335,7 @@ def read_record(snapshot: Path | None) -> dict[str, object] | None:
 
 def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
     """git in the template (no optional locks: a status must not write the index); None without git."""
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git is None:
         return None
     env = {**presets._git_env(), "LC_ALL": "C"}
@@ -434,7 +446,9 @@ def first_pyt(path: str) -> Path | None:
     the first folder that holds pyt.ps1, pyt.cmd, pyt.exe, pyt.bat or pyt (which one runs depends
     on the shell), elsewhere the first executable file named pyt. The current folder is not
     searched (shutil.which puts it first on Windows: a project's own pyt.cmd, typed there as
-    `pyt`, is the right one to run)."""
+    `pyt`, is the right one to run). A folder this user may not enter holds none, as for the
+    shell (os.path: before 3.14, pathlib's is_file raised PermissionError there, and install
+    ended in an internal-error traceback once its work was done)."""
     names = ("pyt.ps1", "pyt.cmd", "pyt.exe", "pyt.bat", "pyt") if IS_WINDOWS else ("pyt",)
     for entry in path.split(os.pathsep):
         entry = entry.strip().strip('"') if IS_WINDOWS else entry
@@ -442,7 +456,7 @@ def first_pyt(path: str) -> Path | None:
             continue
         for name in names:
             candidate = Path(os.path.expanduser(entry)) / name
-            if candidate.is_file() and (IS_WINDOWS or os.access(candidate, os.X_OK)):
+            if os.path.isfile(candidate) and (IS_WINDOWS or os.access(candidate, os.X_OK)):
                 return candidate
     return None
 
@@ -515,6 +529,47 @@ def _launcher_bytes(name: str) -> bytes:
     return data
 
 
+def _git_missing_here() -> bool:
+    """git is not on PATH, and a `.git` in the clone or above it says it is a repository
+    (hooks.git_missing_here, the rule apply, rename and doctor follow)."""
+    from . import hooks  # imported here: it imports render, mypyc and more
+
+    return hooks.git_missing_here(ROOT)
+
+
+def _unwritable(folder: Path) -> str | None:
+    """Why this user cannot make files in `folder` (or make `folder` itself, in the nearest
+    folder above it that exists), else None: the kernel's answer for this user (os.access).
+    install wrote the whole new copy of the template first, then failed on its first launcher.
+    Windows answers yes for every folder; there, as where a folder refuses root, the step that
+    makes the file names the folder (_folder_error)."""
+    here = folder
+    while not os.path.lexists(here):
+        if here.parent == here:
+            return None
+        here = here.parent
+    if not here.is_dir():
+        return f"{here} is not a folder"
+    if not os.access(here, os.W_OK | os.X_OK):
+        return "this user may not write in it" if here == folder else f"this user may not create it in {here}"
+    return None
+
+
+# What a folder answers when this user may not make a file in it
+NOT_ALLOWED = (errno.EACCES, errno.EPERM, errno.EROFS)
+
+
+def _folder_error(e: OSError, folder: Path, fix: str) -> Exception | None:
+    """The error of a file install tried to make in `folder` as one that names the folder: it
+    named the temporary name it tried (`.pyt-install-p81hkalh`, `.template-new-...`), which never
+    existed. With the way out when this user may not write there; None keeps `e` as it is."""
+    if e.errno is None:
+        return None
+    if e.errno in NOT_ALLOWED:
+        return PytError(f"pyt install cannot write into {folder}: {e.strerror or os.strerror(e.errno)}: {fix}", 1)
+    return OSError(e.errno, e.strerror or os.strerror(e.errno), str(folder))
+
+
 def _refuse(problems: list[str]) -> None:
     """Every refusal of one run in one message (each on its own line when there are several)."""
     if len(problems) == 1:
@@ -540,13 +595,31 @@ def make_plan() -> Plan:
     elif os.path.lexists(snapshot) and (why := not_an_install(snapshot)):
         problems.append(f"{snapshot}: {why}: move it away (or set another data folder), then run ./pyt install again")
     tracked, how = presets._tracked_template()
-    if tracked is None:
+    if tracked is None and presets._git_refused:  # a git clone, which git refuses to read
+        problems.append(
+            f"pyt install copies the files git tracks in the template, and git refuses to list them here "
+            f"({presets._git_refused}): {presets.git_refusal_fix()}"
+        )
+    elif tracked is None and _git_missing_here():
+        # A git clone where git is not on PATH (a git GUI's own git): "use a git clone" was no
+        # way out for someone typing in one
+        problems.append(
+            f"pyt install copies the files git tracks in the template, but git is not on PATH, and {ROOT} is a git clone: "
+            "install git, or put the git you have on PATH (a git GUI's own git often is not), then run ./pyt install again"
+        )
+    elif tracked is None:
         problems.append(f"pyt install copies the files git tracks in the template, and here it cannot tell which ({how}): use a git clone ({presets.TEMPLATE_URL})")
     for inside in (ROOT, snapshot.parent):
         if _inside(folder, inside):
             problems.append(f"uv's tool bin folder {folder} is inside {inside}: set UV_TOOL_BIN_DIR to a folder of its own")
-    if (folder / ".pytemplate").exists():
+    if os.path.exists(folder / ".pytemplate"):  # not pathlib: a folder this user may not enter raised (3.11-3.13)
         problems.append(f"uv's tool bin folder {folder} is a project's folder (it holds .pytemplate): set UV_TOOL_BIN_DIR to a folder of its own")
+    if cannot := _unwritable(folder):
+        problems.append(f"pyt install cannot write into uv's tool bin folder {folder} ({cannot}): set UV_TOOL_BIN_DIR to a folder of yours")
+    if cannot := _unwritable(snapshot.parent):
+        problems.append(
+            f"pyt install cannot write the installed template into {snapshot.parent} ({cannot}): set another data folder ({data_home_names()})"
+        )
     launchers: dict[str, bytes] = {}
     for name in LAUNCHERS:
         try:
@@ -624,9 +697,14 @@ def _rename(src: Path, dst: Path) -> None:
 
 
 def _copy_files(files: Iterable[str], dest: Path) -> None:
-    """The template's files into `dest` (links as links, as copy_template copies them)."""
+    """The template's files into `dest` (links as links, as copy_template copies them). `dest`
+    itself is never made again: deleted while it was written (another run, of a pyt older than
+    the lock of _one_run), the copy fails, where mkdir(parents=True) made it anew and an installed
+    template without the files copied before was swapped in."""
     for rel_path in files:
         src, target = ROOT / rel_path, dest / rel_path
+        if not dest.is_dir():
+            raise FileNotFoundError(errno.ENOENT, "deleted while it was written (another pyt install or uninstall?)", str(dest))
         target.parent.mkdir(parents=True, exist_ok=True)
         if src.is_symlink():
             presets._copy_link(src, target, rel_path, command="install")
@@ -636,26 +714,30 @@ def _copy_files(files: Iterable[str], dest: Path) -> None:
             shutil.copy2(src, target)
 
 
-def remove_leftovers(snapshot: Path, folders: Iterable[Path], stuck: list[Path] | None = None) -> list[Path]:
+LEFTOVER = "left by an unfinished install or uninstall"
+
+
+def leftovers(snapshot: Path, folders: Iterable[Path]) -> list[Path]:
     """What an unfinished install or uninstall left: `.template-new-*`/`.template-old-*` next to
-    the installed template, and staged launchers in the bin folders. Returns what it removed;
-    what it could not remove goes to `stuck` (a file in use)."""
-    gone: list[Path] = []
+    the installed template, and staged launchers (with the MARKER) in the bin folders."""
+    found: list[Path] = []
     with contextlib.suppress(OSError):
-        for entry in snapshot.parent.iterdir():
-            if entry.name.startswith((NEW, OLD)):
-                if presets._remove(entry):
-                    gone.append(entry)
-                elif stuck is not None:
-                    stuck.append(entry)
-    for folder in folders:
+        found += sorted(e for e in snapshot.parent.iterdir() if e.name.startswith((NEW, OLD)))
+    for folder in _dedupe(folders):
         with contextlib.suppress(OSError):
-            for entry in folder.iterdir():
-                if STAGED.match(entry.name) and is_launcher(entry):
-                    if _unlink(entry):
-                        gone.append(entry)
-                    elif stuck is not None:
-                        stuck.append(entry)
+            found += sorted(e for e in folder.iterdir() if STAGED.match(e.name) and is_launcher(e))
+    return found
+
+
+def remove_leftovers(snapshot: Path, folders: Iterable[Path], stuck: list[Path] | None = None) -> list[Path]:
+    """Remove the leftovers(); return what it removed. What it could not remove goes to `stuck`
+    (a file in use)."""
+    gone: list[Path] = []
+    for entry in leftovers(snapshot, folders):
+        if presets._remove(entry) if entry.parent == snapshot.parent else _unlink(entry):
+            gone.append(entry)
+        elif stuck is not None:
+            stuck.append(entry)
     return gone
 
 
@@ -680,6 +762,118 @@ def _new_folder(parent: Path, prefix: str) -> Path:
         return path
 
 
+def _names(fd: int, path: Path) -> bool:
+    """Whether `path` still names the file open as `fd`."""
+    try:
+        here, held = os.stat(path), os.fstat(fd)
+    except OSError:
+        return False
+    return (here.st_dev, here.st_ino) == (held.st_dev, held.st_ino)
+
+
+def _lock(path: Path) -> int | None:
+    """`path` opened (made when missing) and locked; None: another run holds the lock; -1: the
+    file system takes no locks (_no_lock). On POSIX a run that ends deletes the file while it
+    holds it: a lock taken on the file it deleted is taken again on the file that has its name
+    now."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as e:
+            return _no_lock(fd, path, e)
+        return fd  # Windows deletes no file that a run has open: the name is still the file's
+    else:
+        import fcntl
+
+        while True:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as e:
+                return _no_lock(fd, path, e)
+            if _names(fd, path):
+                return fd
+            os.close(fd)
+
+
+def _no_lock(fd: int, path: Path, error: OSError) -> int | None:
+    """After a lock call that failed: None when another run holds the lock (flock's EWOULDBLOCK,
+    msvcrt.locking's EACCES: project._HELD_ELSEWHERE), else -1: a file system that takes no locks
+    (ENOLCK, EOPNOTSUPP, ENOSYS: a cluster's Lustre without flock, some FUSE and network mounts),
+    where no run can be guarded and this one goes on without the lock, its file deleted. Every
+    error was "another run", and every install and uninstall there was refused for good."""
+    os.close(fd)
+    if error.errno in project._HELD_ELSEWHERE:
+        return None
+    with contextlib.suppress(OSError):
+        path.unlink()
+    return -1
+
+
+def _unlock(fd: int, path: Path) -> None:
+    """Give the lock up, and its file: a later run makes a new one. On POSIX the file goes while
+    the lock is held (_lock takes a lock on a deleted file again); Windows deletes no file that
+    another run has open, which then keeps it."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        with contextlib.suppress(OSError):
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            path.unlink()
+    else:
+        with contextlib.suppress(OSError):
+            if _names(fd, path):
+                path.unlink()
+        os.close(fd)  # releases the lock
+
+
+@contextlib.contextmanager
+def _one_run(snapshot: Path, command: str, *, empty_folder_goes: bool = False) -> Iterator[None]:
+    """One pyt install or uninstall at a time per installed template: a lock on LOCK_FILE next to
+    it, held for the whole run (the OS drops it when the process ends, however it ends), as the
+    harnesses hold project.base_lock. Each run deletes what an unfinished one left there
+    (remove_leftovers), and a second run deleted the copy a first one was still writing: that one
+    then swapped an installed template without the files copied before in, or its undo deleted
+    the installed template and said "nothing was changed". A second run is refused, before it
+    changes anything. The lock file goes as the run ends, and so do the folders made for it when
+    nothing else is in them (`empty_folder_goes`: <data home>/pytemplate too, as uninstall
+    leaves it). Where no file can be made there (a folder this user may not write in, a file in
+    its place), no run of this user can write there either: nothing to guard. On a file system
+    that takes no locks nothing can be guarded: the run goes on without the lock (_no_lock)."""
+    folder = snapshot.parent
+    made = presets._outermost_missing(folder)
+    path = folder / LOCK_FILE
+    fd: int | None = -1
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        fd = _lock(path)
+    except OSError:
+        pass
+    try:
+        if fd is None:
+            raise PytError(f"pyt {command}: another pyt install or uninstall is running ({path}): wait for it to end, then run pyt {command} again")
+        yield
+    finally:
+        if fd is not None and fd >= 0:
+            _unlock(fd, path)
+        top = made if made is not None else folder if empty_folder_goes else None
+        here = folder
+        while top is not None:
+            try:
+                here.rmdir()  # only an empty folder goes
+            except OSError:
+                break
+            if here == top:
+                break
+            here = here.parent
+
+
 class _Swap:
     """install's writes, each one undone when a later one fails (Ctrl+C too)."""
 
@@ -691,21 +885,38 @@ class _Swap:
         self.swapped = False
         self.staged: list[tuple[Path, Path]] = []  # (temporary file, launcher)
         self.replaced: list[tuple[Path, bytes | None]] = []  # launcher, its bytes before (None: new)
+        self.record: bytes | None = None  # the record written into the new copy
 
     def run(self) -> None:
         plan = self.plan
         parent = plan.snapshot.parent
         self.made_parent = not parent.exists()
-        parent.mkdir(parents=True, exist_ok=True)
-        # Noted only once it exists: undo reads a missing self.fresh as renamed into place
-        self.fresh = _new_folder(parent, NEW)
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+            # Noted only once it exists: undo reads a missing self.fresh as renamed into place
+            self.fresh = _new_folder(parent, NEW)
+        except OSError as e:
+            named = _folder_error(e, parent, f"set another data folder ({data_home_names()})")
+            if named is None:
+                raise
+            raise named from e
         _copy_files(plan.files, self.fresh)
+        # Its local sources outside the clone (../mylib, a ../wheels wheelhouse) named from the
+        # data folder, a sibling of the new copy: kept as they were, `pyt new` from there failed
+        presets.rebase_local_sources(ROOT, self.fresh)
         record = self.fresh / RECORD
         record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(json.dumps(plan.record, indent=2) + "\n", encoding="utf-8", newline="\n")
-        plan.bin.mkdir(parents=True, exist_ok=True)
-        for name, data in plan.launchers.items():
-            self.staged.append((_stage(plan.bin, name, data), plan.bin / name))
+        self.record = (json.dumps(plan.record, indent=2) + "\n").encode("utf-8")
+        record.write_bytes(self.record)
+        try:
+            plan.bin.mkdir(parents=True, exist_ok=True)
+            for name, data in plan.launchers.items():
+                self.staged.append((_stage(plan.bin, name, data), plan.bin / name))
+        except OSError as e:
+            named = _folder_error(e, plan.bin, "set UV_TOOL_BIN_DIR to a folder of yours")
+            if named is None:
+                raise
+            raise named from e
         if os.path.lexists(plan.snapshot):
             self.aside = parent / (OLD + self.fresh.name[len(NEW) :])
             _rename(plan.snapshot, self.aside)
@@ -751,10 +962,13 @@ class _Swap:
             with contextlib.suppress(OSError):
                 tmp.unlink()
         snapshot = self.plan.snapshot
-        # The new copy's own folder can only have gone by its rename to the snapshot (an
-        # interrupt right after that rename, before `swapped` was set)
+        # The new copy's own folder has gone by its rename to the snapshot (an interrupt right
+        # after that rename, before `swapped` was set) when the snapshot holds this run's record.
+        # Gone otherwise (deleted by another run, of a pyt older than the lock of _one_run), it was
+        # taken for swapped in all the same, and the undo deleted the installed template there.
         if self.fresh is not None and not os.path.lexists(self.fresh):
-            self.fresh, self.swapped = None, True
+            self.swapped = self.record is not None and _read(snapshot / RECORD) == self.record
+            self.fresh = None
         if self.swapped:
             gone = snapshot.parent / f"{NEW}undone-{os.getpid()}"
             try:
@@ -786,8 +1000,9 @@ def _terminations_interrupt() -> Iterator[None]:
     its undo runs, and cli.main ends the command as it ends every interrupted one (`error:
     terminated (SIGTERM)`, 128 + N). Their default action killed the runner at once and left a
     whole `.template-new-*` copy next to the installed template. The first one also ignores the
-    next ones, so the undo is never cut short. Only in the main thread, and only while the
-    signal has its default handler (under nohup it stays ignored), as proc.run does."""
+    next ones, so the undo is never cut short (and _undo_shield ignores them during any undo).
+    Only in the main thread, and only while the signal has its default handler (under nohup it
+    stays ignored), as proc.run does."""
     installed: list[int] = []
     if sys.platform != "win32" and threading.current_thread() is threading.main_thread():
         watched = (signal.SIGTERM, signal.SIGHUP)
@@ -808,26 +1023,54 @@ def _terminations_interrupt() -> Iterator[None]:
             signal.signal(signum, signal.SIG_DFL)
 
 
+@contextlib.contextmanager
+def _undo_shield() -> Iterator[None]:
+    """While an undo runs (the swap's, a rename's), a Ctrl+C, SIGTERM or SIGHUP waits for it: they
+    are ignored, then get their handlers back. A second Ctrl+C cut the undo short, and so did a
+    SIGTERM or SIGHUP (a closed terminal, timeout, docker stop) during the undo of a failed write,
+    a changed file or a Ctrl+C, where _terminations_interrupt had not ignored them yet (it ignores
+    those after a first one of them): the tree stayed half-done, and the line that says what was
+    put back never came. Only in the main thread; SIGINT only while it has Python's own handler."""
+    shielded: list[tuple[int, Any]] = []  # (signal, its handler before the undo)
+    if threading.current_thread() is threading.main_thread():
+        if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+            shielded.append((signal.SIGINT, signal.default_int_handler))
+        if sys.platform != "win32":
+            for termination in (signal.SIGTERM, signal.SIGHUP):
+                previous = signal.getsignal(termination)
+                if previous is not None:  # None: not set from Python, and it could not be given back
+                    shielded.append((termination, previous))
+        for signum, _ in shielded:
+            signal.signal(signum, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        for signum, handler in shielded:
+            signal.signal(signum, handler)
+
+
 def install(plan: Plan) -> None:
-    """Write the installed template and the launchers: all or nothing. Then the launchers of the
-    earlier install in another bin folder go (Plan.earlier)."""
-    remove_leftovers(plan.snapshot, [plan.bin])
-    swap = _Swap(plan)
-    with _terminations_interrupt():
-        try:
-            swap.run()
-        except BaseException as e:
-            failed = swap.undo()
-            note = "nothing was changed" if not failed else "could not put back: " + ", ".join(failed)
-            if isinstance(e, PytError):
-                raise PytError(f"{e}\n  {note}", e.code) from e
-            if isinstance(e, OSError):
-                where = f"{e.filename}: " if e.filename else ""
-                raise PytError(f"pyt install failed: {where}{e.strerror or e}\n  {note}", 1) from e
-            ui.error(note)  # Ctrl+C, SIGTERM, SIGHUP (or a bug: its traceback follows)
-            raise
-    swap.finish()
-    _remove_earlier(plan)
+    """Write the installed template and the launchers: all or nothing, one run at a time
+    (_one_run). Then the launchers of the earlier install in another bin folder go (Plan.earlier)."""
+    with _one_run(plan.snapshot, "install"):
+        remove_leftovers(plan.snapshot, [plan.bin])
+        swap = _Swap(plan)
+        with _terminations_interrupt():
+            try:
+                swap.run()
+            except BaseException as e:
+                with _undo_shield():
+                    failed = swap.undo()
+                note = "nothing was changed" if not failed else "could not put back: " + ", ".join(failed)
+                if isinstance(e, PytError):
+                    raise PytError(f"{e}\n  {note}", e.code) from e
+                if isinstance(e, OSError):
+                    where = f"{e.filename}: " if e.filename else ""
+                    raise PytError(f"pyt install failed: {where}{e.strerror or e}\n  {note}", 1) from e
+                ui.error(note)  # Ctrl+C, SIGTERM, SIGHUP (or a bug: its traceback follows)
+                raise
+        swap.finish()
+        _remove_earlier(plan)
 
 
 def _remove_earlier(plan: Plan) -> None:
@@ -886,6 +1129,8 @@ def cmd_install(cfg: Config, args: list[str]) -> int:
     plan = make_plan()
     _say_plan(plan)
     if proc.DRY_RUN:
+        for path in leftovers(plan.snapshot, [plan.bin]):  # what install() removes first
+            ui.report(f"(--dry-run) would remove {path} ({LEFTOVER})")
         targets = ", ".join(str(plan.bin / n) for n in plan.launchers)
         also = f", and remove {', '.join(str(p) for p in plan.earlier)}" if plan.earlier else ""
         ui.report(f"(--dry-run) would copy {len(plan.files)} files into {plan.snapshot} and write {targets}{also}")
@@ -916,13 +1161,16 @@ def _unlink(path: Path) -> bool:
     return True
 
 
-def _retire(path: Path, removed: list[str], left: list[str], failed: list[str]) -> None:
+def _retire(path: Path, removed: list[str], left: list[str], failed: list[str], retry: bool = False) -> bool:
     """The pyt.cmd cmd runs for this run, last: once everything else is gone, self_deleting() takes
     its place (cmd reads on from there, deletes it and keeps the exit code). After a failure it is
-    left whole: pyt uninstall can then run again from it."""
-    if failed:
-        left.append(f"left {path}: cmd runs it, and it goes only once the rest is removed")
-        return
+    left whole while `pyt uninstall` can run again from it (`retry`: the installed template's
+    runner is still there, _runs_pyt); without that it goes too: kept, it only said "install it"
+    (its installed template had no ENTRY any more) when uninstall was typed again. Returns
+    whether it was left whole."""
+    if failed and retry:
+        left.append(f"left {path}: cmd runs it, and it goes only once the rest is removed (pyt uninstall runs again from it)")
+        return True
     running = _read(path)
     stand_in = self_deleting(running) if running is not None else None
     if stand_in is None:  # no uv line to read on from (not our layout): cmd will not find it
@@ -930,13 +1178,36 @@ def _retire(path: Path, removed: list[str], left: list[str], failed: list[str]) 
             removed.append(f"removed {path} (cmd, which runs it, may say it cannot find the batch file)")
         else:
             failed.append(f"{path}: in use or not writable")
-        return
+        return False
+    # A NEW file takes the name, as install's own swap does: never written in place, through the
+    # file's other names (a hard link of a project's pyt.cmd got the stand-in, and cmd deleted it)
+    staged: Path | None = None
     try:
-        project.write_whole(path, stand_in)
+        staged = _stage(path.parent, path.name, stand_in)
+        os.replace(staged, path)
+        staged = None
     except OSError as e:
         failed.append(f"{path}: {e.strerror or e}")
-        return
+        return False
+    finally:
+        if staged is not None:
+            _unlink(staged)
     removed.append(f"removed {path} (cmd runs it: it deletes itself as this run ends)")
+    return False
+
+
+# The installed template's runner: the launchers look for ENTRY (without it they say "install
+# it"), and in its global mode the runner loads pytemplate.toml, whose app.preset must name a
+# preset of .pytemplate/presets. _remove_in_place deletes them last, ENTRY first of them
+ENTRY = ".pytemplate/pyt.py"
+
+
+def _runs_pyt(snapshot: Path | None) -> bool:
+    """Whether the launchers still run the installed template at `snapshot`, and so `pyt
+    uninstall` again: its ENTRY is there. _remove_in_place deletes the ENTRY only once
+    everything but the runner is gone, and the rest of the runner only after it: while the
+    ENTRY is there, the runner is whole."""
+    return snapshot is not None and (snapshot / ENTRY).is_file()
 
 
 def remove_installed(snapshot: Path) -> Path | None:
@@ -955,36 +1226,88 @@ def remove_installed(snapshot: Path) -> Path | None:
 
 
 def _remove_in_place(snapshot: Path) -> Path | None:
-    """The installed template deleted where it is, its record (RECORD) last."""
+    """The installed template deleted where it is, in rounds, each only once the one before has
+    deleted everything: what its runner does not need, then the runner's ENTRY, then the rest of
+    the runner and pytemplate.toml, then its record (RECORD) and the folder. A file that cannot
+    go keeps the record, so the next uninstall finds the folder by it (deleted in any order, the
+    record could go first: a file in use then left a folder that the next uninstall called the
+    user's own and install refused), and, in the first round (Windows: a terminal's folder in
+    it), the runner whole, so the launchers still run `pyt uninstall` (_runs_pyt): deleted in any
+    order, its ENTRY went too, and the pyt.cmd kept for a retry said "install it"."""
     record = snapshot / RECORD
-    done = True
+    inner = record.parent  # .pytemplate: the runner and the record
+    config = snapshot / project.CONFIG_FILE.name
     try:
         entries = list(snapshot.iterdir())
+        real = inner.is_dir() and not _is_link(inner)
+        runner = list(inner.iterdir()) if real else []
     except OSError:
         return snapshot
-    for entry in entries:
-        if entry == record.parent and entry.is_dir() and not _is_link(entry):
-            try:
-                inside = list(entry.iterdir())
-            except OSError:
-                done = False
-                continue
-            for sub in inside:
-                if sub.name != record.name:
-                    done = presets._remove(sub) and done
-        else:
-            done = presets._remove(entry) and done
-    if not done:
-        return snapshot  # the record stays: the next uninstall finds the folder by it
-    return None if presets._remove(snapshot) else snapshot
+    entry = snapshot / ENTRY
+    rounds = [
+        [e for e in entries if e != config and not (real and e == inner)],
+        [entry],
+        [*(e for e in runner if e not in (entry, record)), config],
+    ]
+    for paths in rounds:
+        done = True
+        for path in paths:
+            done = presets._remove(path) and done
+        if not done:
+            return snapshot  # the record stays: the next uninstall finds the folder by it
+    return None if _remove_last(snapshot, record) else snapshot
+
+
+def _remove_last(snapshot: Path, record: Path) -> bool:
+    """The record and the folder itself, once nothing else is left; whether they are gone. rmtree
+    deletes the record before it tries the folder: where only the folder cannot go (Windows: some
+    process's current folder, `pyt uninstall` typed in it, while every file in it can go) the
+    record is written back, so the next uninstall still finds the folder by it and install
+    replaces it. It left an empty folder, which the next uninstall called the user's own
+    ("nothing to remove") and install refused."""
+    data = _read(record)
+    if presets._remove(snapshot):
+        return True
+    if data is not None and not os.path.lexists(record):
+        with contextlib.suppress(OSError):
+            record.parent.mkdir(parents=True, exist_ok=True)
+            record.write_bytes(data)
+    return False
+
+
+def _cmd_runs_from(snapshot: Path) -> Path | None:
+    """The pyt.cmd cmd runs for this run when it is the installed template's own
+    (<snapshot>\\pyt.cmd run by its path, or `pyt` typed in that folder: cmd runs the current
+    folder's pyt.cmd before PATH's). Uninstall deletes that folder, and cmd reads the file again
+    once this run ends: "The batch file cannot be found.", exit 1, after a whole uninstall."""
+    running = os.environ.get(LAUNCHER_FILE, "")
+    if not running or not os.environ.get("PYTEMPLATE_LAUNCHER", "").startswith("cmd"):
+        return None
+    return Path(running) if _inside(Path(running), snapshot) else None
 
 
 def cmd_uninstall(cfg: Config, args: list[str]) -> int:
-    """uninstall: the launchers and the installed template that pyt install wrote, nothing else."""
+    """uninstall: the launchers and the installed template that pyt install wrote, nothing else,
+    one run at a time (_one_run: an uninstall deleted the copy an install was still writing)."""
     only_flags("uninstall", args, ())
     ui.step("pyt uninstall")
     snapshot = snapshot_dir()
+    if snapshot is None or proc.DRY_RUN:
+        return _uninstall(snapshot)
+    with _one_run(snapshot, "uninstall", empty_folder_goes=True):
+        return _uninstall(snapshot)
+
+
+def _uninstall(snapshot: Path | None) -> int:
+    """cmd_uninstall's removals and report (under its lock, but in a dry run)."""
     record = read_record(snapshot)
+    inner = _cmd_runs_from(snapshot) if snapshot is not None and os.path.lexists(snapshot) and not not_an_install(snapshot) else None
+    if inner is not None:  # before any removal, as install refuses to replace the pyt.cmd cmd runs
+        raise PytError(
+            f"cmd runs {inner}, the installed template's own pyt.cmd, which uninstall would delete while cmd "
+            "still reads it (\"The batch file cannot be found.\"): run pyt uninstall from another folder "
+            "(the pyt.cmd of uv's tool bin folder), or ./pyt uninstall in a project or in a clone of the template"
+        )
     folders: list[Path] = []
     try:
         folders.append(bin_dir())
@@ -998,6 +1321,7 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
     failed: list[str] = []
 
     running: Path | None = None  # the pyt.cmd cmd runs for this very run: it goes last
+    stays: list[Path] = []  # launchers of ours it could not remove: they still run the installed template
     for folder in _dedupe(folders):
         for name in NAMES:
             path = folder / name
@@ -1013,39 +1337,54 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
                     removed.append(f"removed {path}")
                 else:
                     failed.append(f"{path}: in use or not writable")
+                    stays.append(path)
     if snapshot is not None and os.path.lexists(snapshot):
         why = not_an_install(snapshot)
         if why:
             left.append(f"left {snapshot}: {why}")
         elif proc.DRY_RUN:
             removed.append(f"would remove {snapshot} (the installed template)")
+        elif stays and _runs_pyt(snapshot):
+            # Deleted, it left those launchers on PATH saying "install it", and `pyt uninstall`
+            # could not run again from them
+            left.append(f"left {snapshot} (the installed template): the launchers it could not remove run it, and it goes with them")
         else:
             stuck = remove_installed(snapshot)
             if stuck is None:
                 removed.append(f"removed {snapshot} (the installed template)")
             else:
                 failed.append(f"{stuck}: in use or not writable")
-    if snapshot is not None and not proc.DRY_RUN:
+    swept = 0  # leftovers of an unfinished install or uninstall among `removed`
+    if snapshot is not None and proc.DRY_RUN:
+        found = leftovers(snapshot, folders)  # named as the real run removes them
+        removed += [f"would remove {p} ({LEFTOVER})" for p in found]
+        swept = len(found)
+    elif snapshot is not None:
         stuck_leftovers: list[Path] = []
-        for gone in remove_leftovers(snapshot, folders, stuck_leftovers):
-            removed.append(f"removed {gone} (left by an unfinished install or uninstall)")
+        gone = remove_leftovers(snapshot, folders, stuck_leftovers)
+        removed += [f"removed {p} ({LEFTOVER})" for p in gone]
+        swept = len(gone)
         failed.extend(f"{p}: in use or not writable" for p in stuck_leftovers)
         with contextlib.suppress(OSError):
             snapshot.parent.rmdir()  # <data home>/pytemplate, when nothing else is in it
     failed = list(dict.fromkeys(failed))  # a folder left aside above is a leftover too
-    if running is not None:
-        _retire(running, removed, left, failed)
+    kept = running is not None and _retire(running, removed, left, failed, retry=_runs_pyt(snapshot))
     for line in [*removed, *left]:
         ui.report(f"  {line}")
     if failed:
-        raise PytError(
-            "could not remove:\n  " + "\n  ".join(failed) + "\n  Close what uses them, then run pyt uninstall again"
-            " (once the `pyt` command is gone: ./pyt uninstall in a project or in a clone of the template)",
-            1,
-        )
+        # `pyt uninstall` again only where a launcher of ours is left that still runs the
+        # installed template: it was promised after every failure, and a kept pyt.cmd, or a
+        # launcher it could not remove, then said "install it"
+        again = (kept or bool(stays)) and _runs_pyt(snapshot)
+        how = "run pyt uninstall again" if again else "run ./pyt uninstall in a project or in a clone of the template"
+        raise PytError("could not remove:\n  " + "\n  ".join(failed) + f"\n  Close what uses them (or make them writable), then {how}", 1)
     if not removed:
         ui.ok("pyt is not installed: nothing to remove")
-    elif not proc.DRY_RUN:
+    elif proc.DRY_RUN:
+        pass
+    elif len(removed) == swept:
+        ui.ok("pyt is not installed: removed what an unfinished install or uninstall left")
+    else:
         ui.ok(f"pyt is uninstalled; to install it again: {FROM_A_CLONE}")
     return 0
 

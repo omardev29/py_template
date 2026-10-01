@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import proc, ui
-from .config import Config
+from .config import TOML_ERRORS, Config
 from .project import ENV_SUFFIX, ROOT, venv_python
 from .ui import PytError
 
@@ -29,7 +29,8 @@ from .ui import PytError
 #   it (0.10.11 and older: "No download found for request: pypy-3.11.15-...");
 # - CPython 3.14 final for python.cpython = "3.14": uv 0.9.0 (0.8.x installs 3.14.0rc2 without
 #   a word, and 0.7.x an alpha);
-# - `uv export --format requirements.txt` of the pyz/portable/wheel builds: uv 0.6.15.
+# - `uv export --format requirements.txt` of the pyz/portable/wheel builds: uv 0.6.15; their
+#   `--format pylock.toml` export and its `uv pip install -r pylock.toml`: 0.10.12 does both.
 MIN_UV = "0.10.12"
 UV_UPDATE = (
     "uv self update   (installed with a package manager? brew upgrade uv | pipx upgrade uv | "
@@ -143,12 +144,31 @@ def ensure_supported(cfg: Config, backend: str) -> None:
         raise PytError(
             f"backend '{backend}' is not in backend.supported {cfg.backend.supported}.\n"
             f"  Enable it with: ./pyt mode --supports +{backend}"
-            + ("  (lowers the syntax to Python 3.11 and re-locks uv.lock)" if backend == "pypy" else "")
+            # the Python of python.pypy, as the precheck reads it (a pypy@3.12.x pin: 3.12)
+            + (f"  (lowers the syntax to Python {cfg.pypy_minor} and re-locks uv.lock)" if backend == "pypy" else "")
         )
 
 
-def env_vars(env: PyEnv, extra: Mapping[str, str] | None = None) -> dict[str, str]:
-    e = proc.base_env()
+# The user's UV_FROZEN and UV_LOCKED tell uv how to treat uv.lock. The runner's own uv calls say
+# it themselves (--locked, --frozen, --check), and every uv from MIN_UV (0.10.12) up to 0.12.8
+# lets the variables win or clash there (measured): under UV_FROZEN, `uv lock --check` passed a
+# stale lock (exit 0, "only checked for validity"), so the hook, doctor and ensure_lock took it
+# for up to date; `--locked` next to UV_FROZEN, and `--frozen` next to UV_LOCKED, were refused
+# (exit 2: every `uv run --locked`, `uv sync --locked` and the hook's `uv run --frozen`). Those
+# calls run without them (uv 0.12.9 and later ignore them there too). The refusals read them
+# from os.environ (cmd_env._lock_read_only), and the uv commands the user drives with their own
+# arguments keep them (keep_lock_mode: `./pyt lock ARGS`, the `uv add|remove` of add/remove).
+LOCK_MODE = ("UV_FROZEN", "UV_LOCKED")
+
+
+def without_lock_mode(env: Mapping[str, str]) -> dict[str, str]:
+    """`env` without the user's LOCK_MODE variables: the environment of a uv call of the runner's
+    own that passes --locked, --frozen or --check itself."""
+    return {k: v for k, v in env.items() if k not in LOCK_MODE}
+
+
+def env_vars(env: PyEnv, extra: Mapping[str, str] | None = None, *, keep_lock_mode: bool = False) -> dict[str, str]:
+    e = proc.base_env() if keep_lock_mode else without_lock_mode(proc.base_env())
     e["UV_PROJECT_ENVIRONMENT"] = str(env.dir)
     e["UV_PYTHON"] = env.request
     e["UV_PYTHON_PREFERENCE"] = env.preference
@@ -167,9 +187,12 @@ def uv(
     capture: bool = False,
     echo: bool = True,
     quiet: bool = True,
+    keep_lock_mode: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """`quiet=False`: a uv command the user drives with their own arguments (`./pyt lock
-    ARGS`, the `uv add|remove` of add/remove) keeps its output under -q."""
+    ARGS`, the `uv add|remove` of add/remove) keeps its output under -q; `keep_lock_mode=True`:
+    it gets the user's UV_FROZEN and UV_LOCKED too (LOCK_MODE), which the runner's own calls never
+    get."""
     uv_path = proc.find_uv()
     if not env.dir.exists():  # uv is about to create it (and maybe download its interpreter)
         require_min_uv(uv_path)
@@ -184,7 +207,7 @@ def uv(
     return proc.run(
         [uv_path, *quiet_flag, *args],
         cwd=cwd,
-        env=env_vars(env, extra_env),
+        env=env_vars(env, extra_env, keep_lock_mode=keep_lock_mode),
         check=check,
         capture=capture,
         echo=echo,
@@ -238,7 +261,7 @@ def left_out(env: PyEnv) -> list[tuple[str, str]]:
     leaves nothing out (uv then says what is wrong with it)."""
     try:
         data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+    except (OSError, *TOML_ERRORS):
         return []
     groups = data.get("dependency-groups")
     tool = data.get("tool")

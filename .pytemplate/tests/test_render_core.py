@@ -11,6 +11,7 @@ import configparser
 import copy
 import datetime
 import hashlib
+import importlib.util
 import itertools
 import json
 import os
@@ -31,11 +32,12 @@ from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import BACKENDS, Config  # noqa: E402
 from runner.editors import nvim  # noqa: E402
 from runner.methods import pyz  # noqa: E402
-from runner.project import PRESETS, ROOT, TEMPLATES  # noqa: E402
+from runner.project import PRESETS, ROOT, TEMPLATE, TEMPLATES  # noqa: E402
 from runner.ui import PytError  # noqa: E402
 
 COMMANDS = set(cli.COMMANDS)
 PRESET_NAMES = ("script", "raylib", "flet")
+TEMPLATE_REPO = (TEMPLATE / "template-repo").is_file()  # the templates hold the shipped content
 
 
 # --- configs -----------------------------------------------------------------------------------
@@ -246,32 +248,84 @@ def test_diff_shows_the_generated_against_the_current_content(box: Sandbox, caps
     assert "---" not in capsys.readouterr().err  # only with show_diff
 
 
-def test_python_version_is_rewritten_only_for_a_python_uv_can_provide(box: Sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The launchers start the runner with `uv run --script`, which follows .python-version: a
-    python.cpython typo ("3.41") written there stopped every command, `help` included, and after
-    the fix in pytemplate.toml nothing could write the file again. It is rewritten only once uv
-    has that CPython (envs.ensure_python); a new file (a fresh tree) needs no question."""
+def test_diff_with_force_shows_the_hand_edit_before_overwriting_it(box: Sandbox, capsys: pytest.CaptureFixture[str]) -> None:
+    """`render --diff --force` took a hand-edited file for an outdated one: the diff asked for was
+    skipped, and the edit was overwritten without ever being shown."""
+    render.apply(CFG)
+    box.write("b.ini", "[b]\nx = 2\n")
+    capsys.readouterr()
+    code, err = _render(["--diff", "--force"], capsys)
+    assert code == 0 and box.read("b.ini") == GENERATED["b.ini"].encode()
+    assert "--- b.ini (generated)" in err and "+x = 2" in err
+    assert err.index("+x = 2") < err.index("updated: b.ini")  # shown first, then overwritten
+
+
+def _unavailable(version: str) -> None:
+    raise PytError(f'python.cpython = "{version}": uv can neither find nor install this CPython (...)', 3)
+
+
+def test_python_version_is_written_only_for_a_python_uv_can_provide(box: Sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The launchers start the runner with `uv run --script`, which follows .python-version once
+    the project has .venv: a python.cpython typo ("3.41") written there stopped every command,
+    `help` and `render` included, and after the fix in pytemplate.toml nothing could write the
+    file again. It is written only once uv has that CPython (envs.ensure_python), a missing file
+    too (deleted by hand: `./pyt doctor` then wrote the typo into it), and before any other file."""
     asked: list[str] = []
     monkeypatch.setattr(envs, "ensure_python", asked.append)
     box.files[".python-version"] = "3.13\n"
     render.apply(CFG)
-    assert asked == [] and box.read(".python-version") == b"3.13\n"  # written fresh
+    assert asked == ["3.13"] and box.read(".python-version") == b"3.13\n"  # a missing file is asked too
     box.files[".python-version"] = "3.14\n"
     render.apply(CFG)
-    assert asked == ["3.14"] and box.read(".python-version") == b"3.14\n"
+    assert asked == ["3.13", "3.14"] and box.read(".python-version") == b"3.14\n"
     render.apply(CFG)
-    assert asked == ["3.14"]  # unchanged: nothing to ask
+    assert asked == ["3.13", "3.14"]  # unchanged: nothing to ask
 
-    def unavailable(version: str) -> None:
-        raise PytError(f'python.cpython = "{version}": uv can neither find nor install this CPython (...)', 3)
-
-    monkeypatch.setattr(envs, "ensure_python", unavailable)
+    monkeypatch.setattr(envs, "ensure_python", _unavailable)
     box.files[".python-version"] = "3.41\n"
-    with pytest.raises(PytError, match=r'python\.cpython = "3\.41"'):
+    box.files["gen/a.json"] = "changed\n"  # before .python-version in the outputs: still not written
+    with pytest.raises(render.NoPython, match=r'python\.cpython = "3\.41"') as e:
         render.apply(CFG)
+    assert e.value.code == 3
     assert box.read(".python-version") == b"3.14\n"  # the launchers still start the runner
+    assert box.read("gen/a.json") == GENERATED["gen/a.json"].encode()  # nothing is rendered
+    (box.root / ".python-version").unlink()
+    with pytest.raises(render.NoPython):
+        render.apply(CFG)
+    assert not (box.root / ".python-version").exists()  # never the typo, a missing file included
     monkeypatch.setattr(proc, "DRY_RUN", True)
-    assert render.apply(CFG)[0] == [".python-version"]  # --dry-run and --check only report it
+    assert render.apply(CFG)[0] == [".python-version", "gen/a.json"]  # --dry-run and --check only report it
+
+
+def test_doctor_runs_when_python_cpython_cannot_be_provided(box: Sandbox, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """README: with a python.cpython uv cannot provide (a typo; Termux or a BSD after an edit),
+    doctor still runs and reports it with its other checks. doctor runs on any Python, but
+    dispatch renders first, and render's question about .python-version ended it with exit 3
+    before any check. render.auto now renders nothing, says why, and the command runs; an
+    explicit `render` still stops (exit 3)."""
+    from runner import cmd_env
+
+    monkeypatch.setattr(envs, "ensure_python", lambda _version: None)
+    box.files[".python-version"] = "3.14\n"
+    render.apply(CFG)  # a project rendered on 3.14
+    monkeypatch.setattr(envs, "ensure_python", _unavailable)
+    box.files[".python-version"] = "3.41\n"  # then python.cpython = "3.41" (a typo)
+    box.files["gen/a.json"] = "changed\n"
+    monkeypatch.setattr(config, "load", lambda *_a, **_kw: CFG)
+    ran: list[list[str]] = []
+    monkeypatch.setattr(cmd_env, "cmd_doctor", lambda _cfg, args: ran.append(args) or 1)
+    before = box.age()
+    capsys.readouterr()
+    assert cli.dispatch(["doctor"]) == 1 and ran == [[]]  # doctor ran: its checks report the typo
+    assert 'warning: generated files not rendered: python.cpython = "3.41"' in capsys.readouterr().err
+    assert box.untouched(before)  # nothing rendered: the launchers still start the runner
+    (box.root / ".python-version").unlink()  # a generated file deleted by hand
+    before = box.age()
+    assert cli.dispatch(["doctor"]) == 1 and ran == [[], []]
+    assert box.untouched(before)  # the typo is never written into a missing .python-version either
+    with pytest.raises(PytError, match=r'python\.cpython = "3\.41"') as e:
+        cli.dispatch(["render"])
+    assert e.value.code == 3
 
 
 def test_diff_shows_a_missing_last_line_break(box: Sandbox, capsys: pytest.CaptureFixture[str]) -> None:
@@ -289,6 +343,28 @@ def test_a_folder_in_the_way_is_a_clear_error(box: Sandbox) -> None:
     (box.root / "b.ini").mkdir()
     with pytest.raises(PytError, match=r"b\.ini is generated, but a folder"):
         render.apply(CFG)
+
+
+@pytest.mark.parametrize("check", [False, True])
+@pytest.mark.parametrize("blocker", ["file", "dangling link"])
+def test_a_file_where_a_generated_files_folder_must_be_is_a_clear_error(box: Sandbox, check: bool, blocker: str) -> None:
+    """`.vscode` (or `.github`) left as a file: every command that renders first stopped with
+    "cannot write the generated file .vscode/settings.json: File exists", which named the file
+    to be written, not the one in the way, after writing the files before it; --check called the
+    file outdated."""
+    box.files["late/sub/x.txt"] = "x\n"  # after every other generated file
+    (box.root / "late").mkdir()
+    if blocker == "file":
+        box.write("late/sub", "x\n")
+    else:
+        try:
+            (box.root / "late" / "sub").symlink_to(box.root / "nothing")
+        except OSError as e:  # Windows without Developer Mode
+            pytest.skip(f"cannot make a symbolic link here: {e}")
+    kind = "a file" if blocker == "file" else "a link to nothing"
+    with pytest.raises(PytError, match=rf"^late/sub/x\.txt is generated, but late/sub is {kind}, where its folder must be: remove or rename it$"):
+        render.apply(CFG, check=check)
+    assert not any((box.root / path).exists() for path in GENERATED) and not box.state.exists()  # refused before any write
 
 
 def test_write_failures_are_clear_errors(box: Sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -445,6 +521,15 @@ def test_render_command_exit_codes(box: Sandbox, capsys: pytest.CaptureFixture[s
     assert code == 0 and "updated: b.ini" in err and box.read("b.ini") == GENERATED["b.ini"].encode()
     code, err = _render(["--check"], capsys)
     assert code == 0
+
+
+def test_the_render_summary_names_every_file_render_writes() -> None:
+    """`./pyt help render` (and editor.json, the editors' task lists) left out .python-version,
+    the file render writes first and the launchers follow."""
+    summary = cli.COMMANDS["render"].summary
+    for path in render.outputs(config.load(set())):
+        name = ".vscode/" if path.startswith(".vscode/") else path.rsplit("/", 1)[-1]
+        assert name in summary, (name, summary)
 
 
 def test_render_check_fails_on_an_outdated_pyproject(box: Sandbox, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1086,6 +1171,110 @@ def test_profile_rule_names_are_known_to_the_pinned_basedpyright(tmp_path: Path)
     assert "unrecognized setting" not in out, out
 
 
+# --- what the generated tool configs leave out -----------------------------------------------------
+
+# Names a subpackage or a test folder can have that a tool once skipped at any depth: ruff's own
+# default exclude (venv, dist, _build, node_modules, __pypackages__) and the project's extend-exclude
+# (typings, dist), plus the output folders of the root (build, .build is a dot folder)
+TOOL_FOLDERS = ("venv", "typings", "dist", "build", "_build", "node_modules", "__pypackages__")
+
+
+def _ruff() -> list[str]:
+    if importlib.util.find_spec("ruff") is None:
+        pytest.skip("ruff is not installed here (./pyt setup)")
+    return [sys.executable, "-m", "ruff"]
+
+
+def test_ruff_skips_only_the_roots_own_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ruff reads an exclude pattern without a slash as a folder name at ANY depth: the project's
+    extend-exclude (typings, dist) and ruff's own default exclude (venv, _build, node_modules...)
+    made `check`, `lint`, `fmt`, the hook and the editors' ruff skip every subpackage or test
+    folder of those names, and a syntax error there passed them all. The editors' .ruff.toml and
+    the runner's .build/cfg copy (its --config, read from the project folder) must skip the root's
+    own folders only; the real ruff lists what it would check."""
+    ruff = _ruff()
+    root = tmp_path / "p"
+    wanted = ["src/pkg/__init__.py", *(f"src/pkg/{d}/__init__.py" for d in TOOL_FOLDERS), *(f"tests/{d}/test_x.py" for d in TOOL_FOLDERS)]
+    skipped = ["dist/x.py", "typings/x.pyi", "venv/x.py", "_build/x.py", "node_modules/x.py", ".build/x.py", ".pytemplate/x.py", ".venv/x.py"]
+    for rel in (*wanted, *skipped):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(render, "ROOT", root)
+    cfg = preset_cfg()
+    (root / ".ruff.toml").write_text(render.to_toml(render.ruff_config(cfg, "off")) + "\n", encoding="utf-8")
+    copied = root / ".build" / "cfg" / "ruff-off.toml"
+    copied.parent.mkdir(parents=True, exist_ok=True)
+    copied.write_text(render.to_toml(render.ruff_config(cfg, "off", relative_to=root)) + "\n", encoding="utf-8")
+    for args in ([], ["--config", ".build/cfg/ruff-off.toml", "."], ["--config", ".build/cfg/ruff-off.toml", "src", "tests"]):
+        r = subprocess.run([*ruff, "check", "--no-cache", "--show-files", *args], cwd=root, capture_output=True, text=True, timeout=120, check=False)
+        assert r.returncode == 0, r.stdout + r.stderr
+        listed = {Path(line.strip()).resolve().relative_to(root.resolve()).as_posix() for line in r.stdout.splitlines() if line.strip().endswith((".py", ".pyi"))}
+        assert set(wanted) <= listed, (args, sorted(set(wanted) - listed))
+        assert not listed & set(skipped), (args, sorted(listed & set(skipped)))
+
+
+def test_the_ruff_exclude_holds_ruffs_own_defaults_at_the_root() -> None:
+    """ruff_config replaces ruff's default `exclude` (each name at any depth) with the same names,
+    those a package can have anchored at the root (RUFF_DEFAULT_EXCLUDE)."""
+    exclude = render.ruff_config(preset_cfg(), "off")["exclude"]
+    assert sorted(exclude) == sorted(p if p.startswith(".") else f"./{p}" for p in render.RUFF_DEFAULT_EXCLUDE)
+
+
+@pytest.mark.skipif(not TEMPLATE_REPO, reason="the template repository pins ruff; a project's ./pyt lock --upgrade may move it on")
+def test_ruff_exclude_defaults_are_the_pinned_ruffs(tmp_path: Path) -> None:
+    """RUFF_DEFAULT_EXCLUDE is the locked ruff's own default list: a ruff that changes it must be
+    looked at when the template moves its pin. Only there: in a project, a newer ruff (./pyt lock
+    --upgrade) with another list, or another --show-settings layout, failed ./pyt selftest."""
+    ruff = _ruff()
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    r = subprocess.run([*ruff, "check", "--isolated", "--show-settings", "a.py"], cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False)
+    block = re.search(r"^file_resolver\.exclude = \[\n(.*?)^\]", r.stdout, re.M | re.S)
+    assert block, r.stdout[-2000:] + r.stderr
+    defaults = re.findall(r'^\t"(.*)",$', block.group(1), re.M)
+    assert defaults and sorted(defaults) == sorted(render.RUFF_DEFAULT_EXCLUDE), defaults
+
+
+@pytest.mark.parametrize("absolute", [False, True], ids=["editor", "check"])
+def test_pyright_excludes_only_the_roots_own_folders(absolute: bool) -> None:
+    """pyright reads `**/name` at any depth: a subpackage named node_modules (its own default
+    exclude, which a config's `exclude` replaces) was never checked. Dot folders and caches hold
+    no module anywhere."""
+    exclude = render.pyright_config(preset_cfg(), "strict", absolute=absolute)["exclude"]
+    # check's copy (in .build/cfg) anchors every one at the root, `**/.*` included: pyright reads
+    # them against the file's folder, and a relative `**/.*` there matched below .build/cfg only
+    base = f"{ROOT.as_posix()}/" if absolute else ""
+    assert exclude == [base + p for p in ("node_modules", "**/__pycache__", "**/.*", "dist", "build")], exclude
+
+
+def test_check_copy_of_the_pyright_config_is_the_editors_anchored_at_the_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every path of the copy ./pyt check hands basedpyright is the editor's, anchored at ROOT, a
+    profile's own [pyright] paths included (pyright reads them against .build/cfg otherwise): an
+    `ignore` the editor honoured pointed into .build/cfg, and check reported the file."""
+    real_profile = render.load_profile
+    typeshed = (tmp_path / "ts").as_posix()  # absolute already: kept
+
+    def load_profile(name: str) -> dict[str, Any]:
+        data = real_profile(name)
+        extra = {"ignore": ["src/legacy.py"], "extraPaths": ["libs"], "baselineFile": "base.json", "typeshedPath": typeshed}
+        return {**data, "pyright": {**data.get("pyright", {}), **extra}}
+
+    monkeypatch.setattr(render, "load_profile", load_profile)
+    cfg = preset_cfg()
+    editor, anchored = render.pyright_config(cfg, "strict"), render.pyright_config(cfg, "strict", absolute=True)
+    root = ROOT.as_posix()
+    assert anchored == {
+        **editor,
+        "include": [f"{root}/{p}" for p in editor["include"]],
+        "exclude": [f"{root}/{p}" for p in ("node_modules", "**/__pycache__", "**/.*", "dist", "build")],
+        "ignore": [f"{root}/src/legacy.py"],
+        "extraPaths": [f"{root}/libs"],
+        "baselineFile": f"{root}/base.json",
+        "typeshedPath": typeshed,
+        "venvPath": root,
+        **({"stubPath": f"{root}/typings"} if "stubPath" in editor else {}),
+    }
+
+
 # --- the generated CI workflow ---------------------------------------------------------------------
 
 
@@ -1217,6 +1406,24 @@ def test_the_yaml_reader_is_strict() -> None:
             parse_yaml(bad)
 
 
+# README/CLAUDE.md 13.2: deleting templates/ci.yml stops CI generation; render.ci_workflow then
+# raises, so the CI-template tests skip in a project that made that documented change (13.1).
+needs_ci_template = pytest.mark.skipif(
+    not (TEMPLATES / "ci.yml").is_file(),
+    reason="CI generation stopped (templates/ci.yml deleted): render.ci_workflow raises",
+)
+# README: a project customizes its CI by editing .pytemplate/templates/ci.yml (a schedule, a step of
+# its own), and its selftest must pass (13.1). The shape of the SHIPPED template (its triggers,
+# steps, actions, YAML subset, the pyz path coupled to BuildRequest.out_name) is pinned in the
+# template repository; what the runner writes into any template is tested everywhere, on the
+# tests' own template (conftest.MINIMAL_CI_TEMPLATE: the minimal_ci_template fixture).
+shipped_ci_template = pytest.mark.skipif(
+    not (TEMPLATE_REPO and (TEMPLATES / "ci.yml").is_file()),
+    reason="the shipped templates/ci.yml: a project may edit its own (README)",
+)
+
+
+@shipped_ci_template
 @pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
 def test_ci_workflow_for_every_preset_and_backend_set(preset: str, supported: list[str], active: str) -> None:
     cfg = combo_cfg(preset, supported, active)
@@ -1258,6 +1465,57 @@ def test_ci_workflow_for_every_preset_and_backend_set(preset: str, supported: li
     assert all(re.fullmatch(r"astral-sh/setup-uv@v\d+\.\d+\.\d+", u) for u in uses if "setup-uv" in u)  # no floating tags
 
 
+def _matrix(cfg: Config) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = parse_yaml(render.ci_workflow(cfg))["jobs"]["test"]["strategy"]["matrix"]["include"]
+    return rows
+
+
+@pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
+def test_ci_matrix_build_and_libraries_follow_the_preset_and_backends(minimal_ci_template: Path, preset: str, supported: list[str], active: str) -> None:
+    """What render.ci_workflow writes into any CI template, the project's own included: one row
+    per OS with the backends it syncs (raylib: no PyPy on macOS arm64; an OS with none is left
+    out), the backend the pyz is built with, raylib's Linux libraries, the app's name."""
+    cfg = combo_cfg(preset, supported, active)
+    text = render.ci_workflow(cfg)
+    assert not any(p in text for p in render.CI_PLACEHOLDERS) and text.endswith("\n")
+    rows = _matrix(cfg)
+    macos_pypy = not (preset == "raylib" and "pypy" in supported)
+    expected_os = ["ubuntu-latest", "windows-latest"] + (["macos-latest"] if supported != ["pypy"] or macos_pypy else [])
+    assert [r["os"] for r in rows] == expected_os
+    for row in rows:
+        drop = "pypy" if row["os"] == "macos-latest" and not macos_pypy else ""
+        assert row["backends"].split() == [b for b in supported if b != drop], row
+    backend = next((b for b in ("mypyc", "cpython") if b in supported), active)
+    steps = parse_yaml(text)["jobs"]["test"]["steps"]
+    runs = [s["run"] for s in steps if "run" in s]
+    assert f"./pyt build {backend} --method pyz" in runs and f"ls dist/{cfg.app.name}-{backend}-pyz" in runs
+    apt = [s for s in steps if "apt-get" in s.get("run", "")]
+    assert len(apt) == (preset == "raylib") and all(s["if"] == "runner.os == 'Linux'" for s in apt)
+
+
+@needs_ci_template
+@pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
+def test_the_projects_own_ci_template_renders_for_every_preset_and_backend_set(preset: str, supported: list[str], active: str) -> None:
+    """Whatever a project made of its CI template, every placeholder is filled for every config
+    (render.ci_workflow raises for one left, and then every command's render failed)."""
+    text = render.ci_workflow(combo_cfg(preset, supported, active))
+    assert not any(p in text for p in render.CI_PLACEHOLDERS)
+
+
+@pytest.mark.parametrize(("supported", "active"), backend_sets())
+def test_ci_workflow_leaves_out_an_os_the_preset_package_has_no_wheel_for(minimal_ci_template: Path, supported: list[str], active: str) -> None:
+    """[preset.raylib] package = "raylib_software", which the preset offers, publishes wheels for
+    Linux and Windows only, and no sdist (15.1): the macOS row of the generated CI could sync
+    nothing and failed on every push, and the file cannot be edited (render --check). The macOS
+    row goes; raylib and raylib_sdl, which publish macOS wheels, keep theirs."""
+    for package, macos in (("raylib_software", False), ("raylib-software", False), ("raylib_sdl", True), ("raylib", True)):
+        cfg = combo_cfg("raylib", supported, active, {"preset": {"raylib": {"package": package}}})
+        oses = [r["os"] for r in _matrix(cfg)]
+        assert oses[:2] == ["ubuntu-latest", "windows-latest"], (package, oses)
+        assert ("macos-latest" in oses) == (macos and supported != ["pypy"]), (package, oses)
+
+
+@shipped_ci_template
 @pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
 def test_ci_workflow_keeps_its_moving_parts_on_purpose(preset: str, supported: list[str], active: str) -> None:
     """-latest runner labels (GitHub retires pinned ones) and no uv version (setup-uv takes the
@@ -1272,6 +1530,7 @@ def test_ci_workflow_keeps_its_moving_parts_on_purpose(preset: str, supported: l
     assert "on purpose" in header and "required-version" in header and "-latest" in header
 
 
+@shipped_ci_template
 def test_ci_workflows_pass_actionlint(tmp_path: Path) -> None:
     actionlint = shutil.which("actionlint")
     if actionlint is None:
@@ -1287,10 +1546,9 @@ def test_ci_workflows_pass_actionlint(tmp_path: Path) -> None:
 
 
 @pytest.fixture
-def ci_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    shutil.copy(TEMPLATES / "ci.yml", tmp_path / "ci.yml")
-    monkeypatch.setattr(render, "TEMPLATES", tmp_path)
-    return tmp_path / "ci.yml"
+def ci_template(minimal_ci_template: Path) -> Path:
+    """A CI template the test may change: the tests' own (conftest), never the project's."""
+    return minimal_ci_template
 
 
 def test_ci_template_bom_and_crlf_do_not_reach_the_workflow(ci_template: Path) -> None:

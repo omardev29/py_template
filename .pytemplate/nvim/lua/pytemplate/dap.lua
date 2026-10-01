@@ -41,6 +41,75 @@ function M.adapter()
   return nil, "none"
 end
 
+---The debug adapter's environment as uv.spawn takes it. nvim-dap hands the adapter's
+---options.env to uv.spawn unchanged, and luv reads it as a LIST of "K=V" strings that REPLACES
+---the process environment: a map is an empty list there, so the adapter, and every program it
+---launched in its own console (debugpy's internalConsole, neotest's debug runs), ran with no
+---variable at all (no PATH, HOME, LANG or DISPLAY). So: Neovim's whole environment plus `extra`
+---(a map, or a list of "K=V"), without PYTHONHOME and PYTHONPATH: a caller's PYTHONHOME kills the
+---adapter's Python before it answers, a PYTHONPATH can shadow a stdlib module, as for every tool
+---the runner starts (proc.base_env). Names compare case-insensitively on Windows.
+function M.adapter_env(extra)
+  local function key(name)
+    return pt.is_win and name:upper() or name
+  end
+  local env = vim.fn.environ()
+  local function put(name, value)
+    for have in pairs(env) do
+      if have ~= name and key(have) == key(name) then
+        env[have] = nil -- the same variable in another case (Windows)
+      end
+    end
+    env[name] = value
+  end
+  for name, value in pairs(type(extra) == "table" and extra or {}) do
+    if type(name) == "number" then -- already "K=V" (a name may start with "=" on Windows)
+      local k, v = tostring(value):match("^(=?[^=]+)=(.*)$")
+      if k then
+        put(k, v)
+      end
+    elseif value ~= nil then
+      put(name, tostring(value))
+    end
+  end
+  local out = {}
+  for name, value in pairs(env) do
+    if key(name) ~= "PYTHONHOME" and key(name) ~= "PYTHONPATH" then
+      out[#out + 1] = name .. "=" .. value
+    end
+  end
+  table.sort(out)
+  return out
+end
+
+---True when the file holds PEP 723 inline script metadata, found the way venv-selector's uv flow
+---finds it in a buffer (its uv2.lua: a `# /// script` line, then a `# ///` line, within the first
+---200 lines). That flow runs such a script on its own uv environment.
+function M.inline_script(path)
+  if type(path) ~= "string" or path == "" then
+    return false
+  end
+  local f = io.open(path, "r")
+  if not f then
+    return false
+  end
+  local started, found, n = false, false, 0
+  for line in f:lines() do
+    n = n + 1
+    if n > 200 then
+      break
+    end
+    if not started then
+      started = line:match("^%s*#%s*///%s*script%s*$") ~= nil
+    elseif line:match("^%s*#%s*///%s*$") then
+      found = true
+      break
+    end
+  end
+  f:close()
+  return found
+end
+
 ---The argv an adapter would run (used by :checkhealth and the smoke test).
 function M.adapter_cmd()
   local py, source = M.adapter()
@@ -58,8 +127,9 @@ function M.setup()
   local py, source = M.adapter()
   dp.setup(py or "python")
   dp.test_runner = "pytest"
-  -- The program runs on the CPython runtime env (.venv) unless the
-  -- configuration names its own python (launch.json's PyPy one). $VIRTUAL_ENV still wins.
+  -- The program runs on the CPython runtime env (.venv) unless the configuration names its own
+  -- python (launch.json's PyPy and mypyc ones). $VIRTUAL_ENV and $CONDA_PREFIX still win, as in
+  -- dap-python. venv-selector's uv flow replaces this function (see enrich_config below).
   dp.resolve_python = function()
     return pt.python("cpython")
   end
@@ -75,7 +145,34 @@ function M.setup()
         end
         -- a cold `python -m debugpy.adapter` (or uv resolving debugpy) can take more than
         -- nvim-dap's default 4 s to answer `initialize`, mostly on Windows
-        adapter.options = vim.tbl_extend("keep", adapter.options or {}, { initialize_timeout_sec = 30 })
+        local options = adapter.options or {}
+        if options.initialize_timeout_sec == nil then
+          options.initialize_timeout_sec = 30
+        end
+        -- the adapter runs a Python (`-m debugpy.adapter`) without PYTHONHOME and PYTHONPATH, in
+        -- a list that uv.spawn takes as the whole environment (M.adapter_env)
+        options.env = M.adapter_env(options.env)
+        adapter.options = options
+        -- venv-selector's uv flow (LazyVim's lang.python) points dap-python's resolve_python at
+        -- the environment of the last PEP 723 script it saw, .pytemplate/pyt.py included, for the
+        -- rest of the session: a configuration without an interpreter then debugged the app on
+        -- that script's environment (ModuleNotFoundError). It gets .venv here, unless its program
+        -- is such a script itself or $VIRTUAL_ENV / $CONDA_PREFIX is set (dap-python's order)
+        local enrich = adapter.enrich_config
+        if type(enrich) == "function" then
+          adapter.enrich_config = function(cfg, on_config)
+            if
+              cfg.python == nil
+              and cfg.pythonPath == nil
+              and os.getenv("VIRTUAL_ENV") == nil
+              and os.getenv("CONDA_PREFIX") == nil
+              and not M.inline_script(cfg.program)
+            then
+              cfg.pythonPath = pt.python("cpython")
+            end
+            return enrich(cfg, on_config)
+          end
+        end
       end
       cb(adapter)
     end, config)
@@ -107,7 +204,26 @@ function M.launch_configs()
   if not root or pt.same_path(uv.cwd(), root) then
     return {}
   end
-  local ok, cfgs = pcall(require("dap.ext.vscode").getconfigs, root .. "/.vscode/launch.json")
+  local launch = root .. "/.vscode/launch.json"
+  -- getconfigs reads the file itself and chokes on a UTF-8 BOM (an editor, or PS 5.1, added to
+  -- the generated file, which render then leaves - it hashes without the BOM): give it a BOM-free
+  -- copy when there is one. (At the root, nvim-dap's own provider reads launch.json and still
+  -- chokes on a BOM; that path is out of the plugin's reach.)
+  local fd = io.open(launch, "rb")
+  if fd then
+    local raw = fd:read("*a") or ""
+    fd:close()
+    if raw:sub(1, 3) == "\239\187\191" then
+      local tmp = vim.fn.tempname()
+      local out = io.open(tmp, "wb")
+      if out then
+        out:write(raw:sub(4))
+        out:close()
+        launch = tmp
+      end
+    end
+  end
+  local ok, cfgs = pcall(require("dap.ext.vscode").getconfigs, launch)
   if not ok or type(cfgs) ~= "table" then
     return {}
   end

@@ -28,7 +28,7 @@ from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT, rel
 from ..ui import PytError
-from .common import remove_output
+from .common import copy_tree, refuse_a_globbed_folder, remove_output
 
 # Nuitka is not in uv.lock (`uv run --with`), so it is pinned here to keep builds reproducible:
 # the latest release on PyPI in September 2026. Bump it deliberately, together with NUITKA_PYTHON.
@@ -89,9 +89,37 @@ def optimization_args(cfg: Config) -> list[str]:
     return args
 
 
+# What SCons (Nuitka compiles through it) substitutes in a path Nuitka hands it: $NAME, ${...},
+# $$, $( and $) (SCons.Subst._dollar_exps_str, the same in the SCons 3 and 4 Nuitka 4.2.2 ships).
+# Nuitka passes the absolute paths of --output-dir unescaped: under app$v2 SCons made
+# app/<...>/.build/nuitka/<b>/main.build OUTSIDE the project (another project's folder, maybe),
+# and the build failed where that path could not be made.
+SCONS_EXPANDS = re.compile(r"\$(?:[$()]|[_A-Za-z][.\w]*|\{[^}]*\}?)")
+
+
 def check_options(cfg: Config, backend: str) -> None:
-    """The PGO rules that depend on the build (config.validate checks the config-only ones:
-    app.gui, app.assets, pgo_args without pgo). cmd_build calls this before any work."""
+    """What the build refuses before any work (cmd_build calls this before the checks, also in
+    --dry-run): a project folder SCons would expand, one glob reads as a pattern, and the PGO
+    rules that depend on the build (config.validate checks the config-only ones: app.gui,
+    app.assets, pgo_args without pgo).
+
+    The glob: Nuitka's package configuration names the data files of many packages as patterns
+    (data-files: patterns: certifi's cacert.pem and 110 more), which DataFilesPlugin joins to the
+    package's folder in .venv and resolves with an unescaped glob.glob; under `x [1]` it found
+    none, and the binary lacked them while Nuitka and the build said done."""
+    found = SCONS_EXPANDS.search(str(BUILD))
+    if found:
+        raise PytError(
+            f"nuitka: the project's folder holds {found[0]!r} ({ROOT}), which SCons (Nuitka compiles "
+            "through it) reads as a variable: the build would write outside the project, or fail.\n"
+            "  Move the project to a folder whose path has no '$', or build with --method exe, portable or pyz",
+            2,
+        )
+    refuse_a_globbed_folder(
+        "nuitka",
+        "Nuitka would find none of the package data its configuration names in .venv (certifi's CA "
+        "bundle...), and the binary would lack it while the build says done",
+    )
     if not cfg.deploy.nuitka.pgo:
         return
     if backend == "mypyc":
@@ -283,6 +311,22 @@ def _fingerprint(archive: Path) -> None:
 FLET_PACKAGE_DATA = ("flet.controls.material:icons.json", "flet.controls.cupertino:cupertino_icons.json")
 
 
+def _stage_icon(cfg: Config, stage: Path) -> str:
+    """deploy.exe.icon, copied into the stage (Nuitka's cwd) and named relative to it.
+
+    Nuitka reads what follows the last '#' of --windows-icon-from-ico as an icon index ("ICON#N")
+    on Windows, and stops when it is no number (with a TypeError: its message has two %s for one
+    value): the absolute path of a project under a folder such as C:\\dev\\C#\\game stopped every
+    build with an icon before it compiled anything. The copy's name holds no '#'.
+    """
+    icon = ROOT / cfg.deploy.exe.icon
+    if not icon.is_file():
+        raise PytError(f"nuitka: deploy.exe.icon = {cfg.deploy.exe.icon!r} does not exist (relative to the project root)")
+    name = "pyt-icon" + ("" if "#" in icon.suffix else icon.suffix)
+    mypyc.copy_writable(os.fspath(icon), os.fspath(stage / name))
+    return name
+
+
 def build(req: BuildRequest) -> Path:
     cfg = req.cfg
     check_python(cfg, [*cfg.deploy.nuitka.extra_args, *req.extra])
@@ -293,7 +337,7 @@ def build(req: BuildRequest) -> Path:
     else:
         if stage.exists():
             mypyc.remove_tree(stage)
-        shutil.copytree(req.app_dir, stage, ignore=shutil.ignore_patterns("__pycache__"), copy_function=mypyc.copy_writable)
+        copy_tree(req.app_dir, stage, ignore=shutil.ignore_patterns("__pycache__"), copy_function=mypyc.copy_writable)
     work = BUILD / "nuitka" / req.backend
     if work.exists():
         mypyc.remove_tree(work)
@@ -325,14 +369,18 @@ def build(req: BuildRequest) -> Path:
         argv.append("--python-flag=no_docstrings")
     # Data paths relative to the stage (Nuitka's cwd): Nuitka splits a data source at every ','
     # and '=' and reads it as a glob, so an absolute path under a folder like `game, v2` left
-    # the Flet client out with only a warning (and '=' or '[' stopped the build)
+    # the Flet client out with only a warning (and '=' or '[' stopped the build).
+    # --include-raw-dir, never --include-data-dir: that one copies only "non-code files" and
+    # left out, without a word, every asset named like code (level1.bin, model.bin, tool.exe,
+    # plugin.dll, libfmod.so, a level script .py: Nuitka 4.2.2's default_ignored_suffixes),
+    # py.typed and .DS_Store, while the other methods ship the whole folder
     assets = cfg.app.assets
     if assets and (stage / assets).is_dir():
-        argv.append(f"--include-data-dir={assets}={assets}")
+        argv.append(f"--include-raw-dir={assets}={assets}")
     if cfg.app.gui and IS_WINDOWS:
         argv.append("--windows-console-mode=disable")
     if cfg.deploy.exe.icon and IS_WINDOWS:
-        argv.append(f"--windows-icon-from-ico={ROOT / cfg.deploy.exe.icon}")
+        argv.append(f"--windows-icon-from-ico={_stage_icon(cfg, stage)}")
     argv += [f"--nofollow-import-to={m}" for m in cfg.deploy.exclude_modules]
     use_upx = upx.active(cfg)
     if use_upx and onefile:

@@ -6,6 +6,7 @@ import argparse
 import configparser
 import json
 import os
+import re
 import shlex
 import tomllib
 import webbrowser
@@ -13,8 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from . import envs, lintc, mypyc, proc, render, ui
-from .config import BACKENDS, Config
-from .project import BUILD, ROOT, SRC, code_dirs, rel
+from .config import BACKENDS, TOML_ERRORS, Config
+from .project import BUILD, IS_WINDOWS, ROOT, SRC, code_dirs, rel
 from .ui import PytError
 
 # basedpyright is not in uv.lock (`uv run --with`; the VS Code extension ships its own), so it
@@ -26,6 +27,33 @@ BASEDPYRIGHT = "basedpyright==1.40.1"
 # `check` (and its glibc/macOS floor) on an untouched project. What 1.40.1 resolved to in
 # September 2026; bump both together.
 BASEDPYRIGHT_NODE = "nodejs-wheel-binaries==24.19.0"
+
+# What pyright (basedpyright 1.40.1 is pyright 1.1.414) reads as a wildcard in the paths of its
+# configuration, with no way to escape it: '*' and '?' (getWildcardSegmentRegexFragment and
+# getWildcardRoot, section 15.1). Under a project folder named like `qq?` its file walk never
+# entered the project: basedpyright found no file, said "0 errors" and check passed. On POSIX also
+# a backslash, which pyright takes for a separator: it looked for the project in another folder and
+# stopped (exit 3). A Windows path holds no '*' or '?', and '\' is its separator.
+PYRIGHT_UNSAFE = re.compile(r"[*?]" if IS_WINDOWS else r"[*?\\]")
+
+
+def basedpyright_problem() -> tuple[str, str]:
+    """Why basedpyright cannot check this project, and the ways out; ("", "") when it can. Read
+    from ROOT, the physical path basedpyright is handed (its folder and every path of the config),
+    after the anchor (a Windows `\\\\?\\C:\\` prefix holds a '?')."""
+    found = PYRIGHT_UNSAFE.search(str(ROOT)[len(ROOT.anchor) :])
+    if found is None:
+        return "", ""
+    if found[0] == "\\":
+        reads = "a path separator: basedpyright would look for the project in another folder, and stop"
+    else:
+        reads = "a wildcard: basedpyright would find no file to check, and report no error"
+    chars = "'*' or '?'" if IS_WINDOWS else "'*', '?' or '\\'"
+    return (
+        f"basedpyright: the project's folder holds '{found[0]}' ({ROOT}), which pyright reads as {reads}",
+        f"Move the project to a folder whose path has no {chars}, or check without basedpyright: "
+        './pyt mode --editor pylance (typing.editor = "pylance")',
+    )
 
 
 def only_flags(command: str, args: list[str], allowed: tuple[str, ...]) -> set[str]:
@@ -45,15 +73,23 @@ def split_backend(cfg: Config, args: list[str], *, allow_all: bool = False) -> t
 
 
 def _profile_file(cfg: Config, profile: str, kind: str) -> Path:
-    """Write the config of a specific profile to .build/cfg/ (it may not be the editor's active one)."""
+    """Write the config of a specific profile to .build/cfg/ (it may not be the editor's active one).
+    The ruff one holds paths relative to ROOT, where every caller starts ruff (`config_arg`)."""
     out = BUILD / "cfg" / f"{kind}-{profile}.{'ini' if kind == 'mypy' else 'toml'}"
     out.parent.mkdir(parents=True, exist_ok=True)
     if kind == "mypy":
         text = render.mypy_ini(cfg, profile)
     else:
-        text = render.to_toml(render.ruff_config(cfg, profile, absolute=True)) + "\n"
+        text = render.to_toml(render.ruff_config(cfg, profile, relative_to=ROOT)) + "\n"
     out.write_text(text, encoding="utf-8", newline="\n")
     return out
+
+
+def config_arg(path: Path) -> str:
+    """The --config argument of a ruff started in ROOT (proc.run's default folder): relative to
+    it, because ruff expands $NAME and ${NAME} in that argument too (section 15.1): absolute, it
+    named no file in a project folder such as app$v2, and check, build and the hook failed."""
+    return render.relative_path(path, ROOT)
 
 
 # --- run -----------------------------------------------------------------------------------------
@@ -114,7 +150,7 @@ def run_checks(cfg: Config, backend: str, *, rules: bool = True) -> bool:
     ok = True
 
     ruff_cfg = _profile_file(cfg, profile, "ruff")
-    ruff_args: list[str | Path] = ["ruff", "check", "--config", ruff_cfg]
+    ruff_args: list[str | Path] = ["ruff", "check", "--config", config_arg(ruff_cfg)]
     if data.get("ruff", {}).get("exit_zero"):
         ruff_args.append("--exit-zero")
     if envs.uv_run(tool, [*ruff_args, *code_dirs()], check=False).returncode != 0:
@@ -135,6 +171,10 @@ def run_checks(cfg: Config, backend: str, *, rules: bool = True) -> bool:
             ui.ok(f"mypyc rules: no problems in {lintc.describe(files)}")
 
     if cfg.typing.editor == "basedpyright":
+        problem, way_out = basedpyright_problem()
+        if problem:  # never "no errors" from a basedpyright that checked nothing
+            ui.error(f"{problem}\n  {way_out}")
+            return False
         # Profile config of THIS backend (the editor's pyrightconfig.json is the active backend's).
         # --with: used without adding it to uv.lock (the VS Code extension ships its own)
         conf = BUILD / "cfg" / f"pyright-{profile}.json"
@@ -187,7 +227,17 @@ def cmd_check(cfg: Config, args: list[str]) -> int:
     for profile, b in chosen.items():
         ok = run_checks(cfg, b, rules=profile == rules_profile) and ok
     if ok and proc.DRY_RUN:
-        ui.info("(--dry-run) check: ruff, mypy and basedpyright were not run (the mypyc rules were)")
+        # What the dry run skipped (the tools it only echoed) and whether the in-process rules ran:
+        # run_checks runs mypy unless every profile skips it, basedpyright only as the editor, and
+        # the mypyc rules only where mypyc is supported (it said they ran in a project without it)
+        skipped = ["ruff"]
+        if any(not render.load_profile(p).get("skip_mypy") for p in chosen):
+            skipped.append("mypy")
+        if cfg.typing.editor == "basedpyright":
+            skipped.append("basedpyright")
+        tools = f"{', '.join(skipped[:-1])} and {skipped[-1]} were" if len(skipped) > 1 else f"{skipped[0]} was"
+        rules = " (the mypyc rules were)" if cfg.supports("mypyc") else ""
+        ui.info(f"(--dry-run) check: {tools} not run{rules}")
         return 0
     if ok:
         ui.ok("check: no errors")
@@ -261,7 +311,7 @@ def pytest_pythonpath(root: Path = ROOT) -> list[str]:
             continue
         try:
             table = _pytest_table(path, kind)
-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, configparser.Error):
+        except (OSError, *TOML_ERRORS, configparser.Error):
             return []  # pytest itself reports the broken file
         if table is None:
             continue

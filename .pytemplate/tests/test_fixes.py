@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -137,7 +138,8 @@ def test_pyz_main_puts_lib_before_site_packages(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "common" / "app").mkdir(parents=True)
     (root / "common" / "lib").mkdir()
-    shutil.copy2(TEMPLATES / "pyz" / "__main__.py", root / "__main__.py")
+    for name in ("__main__.py", "_pyz_bootstrap.py"):  # the two stages of the bootstrap
+        shutil.copy2(TEMPLATES / "pyz" / name, root / name)
     (root / "common" / "app" / "main.py").write_text(MAIN)
     (root / "common" / "lib" / "thirdparty.py").write_text("WHERE = 'lib'\n")
     info = {"name": "t", "build_id": "b1", "min_python": [3, 11], "targets": [], "pure": True, "backend": "cpython"}
@@ -174,6 +176,7 @@ def test_tasks_do_not_resolve_the_python_unless_needed(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(envs, "runtime_env", no_python)
     monkeypatch.setattr(tasks.proc, "run", fake_run)
+    monkeypatch.setattr(tasks, "IS_WINDOWS", False)  # `tool` exists nowhere: Windows would refuse it before proc.run
     assert tasks.run_task(cfg, "plain", ["x"], lambda _argv: 0) == 0
     assert calls[-1][0] == "tool" and calls[-1][2:] == ["cpython", "x"]
     with pytest.raises(PytError, match="no python"):
@@ -360,7 +363,7 @@ def test_system_launchers_probe_the_minimum_version(tmp_path: Path) -> None:
     assert 'py -3.14 -c "import sys; sys.exit(sys.version_info[:2] < (3, 14))" >nul 2>nul && goto run0' in cmd
     assert cmd.isascii() and "\n" not in cmd.replace("\r\n", "")
     sh = portable.sh_launcher(cfg, "pypy", tmp_path, None)
-    assert "for py in pypy3 pypy; do" in sh
+    assert 0 < sh.index("if pypy3 -c ") < sh.index("if pypy -c ")  # in this order
     assert "_pt_self=${BASH_SOURCE:-$0}" in sh  # niubash keeps the caller's $0
 
 
@@ -408,6 +411,34 @@ def test_portable_system_sh_launcher_runs(tmp_path: Path, cpython: str) -> None:
     else:
         assert r.returncode == 0, r.stdout + r.stderr
         assert json.loads(r.stdout.strip().splitlines()[-1]) == {"env": POSIX_TRICKY}
+
+
+@pytest.mark.skipif(_posix_sh() is None, reason="no POSIX sh")
+@pytest.mark.parametrize("runtime", ["bundled", "system"])
+def test_portable_sh_launcher_keeps_its_folder_whatever_the_env_names(tmp_path: Path, runtime: str) -> None:
+    # The launcher kept its folder in HERE (and the system one its interpreter in py), then
+    # exported [deploy.portable] env: a variable named HERE made it run <the value>/boot.py, so the
+    # app never started, and one named py reached the app holding the interpreter's name
+    if runtime == "bundled" and IS_WINDOWS:
+        pytest.skip("a bundled build writes no .sh launcher on Windows")
+    out = _portable_folder(tmp_path)
+    values = {"HERE": "elsewhere", "py": "mine", "_pt_dir": "kept"}  # no /path: MSYS would convert it for python.exe
+    cfg = make({"python": {"cpython": "3.11"}, "deploy": {"portable": {"runtime": runtime, "env": values}}})
+    python = None
+    if runtime == "bundled":
+        python = out / "runtime" / "bin" / "python3"
+        python.parent.mkdir(parents=True)
+        python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n', encoding="utf-8")
+        python.chmod(0o755)
+    path = out / "app.sh"
+    path.write_text(portable.sh_launcher(cfg, "cpython", out, python), encoding="utf-8", newline="\n")
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
+    sh = _posix_sh()
+    assert sh is not None
+    r = subprocess.run([sh, path.as_posix(), "+".join(values)], capture_output=True, text=True, env=env, timeout=120, check=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(r.stdout.strip().splitlines()[-1]) == {"env": values}
 
 
 # --- 8. commands reject unknown arguments ---------------------------------------------------------
@@ -499,10 +530,10 @@ def test_flet_build_pyproject_takes_only_tool_flet() -> None:
     out = tomllib.loads(flet.build_pyproject(make({}), data, ["rich==15.0.0", "cffi==2.0; implementation_name == 'cpython'"]))
     assert out["project"]["dependencies"] == ["rich==15.0.0", "cffi==2.0; implementation_name == 'cpython'"]
     assert out["project"]["requires-python"] == "==3.14.*"  # flet bundles its newest Python matching it
-    assert out["tool"] == {"flet": data["tool"]["flet"]}  # no [tool.other], no [tool.uv]
+    assert out["tool"] == {"flet": {**data["tool"]["flet"], "flutter": {"pubspec": {"dependency_overrides": dict(flet.FLUTTER_OVERRIDES)}}}}  # no [tool.other], no [tool.uv]
     # [tool.flet.app] alone (no bare [tool.flet] header) used to be replaced by the default;
     # its path is always the staged src/ (test_build_methods covers the flet build stage)
     only_app = tomllib.loads('[project]\nname = "a"\nversion = "1"\n\n[tool.flet.app]\nmodule = "ui"\n')
-    assert tomllib.loads(flet.build_pyproject(make({}), only_app, []))["tool"] == {"flet": {"app": {"module": "ui", "path": "src"}}}
+    assert tomllib.loads(flet.build_pyproject(make({}), only_app, []))["tool"] == {"flet": {"app": {"module": "ui", "path": "src"}, "flutter": {"pubspec": {"dependency_overrides": dict(flet.FLUTTER_OVERRIDES)}}}}
     no_flet = tomllib.loads('[project]\nname = "a"\nversion = "1"\n')
-    assert tomllib.loads(flet.build_pyproject(make({}), no_flet, []))["tool"] == {"flet": {"app": {"path": "src"}}}
+    assert tomllib.loads(flet.build_pyproject(make({}), no_flet, []))["tool"] == {"flet": {"app": {"path": "src"}, "flutter": {"pubspec": {"dependency_overrides": dict(flet.FLUTTER_OVERRIDES)}}}}

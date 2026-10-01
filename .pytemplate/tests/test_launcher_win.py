@@ -119,6 +119,17 @@ def test_cmd_keeps_the_registry_path_out_of_call_arguments() -> None:
         assert f'set "{name}="' in before, name
 
 
+def test_cmd_echo_in_a_for_f_command_has_no_redirection() -> None:
+    """cmd's echo prints the blank before a redirection: `echo "LIST" 2>nul` in a for /f command
+    gave `"LIST" `, whose closing quote %%~L then kept, and the FOR set built from the list had an
+    unbalanced quote: ": was unexpected at this time.", exit 255, for everyone whose uv is not on
+    the console's PATH (no uv from the registry, no install hints). Windows-only behaviour, so
+    the rule is static (test_cmd_registry_path_with_quoted_entries runs it on Windows)."""
+    commands = [m.group(1) for line in _code_lines_cmd() for m in re.finditer(r"(?i)\bin\s*\('(echo\b[^']*)'\)", line)]
+    assert commands, "the registry list is no longer expanded by an echo in a for /f command"
+    assert not [c for c in commands if ">" in c], commands
+
+
 def test_cmd_takes_the_exit_code_on_the_line_after_uv() -> None:
     """Nothing follows the argument list on the uv line: an argument with an odd number of double
     quotes (a `"` CreateProcess escapes as `\\"`) swallows the rest of that line, which then
@@ -600,6 +611,58 @@ def test_cmd_registry_path_with_quoted_entries(tmp_path: Path) -> None:
     _assert_hints(_run([str(CMD), "__probe", "0", "0"], ROOT, _hidden_env(tmp_path, str(fake))))
 
 
+@windows_only
+def test_cmd_finds_uv_in_a_plain_registry_entry(tmp_path: Path) -> None:
+    """The registry fallback on its own: a plain absolute entry, no quotes, no variable; then a
+    variable whose value brings quotes of its own (a quoted JAVA_HOME) into a folder with blanks
+    and parentheses. The echo that expands the list carried a redirection, whose blank kept the
+    closing quote: every registry Path broke the FOR set built from it (": was unexpected at this
+    time.", exit 255), and neither uv nor the install hints were ever reached."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    shutil.copyfile(uv, plain / "uv.exe")
+    fake = _fake_reg(tmp_path, str(plain))
+    env = _hidden_env(tmp_path, str(fake))
+    r = _run([str(CMD), "__probe", "0", "0", "p"], ROOT, env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    _check(_probes(r)[0], ROOT, "cmd", ["p"])
+    quoted = tmp_path / "q dir (x86)"
+    quoted.mkdir()
+    shutil.copyfile(uv, quoted / "uv.exe")
+    (fake / "reg.txt").write_bytes(b"\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    C:\\nope;%PT_QV%\r\n\r\n")
+    r = _run([str(CMD), "__probe", "0", "0", "q"], ROOT, {**env, "PT_QV": f'"{quoted}"'})
+    assert r.returncode == 0, r.stdout + r.stderr
+    _check(_probes(r)[0], ROOT, "cmd", ["q"])
+
+
+@windows_only
+@pytest.mark.parametrize("entry", ["%PT_UNDEFINED%uvdir", "%PT_UNDEFINED%\\uvdir", "uvdir", ".\\uvdir"])
+def test_cmd_never_takes_uv_from_a_registry_entry_that_is_not_absolute(entry: str, tmp_path: Path) -> None:
+    """`call set`, in a batch file, removed a variable that is not defined: an entry of an
+    undefined JAVA_HOME, %JAVA_HOME%\\bin, became \\bin, a folder of the drive root any user
+    may create, and pyt.cmd ran the uv.exe there (here uvdir, below the current folder, and
+    \\uvdir, below the drive root, which the test never creates). Windows keeps such an entry as
+    it is, and so does pyt.cmd now; an entry that is not absolute is never probed."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    work = tmp_path / "work"
+    (work / "uvdir").mkdir(parents=True)
+    shutil.copyfile(uv, work / "uvdir" / "uv.exe")
+    fake = _fake_reg(tmp_path, f"{entry};C:\\nope")
+    env = _hidden_env(tmp_path, str(fake))
+    env.pop("PT_UNDEFINED", None)
+    _assert_hints(_run([str(CMD), "__probe", "0", "0"], work, env))
+    # An absolute entry of the same folder is found: only the rule keeps uv out above.
+    (fake / "reg.txt").write_bytes(f"\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    %PT_UNDEFINED%x;{work / 'uvdir'}\r\n\r\n".encode("ascii"))
+    r = _run([str(CMD), "__probe", "0", "0", "u"], work, env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    _check(_probes(r)[0], work, "cmd", ["u"])
+
+
 # --- pyt.ps1 (pwsh everywhere, Windows PowerShell 5.1 on Windows) ---------------------------------
 
 
@@ -650,6 +713,10 @@ def test_ps1_reached_through_a_symlink_finds_its_project(name: str, tmp_path: Pa
             (tmp_path / "home").mkdir()
             (tmp_path / "home" / "bin").symlink_to(tools, target_is_directory=True)
             links["relative, in a linked folder"] = tmp_path / "home" / "bin" / "mypyt.ps1"
+            # The link's folder reached /bin/sh unquoted, which PowerShell 7 globs: b[0-9] read as b1.
+            (tmp_path / "home" / "b[0-9]").symlink_to(tools, target_is_directory=True)
+            (tmp_path / "home" / "b1").mkdir()
+            links["relative, in a linked folder named like a glob"] = tmp_path / "home" / "b[0-9]" / "mypyt.ps1"
     except OSError as e:  # Windows without Developer Mode or admin rights
         pytest.skip(f"cannot create a symlink here: {e}")
     away = tmp_path / "away"
@@ -867,6 +934,41 @@ def test_ps1_passes_array_values_like_a_native_call(name: str) -> None:
         assert probes[5] == NATIVE_COPY_ARGV, "a native call through a wrapper's copy of $args no longer passes these as expected"
     if name == "pwsh":
         assert probes[6] == VALUES_ARGV
+
+
+# A -X: whose value is an array VALUE ($files) reaches a native program once per item, the switch
+# repeated; a typed list after it (-Y:a,b) stays one argument, its items joined with commas
+COLON_VALUES_TYPED = "run -X:$files -Y:a,b z"
+COLON_VALUES_ARGV = ["run", "-X:a.py", "-X:b 2.py", "-Y:a,b", "z"]
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
+def test_ps1_repeats_a_colon_switch_for_each_item_of_an_array_value(name: str) -> None:
+    """`./pyt run app -X:$files` gave the app one argument, -X:a.py,b 2.py, where a direct native
+    call in the same session gives -X:a.py and -X:b 2.py; also through a wrapper function that
+    forwards @args, and with legacy argument passing."""
+    exe = _ps_exe(name)
+    uv = os.environ.get("UV") or shutil.which("uv")
+    assert uv
+    ps1 = _ps_literal(str(PS1))
+    direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'pyt.py'))}"
+    body = "\n".join([
+        VALUES_SETUP,
+        f"{direct} __probe 0 0 {COLON_VALUES_TYPED}",
+        f"& {ps1} __probe 0 0 {COLON_VALUES_TYPED}",
+        PWSH_WRAPPER,
+        f"Set-Location {_ps_literal(str(SUB))}",
+        f"pyt __probe 0 0 {COLON_VALUES_TYPED}",
+    ])  # fmt: skip
+    if name == "pwsh":  # also the legacy pre-quoting path that 5.1 always takes
+        body += f"\n$PSNativeCommandArgumentPassing = 'Legacy'\n& {ps1} __probe 0 0 {COLON_VALUES_TYPED}"
+    r = _session(exe, body + "\nexit 0\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    probes = [p["argv"] for p in _probes(r)]
+    assert len(probes) == (4 if name == "pwsh" else 3), r.stdout + r.stderr
+    if name == "pwsh":  # measured with 7.6
+        assert probes[0] == COLON_VALUES_ARGV, "a direct native call no longer passes these as expected"
+    assert probes[1:] == [COLON_VALUES_ARGV] * (len(probes) - 1)
 
 
 # A $null argument (an unset $env:X, an optional variable), the $null items of an array and a -X:
@@ -1120,3 +1222,61 @@ def test_ps1_skips_a_uv_without_exec_bit(tmp_path: Path) -> None:
     env = _clean_env(HOME=str(home), PATH=f"{broken[0].parent}:/usr/bin:/bin", UV=str(broken[0]), CI="1", **dict.fromkeys(drop))
     r = _run([exe, "-NoProfile", "-NonInteractive", "-File", str(PS1), "x"], ROOT, env)
     assert (r.returncode, r.stdout.strip()) == (7, f"FAKE {good}"), (r.returncode, r.stdout, r.stderr)
+
+
+@posix_only
+def test_ps1_skips_a_uv_link_whose_target_is_gone(tmp_path: Path) -> None:
+    """File.Exists is true for a symbolic link whose target is gone (an uninstalled uv's link:
+    pipx, Homebrew, a hand-made one), and the x-bit check that then failed counted as passed: a
+    stale link ($UV, first on PATH, in ~/.local/bin) won, and the hand-over stopped with exit
+    126 where ./pyt goes on to the next uv. A uv must open."""
+    exe = _ps_exe("pwsh")
+    home = tmp_path / "home"
+    stale = [tmp_path / "path" / "uv", home / ".local" / "bin" / "uv"]
+    good = home / ".cargo" / "bin" / "uv"
+    for f in [*stale, good]:
+        f.parent.mkdir(parents=True)
+    for f in stale:
+        f.symlink_to(tmp_path / "gone" / "uv")
+    good.write_text('#!/bin/sh\necho "FAKE $0"\nexit 7\n', encoding="ascii", newline="\n")
+    good.chmod(0o755)
+    drop = ("UV_INSTALL_DIR", "XDG_BIN_HOME", "XDG_DATA_HOME", "CARGO_HOME")
+    env = _clean_env(HOME=str(home), PATH=f"{stale[0].parent}:/usr/bin:/bin", UV=str(stale[0]), CI="1", **dict.fromkeys(drop))
+    r = _run([exe, "-NoProfile", "-NonInteractive", "-File", str(PS1), "x"], ROOT, env)
+    assert (r.returncode, r.stdout.strip()) == (7, f"FAKE {good}"), (r.returncode, r.stdout, r.stderr)
+
+
+def _stale_uv_link(tmp: Path) -> Path:
+    """A uv.exe link whose target is gone, in a folder of its own (skips where Windows refuses
+    to make a symbolic link: no Developer Mode and no administrator)."""
+    stale = tmp / "stale"
+    stale.mkdir()
+    try:
+        (stale / "uv.exe").symlink_to(tmp / "gone" / "uv.exe")
+    except OSError as e:
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+    return stale / "uv.exe"
+
+
+@windows_only
+@pytest.mark.parametrize("launcher", ["cmd", *PS_NAMES])
+def test_a_uv_link_whose_target_is_gone_is_skipped_on_windows(launcher: str, tmp_path: Path) -> None:
+    """A link left in WinGet's Links folder by an uninstalled uv passes `if exist` (pyt.cmd: UV
+    and the PATH lookup too) and File.Exists (pyt.ps1): it won over the uv of an install folder,
+    and the run failed. A uv must open."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    stale = _stale_uv_link(tmp_path)
+    good = tmp_path / ".local" / "bin"
+    good.mkdir(parents=True)
+    shutil.copyfile(uv, good / "uv.exe")
+    system = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    env = {**_hidden_env(tmp_path, f"{stale.parent};{system}"), "UV": str(stale)}  # USERPROFILE: tmp_path
+    if launcher == "cmd":
+        r = _run([str(CMD), "__probe", "0", "0", "s"], ROOT, env)
+    else:
+        argv = [_ps_exe(launcher), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(PS1), "__probe", "0", "0", "s"]
+        r = _run(argv, ROOT, env)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    _check(_probes(r)[0], ROOT, launcher if launcher == "cmd" else "ps1:", ["s"])

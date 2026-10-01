@@ -421,7 +421,9 @@ def test_flet_skeleton_runs_compiled_work_in_a_process() -> None:
     made = [ast.unparse(n.value.func) for n in ast.walk(executor) if isinstance(n, ast.Return) and isinstance(n.value, ast.Call)]
     assert made == ["ProcessPoolExecutor"]
     handed = [n.args for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "run_in_executor"]
-    assert handed and all(ast.unparse(a[0]) == "_executor()" and ast.unparse(a[1]).startswith("fractal.") for a in handed)
+    # the pool _executor() gives, or a name that holds it (a dead worker's pool is replaced)
+    pools = {ast.unparse(t) for n in ast.walk(tree) if isinstance(n, ast.Assign) and ast.unparse(n.value) == "_executor()" for t in n.targets}
+    assert handed and all(ast.unparse(a[0]) in {"_executor()", *pools} and ast.unparse(a[1]).startswith("fractal.") for a in handed)
     names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     assert not names & {"ThreadPoolExecutor", "Thread", "to_thread"}
 
@@ -601,6 +603,8 @@ run("neotest", function()
     and not f(".venv", ".venv", root) and not f(".venv-pypy", ".venv-pypy", root)
     and not f("dist", "dist", root) and not f("typings", "typings", root)
     and f("tests", "tests", root) and f("src", "src", root)
+    and f("build", "tests/build", root) and f("dist", "tests/dist", root) and f("typings", "tests/typings", root)
+    and not f("__pycache__", "tests/__pycache__", root)
   local mine = { adapters = { { name = "an adapter object" } } }
   integ.neotest(nil, mine)
   check("neotest", ok and mine.discovery == nil, vim.inspect({ py = py }))

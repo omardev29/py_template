@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
@@ -307,6 +308,52 @@ def test_stale_caller_cwd_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert caller_cwd().is_absolute()
 
 
+def test_base_lock_refuses_a_second_run_and_releases(tmp_path: Path) -> None:
+    """One run at a time per scratch base (selftest --e2e and --nvim use it around their run): a
+    second holder is refused, naming the command, and the lock is released when the first exits."""
+    with project.base_lock(tmp_path, "selftest --e2e"):
+        with pytest.raises(ui.PytError, match=r"selftest --e2e: another run is using"):
+            with project.base_lock(tmp_path, "selftest --e2e"):
+                pass
+    with project.base_lock(tmp_path, "selftest --nvim"):  # released: a later run takes it
+        pass
+
+
+def refuse_every_lock(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """The lock call fails with `code`, as on a file system without locks (some FUSE and network
+    mounts): flock on POSIX, msvcrt.locking on Windows."""
+
+    def refuse(*_args: object) -> None:
+        raise OSError(code, os.strerror(code))
+
+    if sys.platform == "win32":
+        import msvcrt
+
+        monkeypatch.setattr(msvcrt, "locking", refuse)
+    else:
+        import fcntl
+
+        monkeypatch.setattr(fcntl, "flock", refuse)
+
+
+@pytest.mark.parametrize("code", [errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOSYS])
+def test_base_lock_names_a_folder_that_takes_no_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """A file system without locks fails the lock call with ENOLCK, EOPNOTSUPP or ENOSYS: the
+    harnesses said "another run is using" the folder, where no other run existed, and every later
+    run said the same (A10-06). Only a lock another process holds is another run."""
+    refuse_every_lock(monkeypatch, code)
+    with pytest.raises(ui.PytError) as e:
+        with project.base_lock(tmp_path, "selftest --e2e"):
+            pass
+    assert str(e.value).startswith(f"selftest --e2e: cannot lock {tmp_path / 'lock'}: ") and "takes no locks" in str(e.value), e.value
+    assert "another run" not in str(e.value) and e.value.code == 2
+    for held in (errno.EWOULDBLOCK, errno.EACCES):  # flock's answer, msvcrt.locking's
+        refuse_every_lock(monkeypatch, held)
+        with pytest.raises(ui.PytError, match=r"selftest --nvim: another run is using"):
+            with project.base_lock(tmp_path, "selftest --nvim"):
+                pass
+
+
 def test_caller_cwd_keeps_the_shells_spelling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     raw = str(tmp_path)
@@ -517,6 +564,23 @@ def _copy_config(root: Path) -> dict[str, Any]:
     return tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8-sig"))
 
 
+def _another_backend(cfg: dict[str, Any]) -> str:
+    """A backend `mode BACKEND` switches this copy to: mypyc, else another one (never mypyc with
+    a typing.profile of warn or off, which that backend refuses)."""
+    active, profile = cfg["backend"]["active"], cfg.get("typing", {}).get("profile", "auto")
+    candidates = ("mypyc", *cfg["backend"]["supported"], "cpython", "pypy")
+    return next(b for b in candidates if b != active and not (b == "mypyc" and profile in ("warn", "off")))
+
+
+def _supports_and_typing(cfg: dict[str, Any]) -> list[str]:
+    """`mode --supports ... --typing ...` with changes this copy has not made yet (-mypyc, or
+    +mypyc where it is not supported, +cpython where it is the only backend)."""
+    supported = cfg["backend"]["supported"]
+    supports = "+mypyc" if "mypyc" not in supported else "-mypyc" if len(supported) > 1 else "+cpython"
+    relaxed = cfg.get("typing", {}).get("relaxed", "off")
+    return ["mode", "--supports", supports, "--typing", "warn" if relaxed == "strict" else "strict"]
+
+
 @pytest.fixture
 def unchanged(project_copy: Path) -> Iterator[Path]:
     before = _snapshot(project_copy)
@@ -540,8 +604,16 @@ def unchanged(project_copy: Path) -> Iterator[Path]:
     ],
 )
 def test_dry_run_writes_nothing(unchanged: Path, args: list[str], expected: str) -> None:
-    if args[:2] == ["__init", "raylib"] and _copy_config(unchanged)["app"]["preset"] == "raylib":
+    cfg = _copy_config(unchanged)
+    if args[:2] == ["__init", "raylib"] and cfg["app"]["preset"] == "raylib":
         args, expected = ["__init", "script", "--force"], "- typings/raylib/__init__.pyi"  # a raylib project: the other way
+    # mode prints only real changes: in a project where `./pyt mode mypyc` or `./pyt mode --typing
+    # strict` already ran, the plan said "unchanged" or had no typing line, and the test failed
+    if args[0] == "mode" and args[1] != "--supports":
+        target = _another_backend(cfg)
+        args, expected = ["mode", target], f'[backend] active = "{target}"'
+    elif args[0] == "mode":
+        args = _supports_and_typing(cfg)
     r = _pyt(unchanged, "--dry-run", *args)
     assert r.returncode == 0, r.stderr
     assert expected in r.stderr, r.stderr
@@ -583,6 +655,266 @@ def test_the_tests_that_copy_the_project_pass_in_one_with_its_own_code(tmp_path:
         check=False,
     )
     assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+
+
+def test_the_task_tests_pass_in_a_project_whose_ci_task_is_its_own(tmp_path: Path) -> None:
+    """[tasks] entries belong to the project's user. test_task_exit_codes_cross_pyt_py ran the
+    preset's deps-only `ci` task with an argument: in a project that renamed or deleted it, or
+    gave it a cmd, one test of ./pyt selftest failed. They run here in a copy whose `ci` runs a
+    program of its own (exit 42), as the tasks they run are now the fixture's own."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    toml = own / "pytemplate.toml"
+    text = toml.read_bytes().decode("utf-8")
+    for key, value in (("deps", []), ("cmd", [sys.executable, "-c", "raise SystemExit(42)"]), ("uv", False)):
+        text = config.set_value(text, "tasks.ci", key, value)
+    toml.write_bytes(text.encode("utf-8"))
+    nodes = ["test_cli_core.py::test_task_exit_codes_cross_pyt_py", "test_cli_core.py::test_task_exit_codes_cross_the_sh_launcher"]
+    drop = (*_LAUNCHER_VARS, "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "t"),
+         *(f".pytemplate/tests/{node}" for node in nodes)],
+        cwd=own,
+        env={k: v for k, v in os.environ.items() if k not in drop},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=900,
+        check=False,
+    )
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+
+
+def _run_tests_in(own: Path, tmp: Path, nodes: list[str]) -> subprocess.CompletedProcess[str]:
+    """The test nodes (of .pytemplate/tests) run by pytest in the copy `own`, with the runner
+    there and the suite's own pytest settings, as ./pyt selftest runs them (-ra lists the skips)."""
+    drop = (*_LAUNCHER_VARS, "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-c", ".pytemplate/tests/pytest.ini", "--rootdir=.",
+         "--basetemp", str(tmp / "t"), *(f".pytemplate/tests/{node}" for node in nodes)],
+        cwd=own, env={k: v for k, v in os.environ.items() if k not in drop}, capture_output=True,
+        text=True, encoding="utf-8", errors="replace", timeout=900, check=False,
+    )  # fmt: skip
+
+
+@needs_uv
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_install_tests_pass_in_a_project_with_install_and_uninstall_tasks(tmp_path: Path) -> None:
+    """README (Custom tasks) and CLAUDE.md 5.2: a [tasks] entry named like a builtin added after
+    the contract (install, uninstall) keeps its name in its project, where ./pyt install runs it.
+    test_install made its template clones from the project's own files, pytemplate.toml
+    included, and each `install` of a clone ran the project's task (uv tool install, with its
+    downloads, about 20 times); test_every_command_rejects_an_unknown_argument got the task's
+    exit code for install and uninstall. 22 tests failed in such a project. They run here in a
+    copy whose install and uninstall tasks run a program of their own (exit 42)."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    toml = own / "pytemplate.toml"
+    text = toml.read_bytes().decode("utf-8")
+    for name in ("install", "uninstall"):
+        for key, value in (("cmd", [sys.executable, "-c", "raise SystemExit(42)"]), ("uv", False)):
+            text = config.set_value(text, f"tasks.{name}", key, value)
+    toml.write_bytes(text.encode("utf-8"))
+    rejects = "test_cli_core.py::test_every_command_rejects_an_unknown_argument"
+    nodes = [
+        "test_install.py::test_install_copies_the_tracked_template_and_writes_the_launchers",
+        "test_install.py::test_dry_runs_write_nothing",
+        "test_install.py::test_uninstall_removes_only_what_install_wrote",
+        *(f"{rejects}[{name}-{bogus}]" for name in ("install", "uninstall") for bogus in ("--pt-bogus-flag", "pt-bogus-positional")),
+    ]
+    r = _run_tests_in(own, tmp_path, nodes)
+    assert r.returncode == 0 and "7 passed" in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]
+
+
+@needs_uv
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_install_tests_pass_in_a_project_that_has_the_names_they_write(tmp_path: Path) -> None:
+    """test_install's clones are copies of the project the suite runs in, its own files included.
+    Tests that wrote docs/, notes.txt and extra.txt there failed ./pyt selftest in a project that
+    has them: mkdir said docs/ exists, a tracked notes.txt written over was no untracked file, and
+    an extra.txt with the bytes the test wrote left nothing to commit. They run here in a copy that
+    holds every one of those names."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    for rel in ("docs/guide.md", "notes.txt", "extra.txt", "stray.txt"):
+        (own / rel).parent.mkdir(parents=True, exist_ok=True)
+        (own / rel).write_bytes(b"one\n")
+    nodes = [
+        "test_install.py::test_install_copies_the_tracked_template_and_writes_the_launchers",
+        "test_install.py::test_install_keeps_tracked_links_as_links",  # POSIX only: skipped on Windows
+        "test_install.py::test_install_again_swaps_the_whole_copy",
+        "test_install.py::test_the_installed_template_knows_how_old_it_is",
+    ]
+    r = _run_tests_in(own, tmp_path, nodes)
+    passed = "3 passed, 1 skipped" if sys.platform == "win32" else "4 passed"
+    assert r.returncode == 0 and passed in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]
+
+
+@needs_uv
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_real_apply_test_passes_in_a_project_without_the_git_hook(tmp_path: Path) -> None:
+    """[hooks] pre_commit = false is documented (README: apply then installs no hook).
+    test_real_apply_after_a_hand_edited_name ran apply in a copy of the project, its
+    pytemplate.toml included, and asserted that the hook was installed: it failed in every
+    project whose user had turned the hook off. It runs here in a copy with pre_commit = false."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    toml = own / "pytemplate.toml"
+    toml.write_bytes(config.set_value(toml.read_bytes().decode("utf-8"), "hooks", "pre_commit", False).encode("utf-8"))
+    r = _run_tests_in(own, tmp_path, ["test_apply.py::test_real_apply_after_a_hand_edited_name"])
+    skipped = re.search(r"SKIPPED \[1\] \S+: (needs PyPI.*)", r.stdout)
+    if r.returncode == 0 and skipped:
+        pytest.skip(skipped.group(1))
+    assert r.returncode == 0 and "1 passed" in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]
+
+
+def _wheel(folder: Path, name: str) -> Path:
+    """A pure wheel of the package `name` 0.1.0 (one module), as a build backend writes it."""
+    import base64
+    import zipfile
+
+    dist = f"{name}-0.1.0.dist-info"
+    files = {
+        f"{name}/__init__.py": b"VALUE = 1\n",
+        f"{dist}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: 0.1.0\n".encode(),
+        f"{dist}/WHEEL": b"Wheel-Version: 1.0\nGenerator: pytemplate-tests\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    digest = {p: base64.urlsafe_b64encode(hashlib.sha256(d).digest()).rstrip(b"=").decode() for p, d in files.items()}
+    files[f"{dist}/RECORD"] = ("".join(f"{p},sha256={digest[p]},{len(d)}\n" for p, d in files.items()) + f"{dist}/RECORD,,\n").encode()
+    folder.mkdir(parents=True, exist_ok=True)
+    wheel = folder / f"{name}-0.1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for path, data in files.items():
+            archive.writestr(path, data)
+    return wheel
+
+
+@needs_uv
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_tests_that_copy_the_project_pass_in_one_with_local_libraries(tmp_path: Path) -> None:
+    """CLAUDE.md 10: a project may depend on local libraries, a wheel of its own (`./pyt add
+    ./wheels/x.whl`) or one next to it (`./pyt add ../x`), which pyproject.toml and uv.lock name
+    from the project. The tests that lock or sync a copy of the project failed in such a project:
+    their copies sat elsewhere, where `../x` named another folder ("Distribution not found"),
+    and the toy of the real mutation run copied no local wheel, so every mutant stayed "not run".
+    They run here in one (its `uv add` and the tests' runs need the package index or uv's cache,
+    the mutation run Cosmic Ray's environment: without them the test skips)."""
+    from runner import rename
+
+    own = tmp_path / "proj" / "own"
+    presets.copy_template(own)
+    wheels = [_wheel(tmp_path / "proj" / "outside", "ptouter"), _wheel(own / "wheels", "ptinner")]
+    uv = shutil.which("uv") or os.environ["UV"]
+    env = {k: v for k, v in os.environ.items() if k not in (*_LAUNCHER_VARS, "UV", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")}
+    for wheel in wheels:
+        added = subprocess.run(
+            [uv, "add", "--no-sync", os.path.relpath(wheel, own)],
+            cwd=own, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, check=False,
+        )  # fmt: skip
+        if added.returncode != 0 and any(marker in added.stderr for marker in rename.PYPI_UNREACHABLE):
+            pytest.skip("needs PyPI: uv add locks the project again")
+        assert added.returncode == 0, added.stderr
+    lock = (own / "uv.lock").read_text(encoding="utf-8")
+    assert '"../outside/ptouter-0.1.0-py3-none-any.whl"' in lock and '"wheels/ptinner-0.1.0-py3-none-any.whl"' in lock, lock[-3000:]
+    nodes = [
+        "test_mutation.py::test_a_real_run_kills_what_the_tests_check_and_finds_what_they_miss",
+        "test_rename.py::test_command_dry_run_then_real_run",
+        "test_removals.py::test_new_creates_a_project_through_the_internal_route",
+    ]
+    r = _run_tests_in(own, tmp_path, nodes)
+    skipped = re.findall(r"SKIPPED \[\d+\] \S+: (.*)", r.stdout)
+    if r.returncode == 0 and skipped:
+        pytest.skip(skipped[0])
+    assert r.returncode == 0 and f"{len(nodes)} passed" in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]
+
+
+def _flip(profile: Path, key: str) -> None:
+    """Turn the first `key = true|false` line of a typing profile the other way (whatever this
+    project's copy says: a project that edited it gets the other value, never an error)."""
+    text = profile.read_text(encoding="utf-8")
+    flipped = re.sub(rf"(?m)^({re.escape(key)} = )(true|false)\b", lambda m: m[1] + ("false" if m[2] == "true" else "true"), text, count=1)
+    assert flipped != text, (profile.name, key)  # the edit must change something
+    profile.write_text(flipped, encoding="utf-8")
+
+
+def _swap_mypy_severity(profile: Path) -> None:
+    """Show the profile's mypy errors in VS Code as warnings if they were errors, else as errors."""
+    text = profile.read_text(encoding="utf-8")
+    swapped = re.sub(r'("mypy-type-checker\.severity" = \{ error = ")(Error|Warning)"', lambda m: m[1] + ("Warning" if m[2] == "Error" else "Error") + '"', text, count=1)
+    assert swapped != text, profile.name
+    profile.write_text(swapped, encoding="utf-8")
+
+
+def test_the_template_tests_pass_in_a_project_that_edited_its_templates(tmp_path: Path) -> None:
+    """README: a project customizes its CI by editing .pytemplate/templates/ci.yml, and its typing
+    profiles and VS Code settings in .pytemplate/templates/. The tests pinned the shipped content
+    (the CI's triggers and steps, a blocking ruff in no profile, the settings template's values):
+    a weekly schedule in the CI template failed 36 tests of ./pyt selftest there, a blocking ruff
+    in `warn` 2, and the check, lint, hook and editor.json tests 5 more with that edit, 4 with
+    mypy run under `off`, 3 with a `strict` that does not block, and the ruff and mypy settings of
+    `off`, `warn` and `mypyc` 4 more (A9-02). They run here in a copy with such edits (the shipped
+    content stays pinned in the template repository, which a copy is not)."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    assert not (own / ".pytemplate" / "template-repo").exists()
+    venv = project.ROOT / ".venv"
+    if venv.is_dir():  # the tests that run the real ruff of .venv find it in the copy too
+        try:
+            (own / ".venv").symlink_to(venv, target_is_directory=True)
+        except OSError:
+            pass  # Windows without the right to make links: those tests skip in the copy
+    templates = own / ".pytemplate" / "templates"
+    ci = templates / "ci.yml"
+    ci.write_text(ci.read_text(encoding="utf-8").replace("  pull_request:\n", '  pull_request:\n  schedule:\n    - cron: "0 6 * * 1"\n', 1), encoding="utf-8")
+    typing = templates / "typing"
+    # each setting turned the other way, whatever this project's copy says (as shipped: warn never
+    # blocks on ruff and shows mypy errors as warnings in VS Code; off skips mypy and blocks on
+    # ruff's few rules; strict blocks; mypyc shows mypy errors as errors)
+    _flip(typing / "warn.toml", "exit_zero")
+    _swap_mypy_severity(typing / "warn.toml")
+    _flip(typing / "off.toml", "skip_mypy")
+    _flip(typing / "off.toml", "exit_zero")
+    _flip(typing / "strict.toml", "blocking")
+    _swap_mypy_severity(typing / "mypyc.toml")
+    settings = templates / "vscode" / "settings.json"
+    settings.write_text(settings.read_text(encoding="utf-8").replace('"tasks.statusbar.default.hide": true', '"tasks.statusbar.default.hide": false'), encoding="utf-8")
+    nodes = [
+        "test_render_core.py",
+        "test_vscode.py::test_severity_follows_the_typing_profile",
+        "test_vscode.py::test_settings_and_extensions",
+        "test_nvim_render.py::test_task_severity_examples",
+        "test_nvim_render.py::test_editor_json_follows_the_mode",
+        "test_runner.py::test_ci_workflow_leaves_out_an_os_without_backends",
+        "test_e2e_plan.py::test_host_gaps_match_the_generated_ci_matrix",
+        "test_cli_core.py::test_run_checks_blocking_matrix",
+        "test_cli_core.py::test_lint_honours_the_profiles_exit_zero",
+        "test_cli_core.py::test_a_dry_run_of_check_names_only_what_it_skipped",
+        "test_cli_core.py::test_basedpyright_runs_with_every_pin",
+        "test_cli_core.py::test_basedpyright_that_cannot_run_always_fails",
+        "test_cli_core.py::test_check_runs_ruff_in_a_project_folder_named_like_a_variable",
+        "test_cli_core.py::test_check_lint_and_fmt_see_every_folder_below_src_and_tests",
+        "test_hooks.py::test_checks_report_ruff_failures_and_exit_zero",
+        "test_hooks.py::test_checks_ruff_only_on_staged_python_files",
+    ]
+    drop = (*_LAUNCHER_VARS, "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "t"),
+         "-k", "ci_ or ci_workflow or host_gaps or severity or settings_and_extensions or editor_json_follows or blocking_matrix"
+         " or exit_zero or dry_run_of_check or basedpyright or ruff_only_on_staged or folder_named_like_a_variable"
+         " or see_every_folder_below",
+         *(f".pytemplate/tests/{node}" for node in nodes)],
+        cwd=own,
+        env={k: v for k, v in os.environ.items() if k not in drop},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=900,
+        check=False,
+    )
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert " passed" in r.stdout, r.stdout[-2000:]
 
 
 @needs_uv

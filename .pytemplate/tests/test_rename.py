@@ -12,11 +12,13 @@ import errno
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tokenize
 import tomllib
 from pathlib import Path
@@ -135,14 +137,31 @@ def test_the_pyproject_preset_block_is_renamed(tmp_path: Path) -> None:
     assert data["tool"]["flet"]["product"] == data["tool"]["flet"]["company"] == "My-Game"
 
 
-@pytest.mark.parametrize(("old", "new"), [("com", "beta"), ("com", "My-Game"), ("example", "beta")])
+@pytest.mark.parametrize(("old", "new"), [("com", "beta"), ("com", "My-Game"), ("example", "beta"), ("C", "Beta"), ("Copyright", "beta")])
 def test_the_preset_block_keeps_what_is_not_the_name(tmp_path: Path, old: str, new: str) -> None:
     """Only the values the preset writes with the name follow a rename: flet's org =
-    "com.example" (a reverse domain) became "beta.example" for an app named com."""
+    "com.example" (a reverse domain) became "beta.example" for an app named com. In such a value
+    only what the preset's {{name}} wrote changes: copyright = "Copyright (C) {{name}}" became
+    "Copyright (Beta) Beta" for an app named C."""
     _write_project(tmp_path, "flet", old)
     _rename(tmp_path, old, new)
     assert _tree(tmp_path) == presets.skeleton("flet", new)
     assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == _pyproject("flet", new)
+
+
+def test_a_preset_value_in_another_spelling_still_changes_only_its_placeholder(tmp_path: Path) -> None:
+    """copyright = 'Copyright (C) C' (literal quotes, a TOML formatter's) is still the value the
+    preset wrote: only its name changes. A value edited by hand changes word by word, as before."""
+    _write_project(tmp_path, "flet", "C")
+    pyproject = tmp_path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    assert 'copyright = "Copyright (C) C"' in text and 'company = "C"' in text
+    text = text.replace('copyright = "Copyright (C) C"', "copyright = 'Copyright (C) C'").replace('company = "C"', 'company = "C Games"')
+    pyproject.write_text(text, encoding="utf-8", newline="\n")
+    planned = rename.plan(tmp_path, "C", "Beta")
+    assert planned.pyproject is not None
+    flet = tomllib.loads(planned.pyproject.new)["tool"]["flet"]
+    assert (flet["copyright"], flet["company"], flet["product"]) == ("Copyright (C) Beta", "Beta Games", "Beta")
 
 
 def test_plan_writes_nothing(tmp_path: Path) -> None:
@@ -302,6 +321,36 @@ def test_module_name_arguments_of_loader_calls_get_the_package(text: str, expect
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('core = pytest.importorskip("myapp")', 'core = pytest.importorskip("my_game")'),
+        ('core = pytest.importorskip(modname="myapp")', 'core = pytest.importorskip(modname="my_game")'),
+        ('mod = sys.modules["myapp"]', 'mod = sys.modules["my_game"]'),
+        ('mod = sys.modules[f"myapp.{name}"]', 'mod = sys.modules[f"my_game.{name}"]'),
+        ('mod = sys.modules.get("myapp")', 'mod = sys.modules.get("my_game")'),
+        ('sys.modules.pop("myapp", None)', 'sys.modules.pop("my_game", None)'),
+        ('assert "myapp" in sys.modules', 'assert "my_game" in sys.modules'),
+        ('assert "myapp" not in modules', 'assert "my_game" not in modules'),
+        ('monkeypatch.setitem(sys.modules, "myapp", None)', 'monkeypatch.setitem(sys.modules, "my_game", None)'),
+        ('monkeypatch.delitem(sys.modules, "myapp")', 'monkeypatch.delitem(sys.modules, "my_game")'),
+        ('ok = __package__ == "myapp"', 'ok = __package__ == "my_game"'),
+        ('ok = "myapp" != __name__', 'ok = "my_game" != __name__'),
+        ('ok = __spec__.name == "myapp"', 'ok = __spec__.name == "my_game"'),
+        ('ok = __name__.startswith("myapp.")', 'ok = __name__.startswith("my_game.")'),
+        # prose: a class's name, a string next to sys.modules, another mapping
+        ('ok = cls.__name__ == "myapp"', 'ok = cls.__name__ == "My-Game"'),
+        ('print("myapp", sys.modules)', 'print("My-Game", sys.modules)'),
+        ('x = titles["myapp"]', 'x = titles["My-Game"]'),
+    ],
+)
+def test_strings_where_only_a_module_name_goes_get_the_package(text: str, expected: str) -> None:
+    """A key of sys.modules, what a module's own name is compared with and pytest.importorskip's
+    argument are module names: they got the display name (`sys.modules["My-Game"]`, a test that
+    then failed, and an importorskip that skipped its tests without a word)."""
+    assert rewrite(text + "\n", AMBIGUOUS, python=True).text == expected + "\n"
+
+
+@pytest.mark.parametrize(
     ("text", "expected", "kept"),
     [
         ('ICON = asset("rocks.png")', None, True),
@@ -324,6 +373,87 @@ def test_file_names_in_code_keep_the_name_of_the_file(text: str, expected: str |
     out = rewrite(text + "\n", Names("rocks", "stone"), python=True, package_modules=frozenset({"core", "resources"}))
     assert out.text == (text if expected is None else expected) + "\n"
     assert bool(out.kept) is kept
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('intro = read_text("rocks.txt")', None),  # a helper of the project: the file keeps its name
+        ('cfg = contents("rocks.json")', None),
+        ('data = get_data("rocks.bin")', None),
+        ('logo = path("rocks/logo.png")', None),  # a folder named after the app, not the package
+        ('f = files(f"rocks.txt")', None),
+        ('t = resources.read_text("rocks", "data.txt")', 't = resources.read_text("stone", "data.txt")'),  # the package
+        ('f = resources.files("rocks.core")', 'f = resources.files("stone.core")'),  # a module of it
+        ('p = path("rocks/core/x.py")', 'p = path("stone/core/x.py")'),  # into the package
+        ('m = importlib.import_module("rocks.plugins")', 'm = importlib.import_module("stone.plugins")'),  # a module loader: a module
+    ],
+)
+def test_a_file_passed_to_a_helper_named_like_a_loader_keeps_its_name(text: str, expected: str | None) -> None:
+    """The string argument of ANY call named like an importlib.resources or pkgutil loader was
+    taken for a module name, past the file and folder rules: a helper of the project called
+    read_text, contents, path or get_data reading "<name>.txt" got the new name while the file
+    kept its own (FileNotFoundError), and the line was not reported. A file or folder named
+    after the app keeps its name there too; the package and its modules still change."""
+    out = rewrite(
+        text + "\n",
+        Names("rocks", "stone"),
+        python=True,
+        package_modules=frozenset({"core", "resources"}),
+        package_entries=frozenset({"__init__.py", "core", "resources.py"}),
+    )
+    assert out.text == (text if expected is None else expected) + "\n"
+    assert bool(out.kept) is (expected is None)
+
+
+@pytest.mark.parametrize(
+    ("old", "text", "expected"),
+    [
+        ("alpha", 'DATA = Path("tests/alpha/data/sample.json")', None),  # tests/alpha/ is not moved
+        ("alpha", 'LOGO = asset("alpha/logo.png")', None),  # src/assets/alpha/: another folder
+        ("alpha", 'LOGO = Path("src/assets/alpha/logo.png")', None),
+        ("alpha", "# See docs/alpha/index.md", None),
+        ("alpha", 'LOG = "logs\\\\alpha\\\\run.log"', None),
+        ("alpha", 'HOME = "~/games/alpha"', None),  # the last segment of another path
+        ("alpha", 'DATA = Path("tests/alpha/core/cases.json")', None),  # tests mirroring the package
+        ("alpha", 'p = "site-packages/alpha/core"', None),  # under another folder: reported
+        ("My-Game", 'DATA = "tests/my_game/data"', None),
+        ("alpha", 'p = "src/alpha/core/x.py"', 'p = "src/beta/core/x.py"'),  # the folder the rename moves
+        ("alpha", 'p = "src\\\\alpha"', 'p = "src\\\\beta"'),
+        ("alpha", 'p = "alpha/core/bench.py"', 'p = "beta/core/bench.py"'),  # into a module of the package
+        ("alpha", 'p = "alpha/data.json"', 'p = "beta/data.json"'),  # a data file of src/alpha/
+        ("alpha", "# the package lives in alpha/", "# the package lives in beta/"),
+        ("alpha", 'p = "dist/alpha-cpython-exe/alpha.exe"', 'p = "dist/beta-cpython-exe/beta.exe"'),  # artifacts: the name
+        ("alpha", 'LOGO = asset("sfx/alpha.wav")', None),  # a file named after the app (_names_a_file)
+    ],
+)
+def test_folders_named_after_the_app_keep_their_name(old: str, text: str, expected: str | None) -> None:
+    """A path segment named like the app is the package only right inside src/ or on the way into
+    an entry of src/<pkg>/: tests/alpha/data or an asset folder alpha/ keep their name (the rename
+    moves src/alpha/ only), so a reference to them is kept and reported. They were rewritten, and
+    the tests or the app no longer found their files after a rename that listed no line to review."""
+    out = rewrite(
+        text + "\n",
+        Names(old, "beta"),
+        python=True,
+        package_modules=frozenset({"core", "resources"}),
+        package_entries=frozenset({"__init__.py", "core", "resources.py", "data.json"}),
+    )
+    assert out.text == (text if expected is None else expected) + "\n"
+    assert bool(out.kept) is (expected is None)
+
+
+def test_a_test_data_folder_named_after_the_app_keeps_working(tmp_path: Path) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    data = tmp_path / "tests" / "alpha" / "data"
+    data.mkdir(parents=True)
+    (data / "sample.json").write_text('{"n": 1}\n', encoding="utf-8")
+    line = 'DATA = Path("tests/alpha/data/sample.json")'
+    (tmp_path / "tests" / "alpha" / "test_data.py").write_text(f"from pathlib import Path\n\n{line}\n", encoding="utf-8")
+    planned = _rename(tmp_path, "alpha", "beta")
+    assert line in (tmp_path / "tests" / "alpha" / "test_data.py").read_text(encoding="utf-8")
+    edit = next(f for f in planned.files if f.path == "tests/alpha/test_data.py")
+    assert edit.result.kept == [(3, line)]
 
 
 def test_a_data_file_named_after_the_app_is_reported_by_the_plan(tmp_path: Path) -> None:
@@ -373,6 +503,26 @@ def test_fstring_fields_as_one_token() -> None:
         ("d", 'x = "{:d} {0:,d}".format(y)\n', 'x = "{:d} {0:,d}".format(y)\n', 1),
         ("r", 'x = "{!r}".format(y)\n', 'x = "{!r}".format(y)\n', 1),
         ("d", 'x = "d: {d}"\n', 'x = "tool: {tool}"\n', 0),  # not a directive
+        # strftime's directives (time, datetime, logging's datefmt), glibc's flags too
+        ("Y", 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 1),
+        ("m", 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 1),
+        ("H", 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 1),
+        ("I", 'x = "{:%I %p}".format(t)\n', 'x = "{:%I %p}".format(t)\n', 1),
+        ("a", 'x = t.strftime("%-e %^a")\n', 'x = t.strftime("%-e %^a")\n', 1),
+        # struct's format characters after a byte order or a count
+        ("I", 'x = struct.pack(">I", 5)\n', 'x = struct.pack(">I", 5)\n', 1),
+        ("d", 'x = struct.unpack(b"!d", y)\n', 'x = struct.unpack(b"!d", y)\n', 1),
+        ("H", 'x = struct.unpack("<2 H", y)\n', 'x = struct.unpack("<2 H", y)\n', 1),
+        ("I", 'x = "I am I"\n', 'x = "tool am tool"\n', 0),  # prose: the name
+        ("i", 'x = "hi i"\n', 'x = "hi tool"\n', 0),  # no byte order first: the name
+        # a \N{...} escape names a character: never the name (renamed, the file stopped compiling)
+        ("bullet", 'x = "\\N{bullet} "\n', 'x = "\\N{bullet} "\n', 0),
+        ("alpha", 'x = "\\N{greek small letter alpha}"\n', 'x = "\\N{greek small letter alpha}"\n', 0),
+        ("alpha", 'x = f"\\N{greek small letter alpha}{y}"\n', 'x = f"\\N{greek small letter alpha}{y}"\n', 0),
+        ("alpha", 'x = "\\N{greek small letter alpha} alpha"\n', 'x = "\\N{greek small letter alpha} tool"\n', 0),  # prose after it
+        # ... which the re module reads in a raw string, and after an escaped backslash: reported
+        ("alpha", 'x = re.compile(r"\\N{greek small letter alpha}")\n', 'x = re.compile(r"\\N{greek small letter alpha}")\n', 1),
+        ("alpha", 'x = "\\\\N{greek small letter alpha}"\n', 'x = "\\\\N{greek small letter alpha}"\n', 1),
     ],
 )
 @pytest.mark.filterwarnings("ignore::SyntaxWarning", "ignore::DeprecationWarning")  # "\m" is an invalid escape on purpose (3.11: a DeprecationWarning)
@@ -380,6 +530,60 @@ def test_string_prefixes_and_escapes_are_never_the_name(old: str, text: str, exp
     out = rewrite(text, Names(old, "tool"), python=True)
     assert out.text == expected and len(out.kept) == kept
     compile(out.text, "t.py", "exec")
+
+
+@pytest.mark.parametrize(
+    ("old", "text", "expected", "kept"),
+    [
+        # a command-line option of one letter: subprocess and parser arguments, a command in a string
+        ("m", 'subprocess.run([sys.executable, "-m", "pytest", "-q"])\n', 'subprocess.run([sys.executable, "-m", "pytest", "-q"])\n', 1),
+        ("c", 'subprocess.run([sys.executable, "-c", "print(1)"])\n', 'subprocess.run([sys.executable, "-c", "print(1)"])\n', 1),
+        ("q", 'subprocess.run(["pytest", "-q"])\n', 'subprocess.run(["pytest", "-q"])\n', 1),
+        ("v", 'cmd = ["pytest", "--v"]\n', 'cmd = ["pytest", "--v"]\n', 1),
+        ("v", 'parser.add_argument("-v", "--verbose")\n', 'parser.add_argument("-v", "--verbose")\n', 1),
+        ("m", 'os.system("python -m pip install rich")\n', 'os.system("python -m pip install rich")\n', 1),
+        ("m", "# run it with python -m pytest\n", "# run it with python -m pytest\n", 1),
+        ("M", 'subprocess.run([sys.executable, "-m", "pytest"])\n', 'subprocess.run([sys.executable, "-m", "pytest"])\n', 1),
+        ("m", 'subprocess.run([sys.executable, "-m", "m"])\n', 'subprocess.run([sys.executable, "-m", "tool"])\n', 1),  # the module after it is the app
+        # the file mode of an open-like call: positional, or a mode keyword
+        ("r", 'with open(p, "r") as f:\n    pass\n', 'with open(p, "r") as f:\n    pass\n', 1),
+        ("r", 'open(p, "r+")\n', 'open(p, "r+")\n', 1),
+        ("w", 'open(p, "w", encoding="utf-8")\n', 'open(p, "w", encoding="utf-8")\n', 1),
+        ("w", 'Path(p).open("w")\n', 'Path(p).open("w")\n', 1),
+        ("r", 'tarfile.open(p, "r:gz")\n', 'tarfile.open(p, "r:gz")\n', 1),
+        ("gz", 'tarfile.open(p, "w:gz")\n', 'tarfile.open(p, "w:gz")\n', 1),
+        ("w", 'os.fdopen(fd, "w")\n', 'os.fdopen(fd, "w")\n', 1),
+        ("x", 'zipfile.ZipFile(p, "x")\n', 'zipfile.ZipFile(p, "x")\n', 1),
+        ("a", 'logging.FileHandler(p, mode="a")\n', 'logging.FileHandler(p, mode="a")\n', 1),
+        ("c", 'shelve.open(p, flag="c")\n', 'shelve.open(p, flag="c")\n', 1),
+        # anywhere else a one-letter name is the name
+        ("m", 'x = "m is the app"\n', 'x = "tool is the app"\n', 0),
+        ("r", 'print("r")\n', 'print("tool")\n', 0),
+    ],
+)
+def test_a_one_letter_option_or_file_mode_is_never_the_name(old: str, text: str, expected: str, kept: int) -> None:
+    """Names of one letter are legal: renamed, `"-m"` became `"-beta"` (python -beta) and
+    `open(p, "r")` became `open(p, "beta")` (ValueError: invalid mode), and nothing was reported."""
+    out = rewrite(text, Names(old, "tool"), python=True)
+    assert out.text == expected and len(out.kept) == kept
+    compile(out.text, "t.py", "exec")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "char"),
+    [("bullet", "shooter", "\N{BULLET}"), ("alpha", "beta", "\N{GREEK SMALL LETTER ALPHA}")],
+)
+def test_a_character_name_escape_keeps_its_character(old: str, new: str, char: str) -> None:
+    """In `"\\N{bullet}"` the name in braces is a character's: renamed from bullet to shooter, the
+    file stopped compiling ("unknown Unicode character name"); from alpha to beta,
+    `"\\N{greek small letter alpha}"` became a beta, silently. Code around it still changes."""
+    text = f'import {old}.core\nMARK = "\\N{{{"greek small letter alpha" if old == "alpha" else old}}}"\nprint(MARK, {old}.core)\n'
+    out = rewrite(text, Names(old, new), python=True)
+    assert out.text == text.replace(f"import {old}.core", f"import {new}.core").replace(f"print(MARK, {old}.core)", f"print(MARK, {new}.core)")
+    assert out.count == 2 and out.kept == []
+    namespace: dict[str, Any] = {}
+    exec(compile(out.text.split("\n", 1)[1].split("\nprint")[0], "t.py", "exec"), namespace)  # the line that holds it
+    assert namespace["MARK"] == char
 
 
 @pytest.mark.parametrize(
@@ -397,6 +601,43 @@ def test_backslash_pairs_and_comments_are_plain_text(old: str, text: str, expect
 @pytest.mark.parametrize(
     ("text", "expected", "kept"),
     [
+        ('print("Welcome to alpha\\n")\n', 'print("Welcome to beta\\n")\n', 0),  # an escape after it: no folder n
+        ('print("alpha\\tready")\n', 'print("beta\\tready")\n', 0),
+        ('log.write(b"alpha\\r\\n")\n', 'log.write(b"beta\\r\\n")\n', 0),
+        ('USAGE = "Usage:\\nalpha [--frames N]"\n', 'USAGE = "Usage:\\nbeta [--frames N]"\n', 0),  # an escape before it
+        ('TITLE = f"Name:\\talpha {x}"\n', 'TITLE = f"Name:\\tbeta {x}"\n', 0),
+        ('DOC = """\\nalpha\\n"""\n', 'DOC = """\\nbeta\\n"""\n', 0),
+        ('x = r"\\nalpha"\n', 'x = r"\\nalpha"\n', 0),  # raw: \n is two characters, nalpha one word
+        ('x = "\\\\nalpha"\n', 'x = "\\\\nalpha"\n', 0),  # an escaped backslash: nalpha is one word
+        ("# Usage:\\nalpha\n", "# Usage:\\nalpha\n", 0),  # a comment has no escapes
+        ('x = "data/alpha\\\\x"\n', 'x = "data/alpha\\\\x"\n', 1),  # an escaped backslash after it: a folder named alpha
+    ],
+)
+def test_a_name_next_to_an_escape_is_the_name(text: str, expected: str, kept: int) -> None:
+    """In a string, an escape right after the name was taken for a path separator (`"alpha\\n"`
+    read as alpha/n, another folder named like the app: kept and reported), and one right before
+    it made the name part of a longer word (`"Usage:\\nalpha"`: neither renamed nor reported).
+    Prose next to an escape is prose like any other."""
+    out = rewrite(text, Names("alpha", "beta"), python=True, package_modules=frozenset({"core"}), package_entries=frozenset({"__init__.py", "core"}))
+    assert out.text == expected and len(out.kept) == kept, (out.text, out.kept)
+
+
+def test_a_name_next_to_an_escape_in_data_files(tmp_path: Path) -> None:
+    """The same in the strings of JSON and TOML files (and YAML's double-quoted ones), whose escapes
+    the rename knows; plain text has none, so `\\nalpha` there stays one word."""
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "tests" / "data.json").write_text('{"usage": "Usage:\\nalpha", "msg": "alpha\\n"}\n', encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "cfg.toml").write_text("usage = \"Usage:\\talpha\"\nraw = 'Usage:\\talpha'\n", encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "notes.md").write_text("Usage:\\nalpha\n", encoding="utf-8", newline="\n")
+    edits = {edit.path: edit for edit in rename.plan(tmp_path, "alpha", "beta").files}
+    assert edits["tests/data.json"].new == b'{"usage": "Usage:\\nbeta", "msg": "beta\\n"}\n'
+    assert edits["tests/cfg.toml"].new == b"usage = \"Usage:\\tbeta\"\nraw = 'Usage:\\talpha'\n"  # a literal string has no escapes
+    assert "tests/notes.md" not in edits
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "kept"),
+    [
         ('[tasks.a]\ncmd = ["x", "\\n", "n"]\n', '[tasks.a]\ncmd = ["x", "\\n", "tool"]\n', 0),  # a basic string escape
         ("[tasks.a]\ncmd = ['x', '\\n']\n", "[tasks.a]\ncmd = ['x', '\\n']\n", 1),  # a literal string: kept, reported
     ],
@@ -407,17 +648,22 @@ def test_toml_escapes_are_never_the_name(text: str, expected: str, kept: int) ->
 
 
 def test_json_and_toml_files_of_src_and_tests_keep_their_escapes(tmp_path: Path) -> None:
-    """A JSON fixture's "a\\n" once became "a\\tool" (a tab and "ool") for an app named n."""
+    """A JSON fixture's "a\\n" once became "a\\tool" (a tab and "ool") for an app named n. After an
+    escaped backslash (and in plain text, which has no escapes) n is a path segment: the package
+    right inside src/, another folder named like the app elsewhere (kept and reported)."""
     _write_project(tmp_path, "script", "n")
-    (tmp_path / "tests" / "data.json").write_text('{"sep": "a\\n", "app": "n", "path": "C:\\\\n", "odd": "\\q\\n"}\n', encoding="utf-8", newline="\n")
-    (tmp_path / "tests" / "cfg.toml").write_text("# a\\n n\nsep = \"a\\n\"\napp = \"n\"\nraw = 'a\\n'\n", encoding="utf-8", newline="\n")
-    (tmp_path / "tests" / "notes.txt").write_text("a\\n n\n", encoding="utf-8", newline="\n")  # plain text: no escapes
+    (tmp_path / "tests" / "data.json").write_text(
+        '{"sep": "a\\n", "app": "n", "path": "src\\\\n", "other": "C:\\\\n", "odd": "\\q\\n"}\n', encoding="utf-8", newline="\n"
+    )
+    (tmp_path / "tests" / "cfg.toml").write_text("# src\\n n\nsep = \"a\\n\"\napp = \"n\"\nraw = 'a\\n'\n", encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "notes.txt").write_text("src\\n n\na\\n\n", encoding="utf-8", newline="\n")  # plain text: no escapes
     edits = {edit.path: edit for edit in rename.plan(tmp_path, "n", "tool").files}
     json_edit, toml_edit = edits["tests/data.json"], edits["tests/cfg.toml"]
-    assert json_edit.new == b'{"sep": "a\\n", "app": "tool", "path": "C:\\\\tool", "odd": "\\q\\n"}\n'
-    assert toml_edit.new == b"# a\\tool tool\nsep = \"a\\n\"\napp = \"tool\"\nraw = 'a\\n'\n"
+    assert json_edit.new == b'{"sep": "a\\n", "app": "tool", "path": "src\\\\tool", "other": "C:\\\\n", "odd": "\\q\\n"}\n'
+    assert toml_edit.new == b"# src\\tool tool\nsep = \"a\\n\"\napp = \"tool\"\nraw = 'a\\n'\n"
     assert [n for n, _ in toml_edit.result.kept] == [4]  # a literal string's \n: no escape there, reported
-    assert edits["tests/notes.txt"].new == b"a\\tool tool\n"
+    assert edits["tests/notes.txt"].new == b"src\\tool tool\na\\n\n"
+    assert [n for n, _ in edits["tests/notes.txt"].result.kept] == [2]  # a\n: another folder named n
 
 
 def test_notebooks_and_yaml_keep_their_escapes(tmp_path: Path) -> None:
@@ -427,11 +673,11 @@ def test_notebooks_and_yaml_keep_their_escapes(tmp_path: Path) -> None:
     _write_project(tmp_path, "script", "n")
     cell = {"cell_type": "code", "source": ["from n.core import bench\n", "print(bench)\n"]}
     (tmp_path / "tests" / "demo.ipynb").write_text(json.dumps({"cells": [cell]}, indent=1) + "\n", encoding="utf-8", newline="\n")
-    (tmp_path / "tests" / "messages.yaml").write_text("greeting: \"hello\\n\"\napp: n\nplain: a\\n\n", encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "messages.yaml").write_text("greeting: \"hello\\n\"\napp: n\nplain: src\\n\n", encoding="utf-8", newline="\n")
     edits = {edit.path: edit for edit in rename.plan(tmp_path, "n", "b").files}
     notebook = json.loads(edits["tests/demo.ipynb"].new)
     assert notebook["cells"][0]["source"] == ["from b.core import bench\n", "print(bench)\n"]
-    assert edits["tests/messages.yaml"].new == b"greeting: \"hello\\n\"\napp: b\nplain: a\\b\n"  # a plain scalar has no escapes
+    assert edits["tests/messages.yaml"].new == b"greeting: \"hello\\n\"\napp: b\nplain: src\\b\n"  # a plain scalar has no escapes
 
 
 @pytest.mark.parametrize("preset", ["script", "raylib", "flet"])
@@ -444,6 +690,16 @@ def test_names_that_are_string_prefixes_or_escapes_keep_the_code_intact(tmp_path
         if rel_path.endswith(".py"):
             compile(data, rel_path, "exec")
             assert data == expected[rel_path], rel_path
+
+
+@pytest.mark.parametrize("new", ["q", "tool"])
+def test_the_png_encoder_survives_a_rename_from_i(tmp_path: Path, new: str) -> None:
+    """The flet skeleton's PNG encoder packs its chunk lengths with struct.pack(">I", ...): for an
+    app named I it became ">q" (8-byte lengths, a corrupt PNG) or ">tool" (struct.error)."""
+    _write_project(tmp_path, "flet", "I")
+    _rename(tmp_path, "I", new)
+    fractal = "src/tool/core/fractal.py" if new == "tool" else f"src/{new}/core/fractal.py"
+    assert _tree(tmp_path)[fractal] == presets.skeleton("flet", new)[fractal]
 
 
 def test_the_png_signature_survives_a_rename_from_n(tmp_path: Path) -> None:
@@ -847,6 +1103,39 @@ def test_a_local_import_of_the_package_under_a_module_rebinding() -> None:
     assert out.text == "import beta.core\ngame = None\n\ndef h():\n    import beta.gfx\n    return beta.gfx.Z\n"
 
 
+CAPTURED = [
+    # (the source, the new name, the lines kept): the lines kept are left as they are, the rest renamed
+    ('import alpha.core\n\n\ndef run(game: str) -> str:\n    return f"{game}: {alpha.core.bench.__name__}"\n', "game", [5]),  # a parameter
+    ("import alpha.core\nx = [alpha.core.score(game) for game in range(3)]\n", "game", [2]),  # a comprehension variable
+    ("import alpha.core\nf = lambda game: alpha.core.score(game)\n", "game", [2]),  # a lambda's
+    ("import alpha.core\n\n\ndef f():\n    game = 1\n    return alpha.core.x(game)\n", "game", [6]),  # a local
+    (
+        "import alpha.core\n\n\nclass Level:\n    game = 'easy'\n    speed = alpha.core.SPEED\n\n    def load(self):\n        return alpha.core.load()\n",
+        "game",
+        [6],  # a class attribute: the class body sees it, its methods do not
+    ),
+    ("import alpha.core\nfrom engine import game\n\n\ndef over():\n    return alpha.core.score(game)\n", "game", [1, 6]),  # the module binds it
+    ("import alpha.core\n\n\ndef labels(xs):\n    return list(map(str, xs)) + [alpha.core.NAME]\n", "map", [1, 5]),  # a builtin
+    ("def f(game):\n    import alpha.core\n    return alpha.core.x(game)\n", "game", [2, 3]),  # the import would rebind the parameter
+    ("import alpha.core\n\n\ndef other(game):\n    return game\n\n\ndef run():\n    return alpha.core.x()\n", "game", []),  # elsewhere: renamed
+]
+
+
+@pytest.mark.parametrize(("src", "new", "kept"), CAPTURED)
+def test_a_reference_the_new_name_would_capture_is_kept_and_reported(src: str, new: str, kept: list[int]) -> None:
+    """A rename wrote the new package name where that name was already bound another way: a
+    parameter, a local, a comprehension or lambda variable, a class attribute, a name of the
+    module (`from engine import game`) or a builtin (`map`). Renamed, `game.core.score()` read that
+    binding and the app failed at run time (or did something else), and the rename listed no line
+    to review. Those references are kept and reported, as under a binding of the old name."""
+    out = rewrite(src, Names("alpha", new), python=True)
+    lines, got = src.split("\n"), out.text.split("\n")
+    assert [n for n, _ in out.kept] == kept, out.text
+    for n, (before, after) in enumerate(zip(lines, got, strict=True), 1):
+        assert after == (before if n in kept else re.sub(r"\balpha\b", new, before)), (n, after)
+    compile(out.text, "t.py", "exec")
+
+
 def test_fstring_debug_field_of_the_bound_package() -> None:
     out = rewrite('import myapp\nx = f"{myapp=}" f"{myapp = !r}" f"{myapp=:>9}"\nf(myapp=1)\nmyapp = 2\n', Names("myapp", "beta"), python=True)
     # myapp = 2 rebinds the module name: nothing but the import changes, everything else is reported
@@ -945,6 +1234,25 @@ def test_undecodable_files_that_mention_the_old_name_are_warned_about(tmp_path: 
     assert "other.txt" not in err and "logo.png" not in err
 
 
+def test_utf16_and_utf32_files_that_mention_the_old_name_are_warned_about(tmp_path: Path) -> None:
+    """A UTF-16 text file (PowerShell 5.1's `>` and Out-File write one) holds NUL bytes, so the
+    name search skipped it as a binary, silently: its encoding's BOM says how to read it."""
+    _write_project(tmp_path, "script", "alpha")
+    tests = tmp_path / "tests"
+    for encoding in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
+        bom = "﻿".encode(encoding)
+        (tests / f"expected-{encoding}.txt").write_bytes(bom + "Welcome to alpha\r\n".encode(encoding))
+        (tests / f"other-{encoding}.txt").write_bytes(bom + "caf\xe9\r\n".encode(encoding))
+    (tests / "latin.txt").write_bytes("caf\xe9 alpha\n".encode("latin-1"))
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "notes.txt").write_bytes("﻿about alpha\r\n".encode("utf-16-le"))  # outside src/, tests/: listed
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    expected = [f"tests/expected-{e}.txt" for e in ("utf-16-be", "utf-16-le", "utf-32-be", "utf-32-le")]
+    assert planned.unreadable == [*expected, "tests/latin.txt"]
+    assert all(f"tests/other-{e}.txt" in planned.binary for e in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"))
+    assert "docs/notes.txt" in planned.mentions
+
+
 def _symlink_or_skip(link: Path, target: str, *, directory: bool = False) -> None:
     try:  # native separators: Windows cannot follow a relative target written with forward slashes
         link.symlink_to(target.replace("/", os.sep), target_is_directory=directory)
@@ -970,6 +1278,104 @@ def test_a_link_windows_cannot_follow_is_no_module(tmp_path: Path, monkeypatch: 
 
     monkeypatch.setattr(rename.os, "scandir", scandir)
     assert "ext" not in rename._package_modules(tmp_path, "alpha") and "core" in rename._package_modules(tmp_path, "alpha")
+
+
+def test_an_entry_of_src_that_cannot_be_read_never_hides_the_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """os.DirEntry.is_dir() raises for a link loop (ELOOP), a link into a folder the user may not
+    enter (EACCES), a dead network mount or a link Windows cannot follow (WinError 123): one such
+    entry in src/ made package_dir answer "no src/alpha/", so doctor reported the app package
+    missing, the hook blocked every commit, rename refused and apply skipped a pending rename."""
+    _write_project(tmp_path, "script", "alpha")
+    src = tmp_path / "src"
+    try:
+        (src / "loop").symlink_to("loop")  # a link to itself: stat says ELOOP
+    except OSError as e:
+        if sys.platform != "win32":
+            raise
+        print(f"no symlink here ({e}): only the faked entry below")
+    assert rename.package_dir(src, "alpha") == src / "alpha"
+    real = os.scandir
+
+    class Odd:
+        name, path = "ext", str(src / "ext")
+
+        def is_dir(self) -> bool:
+            raise OSError(22, "The filename, directory name, or volume label syntax is incorrect", self.path)
+
+    class Listing:
+        def __init__(self, path: Any) -> None:
+            self.entries = [*real(path), Odd()]
+
+        def __enter__(self) -> list[Any]:
+            return self.entries
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(rename.os, "scandir", lambda path: Listing(path) if Path(path) == src else real(path))
+    assert rename.package_dir(src, "alpha") == src / "alpha"
+    assert rename.package_dir(src, "ext") is None
+
+
+def _stat_denied(monkeypatch: pytest.MonkeyPatch, *paths: Path) -> None:
+    """os.stat refuses these paths and what is below them, as a folder this user may not enter
+    does (the tests also run as root, whom no folder refuses): Python 3.11-3.13's Path.is_file and
+    is_dir raised that PermissionError, os.path's say False."""
+    real = os.stat
+    blocked = [os.path.abspath(p) for p in paths]
+
+    def stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if not isinstance(path, int):
+            here = os.path.abspath(os.fsdecode(path))
+            if any(here == b or here.startswith(b + os.sep) for b in blocked):
+                raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat)
+
+
+def test_a_link_into_a_folder_this_user_may_not_enter_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A link in tests/ into another user's folder: Python 3.11-3.13's Path.is_dir raised
+    PermissionError in the plan, and rename (and an apply that renames) ended in an
+    internal-error traceback; 3.14's said nothing about the link. What it holds cannot be read,
+    so it may name the app: reported, as the links that do."""
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "alpha")
+    private = tmp_path / "private" / "inner"
+    private.mkdir(parents=True)
+    (private / "data.py").write_text("import alpha\n", encoding="utf-8")
+    link = root / "tests" / "fixtures"
+    try:
+        link.symlink_to(private, target_is_directory=True)
+    except OSError as e:
+        pytest.skip(f"cannot create a symbolic link here: {e}")
+    _stat_denied(monkeypatch, link, tmp_path / "private")
+    planned = rename.plan(root, "alpha", "beta")
+    assert [p.rstrip("/") for p in planned.linked] == ["tests/fixtures"], planned.linked
+
+
+def test_a_file_of_tests_this_user_may_not_look_at_stops_the_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folder of tests/ this user may list but not enter (mode 0644 after a `chmod -R 644`):
+    Python 3.11-3.13's Path.is_file raised PermissionError in the plan, and 3.14's said False:
+    its files were left out, kept the old imports, and nothing said so. The plan stops at such a
+    file, naming it, as it stops at any file it cannot read."""
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "tests" / "data").mkdir()
+    hidden = tmp_path / "tests" / "data" / "test_more.py"
+    hidden.write_text("import alpha\n", encoding="utf-8")
+    _stat_denied(monkeypatch, hidden)
+    real = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        if self == hidden:  # what a folder that is not searchable refuses too
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    with pytest.raises(PytError, match=r"rename: cannot read tests/data/test_more\.py: Permission denied; nothing was changed"):
+        rename.plan(tmp_path, "alpha", "beta")
+    assert rename.references_left(tmp_path, Names("alpha", "beta")).count("tests/data/test_more.py") == 1  # may name it: counted
 
 
 def test_links_in_src_and_tests_are_reported_never_rewritten(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1060,8 +1466,27 @@ def test_quiet_still_lists_what_must_be_reviewed(tmp_path: Path, monkeypatch: py
     rename.report(planned, dry=False)
     err = capsys.readouterr().err
     assert "left unchanged" in err and "src/beta/extra.py:5: return alpha.core" in err
-    assert "notes.md also mention 'alpha'" in err
+    assert "notes.md also mentions 'alpha'" in err
     assert "==> rename" not in err  # the progress stays hidden
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_the_lists_of_paths_agree_with_their_number(tmp_path: Path, capsys: pytest.CaptureFixture[str], count: int) -> None:
+    """The usual list after a rename of a project made with new is one file, README.md: it said
+    "README.md also mention 'p1' (edit them by hand...)". The verb and the pronoun follow the
+    number of paths, in the three lists."""
+    _write_project(tmp_path, "script", "alpha")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    paths = ["README.md", "docs/guide.md"][:count]
+    planned.mentions, planned.linked, planned.unreadable = list(paths), list(paths), list(paths)
+    capsys.readouterr()
+    rename.report(planned, dry=True)
+    err = capsys.readouterr().err
+    shown = ", ".join(paths)
+    s, them = ("s", "it") if count == 1 else ("", "them")
+    assert f"{shown} also mention{s} 'alpha' (edit {them} by hand if needed)" in err, err
+    assert f"(symbolic links or junctions: their targets may be shared): {shown} mention{s} 'alpha' or point{s} through it: edit {them} by hand" in err, err
+    assert f"(not UTF-8 text): {shown} mention{s} 'alpha': edit {them} by hand" in err, err
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes: POSIX")
@@ -1108,6 +1533,67 @@ def test_a_windows_junction_in_src_is_never_followed(tmp_path: Path, monkeypatch
     assert planned.linked == ["src/alpha/shared/"]
 
 
+def _fake_junction(monkeypatch: pytest.MonkeyPatch, folder: Path) -> None:
+    """`folder` (a real folder) reads as a Windows junction, as cmd_env._is_link sees one."""
+    import stat
+    import types
+
+    real_lstat = os.lstat
+
+    def lstat(path: Any, *a: Any, **k: Any) -> Any:
+        if Path(path) == folder:
+            return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_reparse_tag=cmd_env._JUNCTION)
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(cmd_env.os, "lstat", lstat)
+
+
+@pytest.mark.parametrize("how", ["symlink", "junction"])
+def test_a_linked_tests_folder_is_never_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], how: str) -> None:
+    """A tests/ folder that is itself a link or junction (tests -> ../shared/tests, shared between
+    projects) was followed, since os.walk follows its top: rename rewrote the shared files for
+    every project that shares them, and warned about nothing. It is a link like the ones below
+    it: never rewritten, named in the warning."""
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "alpha")
+    if how == "symlink":
+        shutil.move(root / "tests", tmp_path / "shared")
+        _symlink_or_skip(root / "tests", "../shared", directory=True)
+    else:
+        _fake_junction(monkeypatch, root / "tests")
+    before = {p.name: p.read_bytes() for p in (root / "tests").iterdir() if p.is_file()}
+    assert "import alpha.core.bench as bench" in before["test_core.py"].decode()
+    planned = rename.plan(root, "alpha", "beta")
+    assert not [f.path for f in planned.files if f.path.startswith("tests/")]
+    assert planned.linked == ["tests/"]
+    capsys.readouterr()
+    rename.report(planned, dry=False)
+    assert "warning: not rewritten (symbolic links or junctions: their targets may be shared): tests/ mentions 'alpha'" in capsys.readouterr().err
+    rename.apply_plan(root, planned)
+    assert {p.name: p.read_bytes() for p in (root / "tests").iterdir() if p.is_file()} == before
+    assert "import beta" in (root / "src" / "main.py").read_text(encoding="utf-8")  # the rest is renamed
+
+
+@pytest.mark.parametrize("how", ["symlink", "junction"])
+def test_a_linked_src_folder_stops_the_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """src/ itself a link or junction: the package lives in it, so the move went through the link
+    (into a folder other projects may share) and its files were rewritten there. Never followed,
+    it cannot be renamed without a half-made change: the plan stops before any write."""
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "alpha")
+    if how == "symlink":
+        shutil.move(root / "src", tmp_path / "shared")
+        _symlink_or_skip(root / "src", "../shared", directory=True)
+    else:
+        _fake_junction(monkeypatch, root / "src")
+    before = _tree(tmp_path)
+    with pytest.raises(PytError, match=r"src/ is a symbolic link or junction: rename never writes through one"):
+        rename.plan(root, "alpha", "beta")
+    assert _tree(tmp_path) == before
+
+
 def test_mentions_outside_src_and_tests_are_reported(tmp_path: Path) -> None:
     _write_project(tmp_path, "script", "alpha")
     files = {
@@ -1142,6 +1628,45 @@ def test_mentions_outside_src_and_tests_are_reported(tmp_path: Path) -> None:
     cache = "tests/.hypothesis/constants/0a1b2c3d"
     assert (tmp_path / cache).read_text(encoding="utf-8") == files[cache]  # a cache, never rewritten
     assert 'source = ["alpha"]' in pyproject.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("preset", "old", "new", "left"),
+    [
+        ("flet", "my-flet", "my_flet", ["# the my-flet app"]),
+        ("script", "Alpha", "alpha", ["# the Alpha app"]),
+        ("flet", "my_flet", "My-Flet", []),  # the package keeps its name: no leftover there
+        ("flet", "alpha", "beta", ['source = ["alpha"]', "# the alpha app"]),
+    ],
+)
+def test_the_pyproject_lines_a_rename_writes_are_never_left_unchanged(tmp_path: Path, preset: str, old: str, new: str, left: list[str]) -> None:
+    """Renamed to its package's spelling (my-flet -> my_flet, Alpha -> alpha), the plan looked for
+    what is left of the old name in the NEW pyproject.toml, where the new name is the old package:
+    the [project] name and the preset values it had just written were listed as "left unchanged
+    ... (not changed; review them)", and so was a reference to the package, which keeps its
+    name. Only what still holds the old spelling is listed."""
+    _write_project(tmp_path, preset, old)
+    pyproject = tmp_path / "pyproject.toml"
+    extra = f'\n[tool.pt-cov]\nsource = ["{rename.package_of(old)}"]\n# the {old} app\n'
+    pyproject.write_text(pyproject.read_text(encoding="utf-8") + extra, encoding="utf-8")
+    planned = rename.plan(tmp_path, old, new)
+    assert planned.pyproject is not None and f'name = "{new}"' in planned.pyproject.new
+    assert [line for _, line in planned.pyproject.kept] == left
+
+
+def test_a_crlf_pyproject_gets_its_preset_values_renamed_too(tmp_path: Path) -> None:
+    """A pyproject.toml with CRLF line endings (a Windows checkout, git's autocrlf): the preset
+    block was cut into lines at LF and joined again without a last line break, so it ended in a
+    lone CR, which the TOML scanner refuses. None of [tool.flet]'s product, company and copyright
+    was renamed, and all three were listed as "left unchanged"."""
+    _write_project(tmp_path, "flet", "alpha")
+    path = tmp_path / "pyproject.toml"
+    path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    assert planned.pyproject is not None and planned.pyproject.kept == []
+    flet = tomllib.loads(planned.pyproject.new)["tool"]["flet"]
+    assert (flet["product"], flet["company"], flet["copyright"]) == ("beta", "beta", "Copyright (C) beta")
+    assert "\n" not in planned.pyproject.new.replace("\r\n", "")  # its line endings stay
 
 
 def test_rename_accepts_a_pyproject_with_a_bom(tmp_path: Path) -> None:
@@ -1323,6 +1848,40 @@ def _git(cwd: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProc
         ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", *args],
         cwd=cwd, env=env, capture_output=True, text=True, check=False,
     )
+
+
+def test_git_changes_refuses_a_repository_git_is_missing_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitHub Desktop, Fork and SourceTree bring a git of their own, often not on PATH: in a
+    repository (a .git in or above the project) git_changes answered "not in git", and rename and
+    the rename of apply rewrote a dirty tree without a word (the dry run warned of nothing). Now
+    the tree could not be checked, which refuses like a git failure (--force goes ahead)."""
+    project = tmp_path / "repo" / "p"
+    project.mkdir(parents=True)
+    no_git = tmp_path / "bin"
+    no_git.mkdir()
+    monkeypatch.setenv("PATH", str(no_git))
+    if any((d / ".git").exists() for d in (project, *project.parents)):
+        pytest.skip("a .git above the test folder")
+    assert rename.git_changes(project) is None  # no repository at all: nothing to protect
+    (tmp_path / "repo" / ".git").mkdir()
+    changes = rename.git_changes(project)
+    assert changes == "git not found in PATH"
+    message = rename.dirty_tree_message(changes, "rename", "./pyt rename beta --force")
+    assert message is not None and message.startswith("could not check for uncommitted changes in git (git not found in PATH)")
+    assert message.endswith("To go ahead anyway: ./pyt rename beta --force")
+
+
+def test_rename_refuses_when_git_cannot_check_the_tree(command_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command: refused before anything is written, a warning in the dry run."""
+    root = command_project
+    (root / ".git").mkdir()
+    no_git = root.parent / "bin"
+    no_git.mkdir()
+    monkeypatch.setenv("PATH", str(no_git))
+    before = _tree(root)
+    with pytest.raises(PytError, match=r"could not check for uncommitted changes in git \(git not found in PATH\)") as e:
+        rename.cmd_rename(_load(root), ["beta"])
+    assert e.value.code == 2 and _tree(root) == before
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not found")
@@ -1513,6 +2072,74 @@ def test_an_interrupted_rename_says_how_to_finish(command_project: Path, monkeyp
     assert cmd_apply.load_record() == {**record, "name": "beta"}
 
 
+@pytest.mark.parametrize("step", ["the record", "render"])
+def test_a_state_file_it_cannot_write_says_the_files_are_already_renamed(command_project: Path, monkeypatch: pytest.MonkeyPatch, step: str) -> None:
+    """state.json that cannot be written once the files are renamed (another user's, read only,
+    locked on Windows), by the record right after the files or by render at the end: rename ended
+    with only `error: cannot write .pytemplate/state.json`, the re-lock and the generated files
+    left behind (and, for the record, the ruff tidy-up too), and a second `./pyt rename beta` said
+    "nothing to do". It tidies first and says the files are renamed and to run ./pyt apply."""
+    from runner import cmd_apply
+
+    cmd_apply.save_record({"name": "alpha", "preset": "script", "dependencies": [], "dev": []})
+    done: list[str] = []
+
+    def unwritable(*args: Any, **kwargs: Any) -> Any:
+        done.append(step)
+        raise PytError("cannot write .pytemplate/state.json: Permission denied")
+
+    monkeypatch.setattr(rename, "tidy_after", lambda cfg, plan_, clean, root=None: done.append("tidy"))
+    monkeypatch.setattr(cmd_env, "ensure_lock", lambda cfg: done.append("lock"))
+    if step == "the record":
+        monkeypatch.setattr(cmd_apply, "save_record", unwritable)
+    else:
+        monkeypatch.setattr(render, "apply", unwritable)
+    with pytest.raises(PytError, match="cannot write .pytemplate/state.json") as e:
+        rename.cmd_rename(_load(command_project), ["beta"])
+    assert "The files are already renamed: fix the problem above and run ./pyt apply" in str(e.value), str(e.value)
+    assert done == (["the record", "tidy"] if step == "the record" else ["tidy", "lock", "render"])
+    assert (command_project / "src" / "beta").is_dir() and not (command_project / "src" / "alpha").exists()
+
+
+def test_the_tidy_up_comes_before_the_relock(command_project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A re-lock that failed after the rename (offline, no solution) left the job to ./pyt apply,
+    which finds the names in line and tidies nothing: the files ruff had formatted stayed
+    unwrapped under a longer name, and the next commit's hook refused them. The tidy-up runs
+    first, with the ruff of the environment as it is (`--no-sync`: `--locked` and `--frozen` fail
+    on a lock that does not follow the new name yet), and a ruff that fails says so."""
+    calls: list[list[str]] = []
+
+    def fake_uv(env: Any, args: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append([str(a) for a in args])
+        return subprocess.CompletedProcess(args, 2 if "format" in calls[-1] else 0, "", "")
+
+    def failing_lock(cfg: Config) -> None:
+        calls.append(["lock"])
+        raise PytError("No solution found when resolving dependencies")
+
+    monkeypatch.setattr(envs, "uv", fake_uv)
+    monkeypatch.setattr(cmd_dev, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(cmd_dev, "ROOT", command_project)
+    monkeypatch.setattr(rename, "tidy_before", lambda cfg, plan_, root=None: rename.Tidy({f.path for f in rename._python_edits(plan_)}, set()))
+    monkeypatch.setattr(cmd_env, "ensure_lock", failing_lock)
+    with pytest.raises(PytError, match="The files are already renamed"):
+        rename.cmd_rename(_load(command_project), ["beta"])
+    ruff = [c for c in calls if "ruff" in c]
+    assert ruff and all(c[:3] == ["run", "--quiet", "--no-sync"] for c in ruff), calls
+    assert calls.index(ruff[0]) < calls.index(["lock"])
+    assert "ruff could not tidy the renamed files (exit code 2)" in capsys.readouterr().err
+
+
+def test_an_interrupt_before_the_tidy_up_says_to_tidy(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def interrupted(cfg: Config, plan_: rename.Plan, clean: rename.Tidy | None, root: Path | None = None) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rename, "tidy_after", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        rename.cmd_rename(_load(command_project), ["beta"])
+    assert "run ./pyt apply to finish (uv.lock and the generated files), then ./pyt lint --fix and ./pyt fmt" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("new", ["helpers", "other"])
 def test_rename_refuses_an_app_name_set_to_another_package(command_project: Path, new: str) -> None:
     """app.name set by hand to another package of src/ (src/helpers/): `rename helpers` said
@@ -1537,6 +2164,21 @@ def test_rename_to_the_same_name_is_not_done_while_pyproject_differs(command_pro
         rename.cmd_rename(_load(root), ["alpha"])
     assert rename.cmd_rename(_load(root), ["beta"]) == 0  # a real rename writes the name there too
     assert presets.project_name(pyproject.read_text(encoding="utf-8")) == "beta"
+
+
+@pytest.mark.parametrize("spelling", ["Alpha", "ALPHA"])
+def test_a_pyproject_name_of_another_spelling_gets_no_move_hint(command_project: Path, spelling: str) -> None:
+    """[project] name differs from app.name only in spelling (its package is app.name's own
+    folder): the refusal said "if src/alpha/ was moved by hand, move it back to src/alpha/"."""
+    from runner import cmd_apply
+
+    root = command_project
+    cmd_apply.save_record({"name": "alpha", "preset": "script", "dependencies": [], "dev": []})  # what `new` writes
+    pyproject = root / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', f'name = "{spelling}"', 1), encoding="utf-8")
+    with pytest.raises(PytError, match=rf"\[project\] name = '{spelling}'.\n  ./pyt apply writes 'alpha' there") as e:
+        rename.cmd_rename(_load(root), ["alpha"])
+    assert "moved by hand" not in str(e.value) and "src/alpha/ first" not in str(e.value)
 
 
 def test_dry_run_predicts_exactly_the_rerendered_files(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1581,6 +2223,92 @@ def test_dry_run_predicts_the_lock_like_the_real_run(command_project: Path, monk
     assert "would re-lock" not in lock_line("Alpha") and "up to date" in lock_line("Alpha")
     calls.clear()
     assert "would re-lock" in lock_line("beta") and calls == []  # another project name: re-locked anyway
+
+
+def test_a_dist_folder_that_cannot_be_listed_never_fails_a_rename_that_is_done(command_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once the files were renamed, re-locked and rendered, the note about the old artifacts listed
+    dist/: one this user may not read (left by `sudo ./pyt build`) raised PermissionError, which
+    cli.main reports as "cannot write dist", exit 2, for a rename that was done (and a second
+    `./pyt rename` said "nothing to do"). The note is left out then."""
+    root = command_project
+    dist = root / "dist"
+    (dist / "alpha-cpython-exe").mkdir(parents=True)
+    monkeypatch.setattr(rename, "DIST", dist)
+    real = Path.iterdir
+
+    def iterdir(self: Path) -> Any:
+        if self == dist:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    assert rename.cmd_rename(_load(root), ["beta"]) == 0
+    assert (root / "src" / "beta").is_dir() and _load(root).app.name == "beta"
+
+
+def test_the_lock_forecast_reads_the_name_uv_lock_holds(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The project name uv.lock holds decides, not the app's: after a hand edit of [project] name
+    and a `./pyt lock`, uv.lock holds that name, so a case-only rename re-locks it (the dry run
+    said "up to date", and under UV_FROZEN the rename ran before ensure_lock refused, the files
+    renamed). A [project] name line the rename sets to the name uv.lock holds already is checked
+    after the write (the dry run said "would re-lock": the line edited by hand failed the check)."""
+    root = command_project
+    pyproject, lock = root / "pyproject.toml", root / "uv.lock"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "gamma"', 1), encoding="utf-8", newline="\n")
+    entry = 'version = 1\n\n[[package]]\nname = "{}"\nversion = "0.1.0"\nsource = {{ virtual = "." }}\n'
+    stale = [False]
+
+    def fake_uv(env: Any, args: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 1 if stale[0] else 0, "", "")
+
+    monkeypatch.setattr(envs, "uv", fake_uv)
+    monkeypatch.setattr(render, "pyproject_outdated", lambda cfg: False)
+
+    def lock_line() -> str:
+        monkeypatch.setattr(proc, "DRY_RUN", True)
+        capsys.readouterr()
+        assert rename.cmd_rename(_load(root), ["Alpha"]) == 0
+        return next(ln for ln in capsys.readouterr().err.splitlines() if ln.strip().startswith("uv.lock"))
+
+    lock.write_text(entry.format("gamma"), encoding="utf-8")  # `./pyt lock` after the hand edit
+    assert "would re-lock (uv lock): the project name changes" in lock_line()
+    monkeypatch.setenv("UV_FROZEN", "1")
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    before = _everything(root)
+    with pytest.raises(PytError, match=r"\(the project name changes\), but UV_FROZEN is set"):
+        rename.cmd_rename(_load(root), ["Alpha"])
+    assert _everything(root) == before
+    monkeypatch.delenv("UV_FROZEN")
+    lock.write_text(entry.format("alpha"), encoding="utf-8")  # no `./pyt lock` after it
+    stale[0] = True  # the check of today reads the line edited by hand
+    line = lock_line()
+    assert "names the project 'Alpha' already: checked (uv lock --check) once [project] name is set" in line and "would re-lock" not in line
+
+
+@pytest.mark.parametrize("cause", ["UV_FROZEN", "UV_LOCKED", "broken markers"])
+def test_what_the_lock_would_refuse_is_refused_before_the_first_write(command_project: Path, monkeypatch: pytest.MonkeyPatch, cause: str) -> None:
+    """cmd_env.ensure_lock refuses a re-lock under the user's UV_FROZEN or UV_LOCKED (uv lock
+    writes nothing with them) and managed pyproject parts it cannot rewrite (the closing marker
+    gone): rename made those refusals once every file was renamed ("The files are already renamed
+    ... ./pyt apply"), and its dry run said "would re-lock". Both are refused before the first
+    write, in the dry run too, as apply refuses them in make_plan."""
+    root = command_project
+    if cause == "broken markers":
+        pyproject = root / "pyproject.toml"
+        text = pyproject.read_text(encoding="utf-8")
+        assert text.count("  # <<< pytemplate\n") == 1
+        pyproject.write_text(text.replace("  # <<< pytemplate\n", "\n"), encoding="utf-8", newline="\n")
+        message = "pyproject.toml: the [tool.uv] block managed by pytemplate is broken"
+    else:
+        monkeypatch.setenv(cause, "1")
+        message = f"uv.lock must follow pyproject.toml (the project name changes), but {cause} is set"
+    before = _everything(root)
+    for dry in (True, False):
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        with pytest.raises(PytError) as e:
+            rename.cmd_rename(_load(root), ["beta"])
+        assert str(e.value).startswith(f"rename: {message}") and str(e.value).endswith("Nothing was changed"), e.value
+        assert _everything(root) == before
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not found")
@@ -1647,6 +2375,250 @@ def test_a_failed_write_undoes_the_rename(tmp_path: Path, monkeypatch: pytest.Mo
     assert e.value.code == 2
     assert _everything(tmp_path) == before  # byte for byte, CRLF included (no temporary file left either)
     assert calls[target].name.startswith((".pyproject.toml.", ".pytemplate.toml.")) or fail_at != "last"
+
+
+@pytest.mark.parametrize(
+    ("stop", "at"),
+    [("ctrl+c", 3), ("ctrl+c", 1), ("ctrl+c", 0), ("sigterm", 3), ("sighup", 2)],
+    ids=["ctrl+c between two writes", "ctrl+c after the first write", "ctrl+c right after the move", "sigterm", "sighup"],
+)
+@pytest.mark.usefixtures("default_signals")
+def test_an_interrupted_rename_is_undone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stop: str, at: int) -> None:
+    """A Ctrl+C, SIGTERM or SIGHUP while the files were written (in process: no child to pass it
+    on to) left src/beta/ moved, some files rewritten and pytemplate.toml naming the old app, with
+    only `error: interrupted`: the next rename said "src/alpha/ not found". It is undone as a
+    write that fails is, then goes on (cli.main ends the command as it ends every interrupted
+    one); the signals are exceptions only while the files are written."""
+    import signal
+
+    if stop != "ctrl+c" and sys.platform == "win32":
+        pytest.skip("SIGTERM and SIGHUP: POSIX")
+    _write_project(tmp_path, "flet", "alpha", crlf=True)
+    before = _everything(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    real_replace, real_move = rename._replace_bytes, rename._move_dir
+    calls: list[Path] = []
+
+    def interrupt() -> None:
+        if stop == "ctrl+c":
+            raise KeyboardInterrupt
+        signum = signal.SIGTERM if stop == "sigterm" else signal.SIGHUP
+        assert signal.getsignal(signum) is not signal.SIG_DFL, f"{stop} would end the runner at once: the tree half-renamed"
+        os.kill(os.getpid(), signum)  # the runner's handler raises at the next bytecode
+        time.sleep(1)
+
+    def move(root: Path, old: str, new: str) -> None:
+        real_move(root, old, new)
+        if at == 0 and not calls:  # the move of the rename, not the one back
+            calls.append(root / new)
+            interrupt()
+
+    def replace(path: Path, data: bytes) -> None:
+        calls.append(path)
+        real_replace(path, data)
+        if len(calls) == at:
+            interrupt()
+
+    monkeypatch.setattr(rename, "_move_dir", move)
+    monkeypatch.setattr(rename, "_replace_bytes", replace)
+    with pytest.raises(KeyboardInterrupt) as e:
+        rename.apply_plan(tmp_path, planned)
+    assert _everything(tmp_path) == before  # byte for byte: the folder back, every file restored
+    assert "rename: interrupted. The rename was undone" in capsys.readouterr().err
+    if stop != "ctrl+c":
+        assert isinstance(e.value, proc.Interrupted) and e.value.signum == (signal.SIGTERM if stop == "sigterm" else signal.SIGHUP)
+        assert signal.getsignal(e.value.signum) is signal.SIG_DFL  # only while the files are written
+
+
+@pytest.mark.parametrize("first", ["ctrl+c", "a write that fails"])
+@pytest.mark.usefixtures("default_signals")
+def test_a_second_ctrl_c_waits_for_the_undo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], first: str) -> None:
+    """A Ctrl+C (or a write that fails) while rename writes is undone; a second Ctrl+C during that
+    undo raised KeyboardInterrupt inside it (SIGINT keeps Python's own handler): files stayed
+    rewritten, src/beta/ stayed moved, and the line that says what was undone never came. The
+    undo goes on to its end first."""
+    import signal
+
+    _write_project(tmp_path, "flet", "alpha")
+    before = _everything(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    real = rename._replace_bytes
+    calls: list[Path] = []
+
+    def replace(path: Path, data: bytes) -> None:
+        calls.append(path)
+        if len(calls) == 3:  # the third write
+            if first == "ctrl+c":
+                raise KeyboardInterrupt
+            raise OSError(errno.ENOSPC, "No space left on device", str(path))
+        if len(calls) == 4:  # the undo puts the first file back: a Ctrl+C there
+            signal.raise_signal(signal.SIGINT)
+        real(path, data)
+
+    monkeypatch.setattr(rename, "_replace_bytes", replace)
+    with pytest.raises((KeyboardInterrupt, PytError)) as e:  # the second Ctrl+C escaped the undo
+        rename.apply_plan(tmp_path, planned)
+    assert isinstance(e.value, KeyboardInterrupt if first == "ctrl+c" else PytError), repr(e.value)
+    # every write undone (the interrupted one too, after a Ctrl+C), the folder moved back
+    assert len(calls) == (6 if first == "ctrl+c" else 5) and _everything(tmp_path) == before
+    told = capsys.readouterr().err if first == "ctrl+c" else str(e.value)
+    assert "The rename was undone" in told, told
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler  # given back once the undo is done
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM and SIGHUP are POSIX signals")
+@pytest.mark.parametrize("second", ["sigterm", "sighup"])
+@pytest.mark.parametrize("first", ["ctrl+c", "a write that fails", "a file edited meanwhile"])
+@pytest.mark.usefixtures("default_signals")
+def test_a_termination_signal_waits_for_the_undo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], first: str, second: str
+) -> None:
+    """A SIGTERM or SIGHUP (a closed terminal, timeout, docker stop) during the undo of a failed
+    write, a file edited meanwhile or a Ctrl+C raised proc.Interrupted inside the undo
+    (_terminations_interrupt ignores only those after a first one of them): files kept their new
+    bytes, src/beta/ stayed moved, and neither the error nor the line that says what was undone
+    came. The undo goes on to its end first, and the signals get their handlers back."""
+    import signal
+
+    _write_project(tmp_path, "flet", "alpha")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    if first == "a file edited meanwhile":  # the last file the rename writes
+        edited = tmp_path / "pyproject.toml"
+        edited.write_bytes(edited.read_bytes() + b"\n# saved by an editor meanwhile\n")
+    before = _everything(tmp_path)
+    real = rename._replace_bytes
+    calls: list[Path] = []
+    undoing: list[Path] = []
+    stop = signal.SIGTERM if second == "sigterm" else signal.SIGHUP
+
+    def replace(path: Path, data: bytes) -> None:
+        calls.append(path)
+        if len(calls) == 3 and first != "a file edited meanwhile":  # the third write
+            if first == "ctrl+c":
+                raise KeyboardInterrupt
+            raise OSError(errno.ENOSPC, "No space left on device", str(path))
+        if path in calls[:-1]:  # a file written before: the undo puts it back, and a signal comes
+            undoing.append(path)
+            signal.raise_signal(stop)
+        real(path, data)
+
+    monkeypatch.setattr(rename, "_replace_bytes", replace)
+    with pytest.raises((KeyboardInterrupt, PytError)) as e:  # proc.Interrupted escaped the undo
+        rename.apply_plan(tmp_path, planned)
+    assert isinstance(e.value, KeyboardInterrupt if first == "ctrl+c" else PytError), repr(e.value)
+    assert undoing and _everything(tmp_path) == before  # every write undone, the folder moved back
+    told = capsys.readouterr().err if first == "ctrl+c" else str(e.value)
+    assert "The rename was undone" in told, told
+    for signum in (signal.SIGTERM, signal.SIGHUP):  # given back once the undo is done
+        assert signal.getsignal(signum) is signal.SIG_DFL
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+@pytest.mark.parametrize("changed", ["tests/test_core.py", "pytemplate.toml", "pyproject.toml"])
+def test_a_file_edited_after_the_plan_is_never_overwritten(tmp_path: Path, changed: str) -> None:
+    """rename and apply plan every file, report, run the ruff check (uv run, a sync maybe), then
+    write the planned bytes: an edit saved in between (an editor's autosave, `--force` in a tree
+    being edited) was overwritten without a word. A file that no longer holds what was planned
+    stops the rename: what was written is undone, and the edit stays."""
+    _write_project(tmp_path, "script", "alpha")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    path = tmp_path / changed
+    path.write_bytes(path.read_bytes() + b"\n# saved by an editor meanwhile\n")
+    before = _everything(tmp_path)
+    with pytest.raises(PytError, match=rf"rename: {re.escape(changed)} changed after the rename was planned") as e:
+        rename.apply_plan(tmp_path, planned)
+    assert "The rename was undone" in str(e.value) and "run it again" in str(e.value), str(e.value)
+    assert _everything(tmp_path) == before  # the edit kept, every write undone, the folder back
+
+
+def _hard_link(existing: Path, new: Path) -> None:
+    try:
+        os.link(existing, new)
+    except (AttributeError, OSError) as e:
+        pytest.skip(f"no hard link here: {e}")
+
+
+def test_a_file_with_two_names_in_the_project_is_renamed_once(tmp_path: Path) -> None:
+    """Two names of one file in src/ and tests/ (hard links: jdupes -L, cp -al, an rsync
+    --link-dest restore) are two planned edits with the same bytes. write_whole rewrites such a
+    file in place, keeping its links, so the first write gave the other name its new bytes too,
+    which apply_plan took for an editor's save: every rename of the project was refused and undone
+    ("an editor saved it?"), the next one too. The other name holding the new bytes is done."""
+    _write_project(tmp_path, "script", "alpha")
+    shared = tmp_path / "tests" / "data" / "shared.py"
+    shared.parent.mkdir()
+    shared.write_text("import alpha.core\nX = alpha.core\n", encoding="utf-8")
+    _hard_link(shared, tmp_path / "src" / "alpha" / "shared.py")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    assert {"src/alpha/shared.py", "tests/data/shared.py"} <= {f.path for f in planned.changed_files}
+    rename.apply_plan(tmp_path, planned)
+    moved = tmp_path / "src" / "beta" / "shared.py"
+    assert moved.read_text(encoding="utf-8") == "import beta.core\nX = beta.core\n"
+    assert os.path.samefile(moved, shared)  # still one file, with its two names
+    assert not (tmp_path / "src" / "alpha").exists()
+    assert "import beta.app" in (tmp_path / "src" / "main.py").read_text(encoding="utf-8")
+
+
+def test_a_file_with_two_names_rewritten_two_ways_stops_the_rename(tmp_path: Path) -> None:
+    """The names of one file may get different bytes (a .py name rewritten as code, keeping a
+    keyword argument, and a .txt name as text): whichever is written, the other cannot hold its
+    own. The rename stops, names both, says what to do and undoes what it wrote; it never says an
+    editor saved the file."""
+    _write_project(tmp_path, "script", "alpha")
+    code = tmp_path / "tests" / "shared.py"
+    code.write_text("import alpha\nf(alpha=1)\n", encoding="utf-8")
+    _hard_link(code, tmp_path / "tests" / "shared.txt")
+    before = _everything(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    assert {"tests/shared.py", "tests/shared.txt"} <= {f.path for f in planned.changed_files}
+    with pytest.raises(PytError, match=r"are one file \(hard links\)") as e:
+        rename.apply_plan(tmp_path, planned)
+    told = str(e.value)
+    assert "tests/shared.py" in told and "tests/shared.txt" in told and "Make them two files" in told, told
+    assert "The rename was undone" in told and "an editor" not in told, told
+    assert _everything(tmp_path) == before  # every write undone (through either name), the folder back
+    assert os.path.samefile(code, tmp_path / "tests" / "shared.txt")
+
+
+def test_a_file_that_never_names_the_app_is_only_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """plan() tokenized every Python file of src/ and tests/ and split every text file into lines
+    three times, even one that never mentions the old name: a data asset of 100 MB (a level, a
+    CSV) took 11 s and about 950 MB. Such a file is searched once and left alone."""
+    _write_project(tmp_path, "raylib", "alpha")
+    level = "12345,67890,some text here,another field,3.14159\n" * 2000
+    (tmp_path / "src" / "assets").mkdir(exist_ok=True)
+    (tmp_path / "src" / "assets" / "level.csv").write_text(level, encoding="utf-8")
+    helper = '"""Maths helpers."""\n\n\ndef double(x: int) -> int:\n    return 2 * x\n'
+    (tmp_path / "src" / "alpha" / "maths.py").write_text(helper, encoding="utf-8")
+    split: list[str] = []
+    tokenized: list[str] = []
+    real_changes, real_code = rename._line_changes, rename._python_code
+    monkeypatch.setattr(rename, "_line_changes", lambda old, new: split.append(old) or real_changes(old, new))
+    monkeypatch.setattr(rename, "_python_code", lambda text, pkg: tokenized.append(text) or real_code(text, pkg))
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    assert level not in split and helper not in tokenized
+    assert split and tokenized  # the files that mention it are rewritten as before
+    assert not {"src/assets/level.csv", "src/alpha/maths.py"} & {f.path for f in planned.files}
+    for text in (level, helper):  # rewrite() itself returns such a text as it is
+        assert rename.rewrite(text, rename.Names("alpha", "beta"), python=True) == rename.Rewrite(text=text)
+
+
+def test_an_interrupt_in_a_case_only_move_puts_the_folder_back(tmp_path: Path) -> None:
+    """A case-only move (alpha -> Alpha on a case-insensitive file system) goes through a
+    temporary name, and an interrupt between its two steps leaves the package there: the undo
+    reads where the folder is from the listing of src/, as the swap of `pyt install` does."""
+    _write_project(tmp_path, "script", "alpha")
+    before = _everything(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    src = tmp_path / "src"
+    (src / "alpha").rename(rename._case_tmp(src / "alpha"))  # where the interrupt left it
+    assert rename._undo(tmp_path, planned, [], moved=False) == "The rename was undone (the files written so far were restored)"
+    assert _everything(tmp_path) == before
+    (src / "alpha").rename(src / "beta")  # an interrupt right after a plain move
+    assert rename._undo(tmp_path, planned, [], moved=False).startswith("The rename was undone")
+    assert _everything(tmp_path) == before
+    assert rename._undo(tmp_path, planned, [], moved=False).startswith("The rename was undone")  # not moved: stays
+    assert _everything(tmp_path) == before
 
 
 def test_a_write_that_fails_midway_leaves_the_file_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1842,6 +2814,9 @@ def test_ruff_tidy_after_a_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(render, "ROOT", root)
     monkeypatch.setattr(cmd_dev, "BUILD", tmp_path / "build")
     text = (root / "pytemplate.toml").read_text(encoding="utf-8").replace('relaxed = "off"', 'relaxed = "strict"')
+    # ruff runs through uv in this project's .venv: its python.cpython, never the skeleton's 3.14
+    # (in a project on another minor uv replaced the .venv with an empty one, and ruff never ran)
+    text = config.set_value(text, "python", "cpython", config.load(set()).python.cpython)
     (root / "pytemplate.toml").write_text(text, encoding="utf-8", newline="\n")
     cfg = _load(root)
     tests = root / "tests"
@@ -1863,3 +2838,75 @@ def test_ruff_tidy_after_a_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     wrapped = (tests / "test_wrap.py").read_text(encoding="utf-8")
     assert all(len(line) <= 100 for line in wrapped.splitlines()), wrapped
     assert (tests / "test_mess.py").read_text(encoding="utf-8") == "from zzzzzzzzzzzz.core import bench\nZ=bench\n"
+
+
+def test_ruff_tidy_in_a_project_folder_named_like_a_variable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ruff expands $NAME in its --config argument and in the paths of that file (CLAUDE.md
+    15.1): with absolute paths the tidy-up of a project in a folder such as app$v2 was skipped
+    without a word. The real ruff of .venv, started in the project as rename starts it."""
+    ruff = ROOT / ".venv" / ("Scripts/ruff.exe" if sys.platform == "win32" else "bin/ruff")
+    if not ruff.is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    root = tmp_path / "app$v2"
+    root.mkdir()
+    _write_project(root, "script", "zzz")
+    for module, name, value in ((render, "ROOT", root), (cmd_dev, "ROOT", root), (cmd_dev, "BUILD", root / ".build"), (rename, "_RUNNER_CWD", root)):
+        monkeypatch.setattr(module, name, value)
+    monkeypatch.delenv("v2", raising=False)
+
+    def uv(_env: envs.PyEnv, argv: list[Any], *, cwd: Path, **_kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        return subprocess.run([str(ruff), *args[args.index("ruff") + 1 :]], cwd=cwd, capture_output=True, text=True, timeout=120, check=False)
+
+    monkeypatch.setattr(envs, "uv", uv)
+    long = "from zzz.core.bench import __name__ as bench_module_name_that_fills_the_line_up_to_a_hundred_cols\n"
+    wrap = root / "tests" / "test_wrap.py"
+    wrap.write_text(long + "\nY = bench_module_name_that_fills_the_line_up_to_a_hundred_cols\n", encoding="utf-8")
+    planned = rename.plan(root, "zzz", "zzzzzzzzzzzz")
+    clean = rename.tidy_before(_load(root), planned, root)
+    assert clean is not None and "tests/test_wrap.py" in clean.formatted
+    rename.apply_plan(root, planned)
+    rename.tidy_after(rename.validate_config(planned.config.new), planned, clean, root)
+    assert all(len(line) <= 100 for line in wrap.read_text(encoding="utf-8").splitlines())
+
+
+@pytest.mark.parametrize("supported", [["cpython", "mypyc"], ["cpython"]], ids=["the preset's backends", "no profile checks the order"])
+def test_the_tidy_up_sorts_the_imports_check_all_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, supported: list[str]) -> None:
+    """Every preset's default: `off` on cpython (no I rules, the active profile) and `mypyc` on
+    mypyc (I), which `check all` and the generated CI run too. The tidy-up asked only the active
+    profile and never sorted: renamed from zzz to alpha, `import helpers` stayed before
+    `import alpha...`, check all failed with I001, and `./pyt lint --fix` (the active profile)
+    fixed nothing. Where no profile of a supported backend checks the order, it stays as it was.
+    The real ruff of .venv, started in the project as rename starts it."""
+    ruff = ROOT / ".venv" / ("Scripts/ruff.exe" if sys.platform == "win32" else "bin/ruff")
+    if not ruff.is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "zzz")
+    toml = root / "pytemplate.toml"
+    toml.write_text(config.set_value(toml.read_text(encoding="utf-8"), "backend", "supported", supported), encoding="utf-8", newline="\n")
+    for module, name, value in ((render, "ROOT", root), (cmd_dev, "ROOT", root), (cmd_dev, "BUILD", root / ".build"), (rename, "_RUNNER_CWD", root)):
+        monkeypatch.setattr(module, name, value)
+
+    def uv(_env: envs.PyEnv, argv: list[Any], *, cwd: Path, **_kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        return subprocess.run([str(ruff), *args[args.index("ruff") + 1 :]], cwd=cwd, capture_output=True, text=True, timeout=120, check=False)
+
+    monkeypatch.setattr(envs, "uv", uv)
+    (root / "src" / "helpers.py").write_text('def greet() -> str:\n    return "hello"\n', encoding="utf-8")
+    test = root / "tests" / "test_helpers.py"
+    test.write_text("import helpers\nimport zzz.core.bench as bench\n\n\ndef test_greet() -> None:\n    assert helpers.greet() and bench\n", encoding="utf-8")
+    planned = rename.plan(root, "zzz", "alpha")
+    clean = rename.tidy_before(_load(root), planned, root)
+    assert clean is not None
+    rename.apply_plan(root, planned)
+    rename.tidy_after(rename.validate_config(planned.config.new), planned, clean, root)
+    text = test.read_text(encoding="utf-8")
+    if "mypyc" in supported:  # sorted: check all's mypyc profile finds no I001
+        assert text.index("import alpha.core.bench") < text.index("import helpers"), text
+        mypyc_profile = cmd_dev._profile_file(_load(root), "mypyc", "ruff")
+        r = subprocess.run([str(ruff), "check", "--config", cmd_dev.config_arg(mypyc_profile), "--select", "I001", "tests/test_helpers.py"], cwd=root, capture_output=True, text=True, timeout=120, check=False)
+        assert r.returncode == 0, r.stdout + r.stderr
+    else:  # nothing checks the order: the file keeps it
+        assert text.index("import helpers") < text.index("import alpha.core.bench"), text

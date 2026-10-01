@@ -15,6 +15,46 @@ local function server(opts, name)
   return opts.servers[name]
 end
 
+-- proc.base_env drops PYTHONHOME and PYTHONPATH for every tool the runner starts: a PYTHONHOME
+-- kills a Python ("Failed to import encodings module"), a PYTHONPATH can shadow a stdlib module.
+-- The launchers and init.pyt_env keep them off the runner too. The plugin starts Python tools
+-- itself - mypy, the uvx basedpyright entry point, the debug adapter - so it clears them the same
+-- way. Empty is unset for CPython (like init.pyt_env); an LSP `cmd_env` merges over the process
+-- environment, so "" clears them there (nvim-lint's `env` and the debug adapter's `options.env`
+-- replace it instead: mypy_env and dap.adapter_env leave the two names out of a whole copy).
+local NO_PYTHON_HOME = { PYTHONHOME = "", PYTHONPATH = "" }
+
+---A path inside the project as a root-relative native path. The mypy linter runs with cwd = root,
+---and on Windows nvim-lint wraps it in `cmd.exe /C`, which splits an absolute path at & (no space),
+---removes ^ and expands %NAME% before mypy sees it (libuv quotes an argument only when it holds a
+---space, tab or double quote). A relative path under root carries none of the root's own such
+---characters, so it survives (like the bare `mypy` the linter runs instead of an absolute path).
+local function under_root(path)
+  local root = pt.root()
+  if not root or not path or path == "" then
+    return path
+  end
+  -- under_root runs only on Windows (its caller checks pt.is_win), where a backslash is a
+  -- separator; vim.fs.normalize converts it only on a real Windows host, so fold it here too
+  -- (a POSIX backslash is a file-name character, but this is never reached off Windows).
+  local function fwd(p)
+    return (pt.normalize(p):gsub("\\", "/"))
+  end
+  local p = fwd(path)
+  local r = fwd(root):gsub("/+$", "")
+  local pc, rc = p, r
+  if pt.is_win then
+    pc, rc = p:lower(), r:lower()
+  end
+  if pc == rc then
+    return "."
+  end
+  if pc:sub(1, #rc + 1) == rc .. "/" then
+    return pt.native(p:sub(#rc + 2))
+  end
+  return pt.native(p)
+end
+
 -- --- which-key ---------------------------------------------------------------------------------
 
 function M.which_key(_, opts)
@@ -67,6 +107,10 @@ function M.lsp(_, opts)
   if cmd then
     s.cmd, s.mason = cmd, false
   end
+  -- the uvx basedpyright runs a Python entry point (pyright's Node server behind it); a caller's
+  -- PYTHONHOME kills it before it starts, a PYTHONPATH can shadow a stdlib module (NO_PYTHON_HOME).
+  -- vim.lsp merges cmd_env over the environment, and it is harmless for a Node or native server.
+  s.cmd_env = vim.tbl_extend("force", tbl(s.cmd_env), NO_PYTHON_HOME)
   -- ruff from .venv: the version pinned in uv.lock, the same one ./pyt check runs
   local ruff = server(opts, "ruff")
   ruff.enabled = true
@@ -95,6 +139,11 @@ function M.mypy_args()
   }
   local python = pt.venv_exe(info.envs.tools, "python")
   if info.pypy_enabled and info.typing.python_version and python then
+    -- on Windows the linter goes through `cmd.exe /C`, which mangles an absolute path holding
+    -- & ^ or %NAME%; the linter runs with cwd = root, so a root-relative path reaches mypy intact
+    if pt.is_win then
+      python = under_root(python)
+    end
     vim.list_extend(args, { "--python-version", info.typing.python_version, "--python-executable", python })
   end
   return args
@@ -105,6 +154,10 @@ local function mypy_env()
   local env = vim.fn.environ()
   env.PYTHONUTF8 = "1" -- like the runner (proc.base_env)
   env.VIRTUAL_ENV = nil
+  -- nvim-lint REPLACES the environment with this table, so dropping the keys (not "") is what
+  -- keeps mypy from dying on a caller's PYTHONHOME / a shadowing PYTHONPATH (NO_PYTHON_HOME)
+  env.PYTHONHOME = nil
+  env.PYTHONPATH = nil
   -- the path even before .venv exists: the linter is built once, ./pyt setup may come later
   local mypy = pt.venv_exe(pt.info().envs.tools, "mypy")
   if pt.is_win and mypy then
@@ -152,9 +205,23 @@ function M.mypy_linter()
     cmd = function()
       return pt.is_win and "mypy" or (pt.tool("mypy") or "mypy")
     end,
-    args = M.mypy_args(),
+    -- off Windows the absolute buffer path is appended by nvim-lint and reaches mypy as typed;
+    -- on Windows nvim-lint wraps the linter in `cmd.exe /C`, which mangles an absolute path with
+    -- & ^ or %NAME%, so the last argument is the buffer's root-relative path (cwd = root): a
+    -- function ELEMENT, which nvim-lint calls at every run, for the linted buffer (the current
+    -- one). `args` itself must stay a list, nvim-lint's `(string|fun():string)[]`: its Windows
+    -- wrapper unpacks it into `cmd.exe /C mypy ...`, and a function there stopped every run.
+    args = (function()
+      local out = M.mypy_args()
+      if pt.is_win then
+        out[#out + 1] = function()
+          return under_root(vim.api.nvim_buf_get_name(0))
+        end
+      end
+      return out
+    end)(),
     stdin = false,
-    append_fname = true,
+    append_fname = not pt.is_win,
     stream = "both",
     ignore_exitcode = true,
     cwd = pt.root(), -- finds .mypy.ini and prints paths relative to it (the parser needs that)
@@ -194,7 +261,10 @@ end
 
 -- --- neotest ------------------------------------------------------------------------------------
 
-local SKIP_DIRS = { dist = true, build = true, typings = true, __pycache__ = true, node_modules = true }
+-- The root's own folders (builds, stubs, packages of other tools) hold no test; below it such a
+-- name is the user's own folder (tests/build/), whose tests were never found. No test anywhere in
+-- a dot folder or __pycache__.
+local ROOT_DIRS = { dist = true, build = true, typings = true, node_modules = true }
 
 function M.neotest(_, opts)
   opts.adapters = tbl(opts.adapters)
@@ -213,7 +283,7 @@ function M.neotest(_, opts)
   opts.discovery = tbl(opts.discovery)
   local prev = opts.discovery.filter_dir
   opts.discovery.filter_dir = function(name, rel, root)
-    if name:sub(1, 1) == "." or SKIP_DIRS[name] then
+    if name:sub(1, 1) == "." or name == "__pycache__" or (ROOT_DIRS[name] and rel == name) then
       return false
     end
     return prev == nil or prev(name, rel, root)
@@ -222,7 +292,9 @@ end
 
 -- --- venv-selector ------------------------------------------------------------------------------
 
----pyright/basedpyright find .venv through pyrightconfig.json (venvPath/venv): no automatic switch.
+---pyright/basedpyright find .venv through pyrightconfig.json (venvPath/venv): no automatic switch
+---to a cached environment. Its uv flow for PEP 723 scripts has no switch of its own (the buffer's
+---venv_selector_disabled also drops a user's $VIRTUAL_ENV): dap.setup keeps the debugger on .venv.
 function M.venv_selector(_, opts)
   opts.options = tbl(opts.options)
   opts.options.cached_venv_automatic_activation = false

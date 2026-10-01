@@ -13,6 +13,7 @@ import dataclasses
 import datetime
 import json
 import math
+import os
 import re
 import tomllib
 import typing
@@ -763,13 +764,26 @@ def read_text() -> str:
     return _read()[0]
 
 
+# What tomllib.loads raises for a text it cannot read: TOMLDecodeError (a ValueError), and two
+# more that ended every command, help included, in an internal-error traceback: a plain
+# ValueError for an integer of more than 4300 digits (sys.int_max_str_digits; no TOML integer
+# either, those hold 64 bits) and RecursionError for arrays or inline tables nested about a
+# thousand deep.
+TOML_ERRORS = (ValueError, RecursionError)
+
+
+def toml_error(e: BaseException) -> str:
+    """What is wrong with the text, for a message: RecursionError's own words name nothing."""
+    return "arrays or tables nested too deeply" if isinstance(e, RecursionError) else str(e)
+
+
 def load(builtin_commands: set[str] | None = None) -> Config:
     if not CONFIG_FILE.is_file():
         raise PytError(f"{CONFIG_FILE.name} not found in the project root")
     try:
         data = tomllib.loads(read_text())
-    except tomllib.TOMLDecodeError as e:
-        raise PytError(f"pytemplate.toml is not valid TOML: {e}") from None
+    except TOML_ERRORS as e:
+        raise PytError(f"pytemplate.toml is not valid TOML: {toml_error(e)}") from None
     cfg: Config = _build(Config, data, "")
     validate(cfg, builtin_commands)
     return cfg
@@ -792,10 +806,12 @@ def compiled_paths(cfg: Config) -> list[str]:
 def import_path(folder: Path) -> Path:
     """What Python imports for the module whose package folder would be `folder`: the folder
     when it holds __init__.py, else `<folder>.py` when that file exists, else the folder when it
-    exists (a namespace package, maybe one left holding only __pycache__), else `<folder>.py`."""
+    exists (a namespace package, maybe one left holding only __pycache__), else `<folder>.py`.
+    os.path: a path it cannot look at (a folder this user may not enter) is none of them; Python
+    3.11-3.13's Path.is_file raised PermissionError there (doctor, apply: a traceback)."""
     file = folder.with_name(folder.name + ".py")
-    package = (folder / "__init__.py").is_file() or not file.is_file()
-    return folder if package and folder.is_dir() else file
+    package = os.path.isfile(folder / "__init__.py") or not os.path.isfile(file)
+    return folder if package and os.path.isdir(folder) else file
 
 
 # --- editing pytemplate.toml while keeping comments --------------------------------------------
@@ -1079,8 +1095,8 @@ def set_value(text: str, table: str, key: str, value: Any) -> str:
     rendered = toml_value(value)
     try:
         before = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
-        raise PytError(f"pytemplate.toml is not valid TOML: {e}") from None
+    except TOML_ERRORS as e:
+        raise PytError(f"pytemplate.toml is not valid TOML: {toml_error(e)}") from None
     # A list first in the layout of the old array (its comments kept), else on one line
     for layout in ((value, None) if isinstance(value, list) else (None,)):
         try:
@@ -1099,7 +1115,7 @@ def _only_changed(before: dict[str, Any], text: str, path: tuple[str, ...], valu
     """Whether `text` parses as `before` with only `path` set to `value`."""
     try:
         after = tomllib.loads(text)
-    except tomllib.TOMLDecodeError:
+    except TOML_ERRORS:
         return False
     expected = copy.deepcopy(before)
     node: Any = expected
@@ -1124,8 +1140,8 @@ def update_file(changes: list[tuple[str, str, Any]]) -> None:
         new = set_value(new, table, key, value)
     try:
         tomllib.loads(new)
-    except tomllib.TOMLDecodeError as e:  # set_value checks each edit; this guards the sum
-        raise PytError(f"pytemplate.toml: the change would break the file ({e}); nothing was written") from None
+    except TOML_ERRORS as e:  # set_value checks each edit; this guards the sum
+        raise PytError(f"pytemplate.toml: the change would break the file ({toml_error(e)}); nothing was written") from None
     if new != old and not proc.DRY_RUN:
         try:
             write_whole(CONFIG_FILE, (("\ufeff" if bom else "") + new).encode("utf-8"))

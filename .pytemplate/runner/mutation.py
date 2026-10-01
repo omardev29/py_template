@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import ast
 import bisect
+import codecs
 import difflib
 import io
 import itertools
@@ -54,16 +55,16 @@ import tokenize
 import warnings
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, Any
 
 from . import envs, proc, ui
 from .config import Config
-from .e2e import child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt
-from .presets import _git_path
-from .project import IS_WINDOWS, ROOT, TOOLS, check_private_dir, scratch_name, venv_python
+from .e2e import PYTEST_VARIABLES, check_ceiling, child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt, unusable
+from .presets import _git_path, rebase_local_sources
+from .project import IS_WINDOWS, ROOT, TOOLS, check_private_dir, lock_refusal, make_private_dir, scratch_name, venv_python
 from .ui import PytError
 
 SCOPE = ".pytemplate/runner"  # the modules mutated, relative to the project
@@ -102,8 +103,6 @@ if sys.platform == "win32":  # a test run's process group: it ignores the consol
     NEW_GROUP = subprocess.CREATE_NEW_PROCESS_GROUP
 else:
     NEW_GROUP = 0
-# a user's PYTEST_ADDOPTS (-n auto, --lf...) and PYTEST_PLUGINS would change what every run means
-PYTEST_VARIABLES = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS")
 
 
 # --- options ------------------------------------------------------------------------------------
@@ -262,7 +261,7 @@ def parse_diff(text: str) -> dict[str, set[int]]:
 
 
 def _git(root: Path, env: Mapping[str, str], *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git is None:
         raise PytError("selftest --mutation needs git: its workers are git repositories, and --diff asks git", 3)
     try:
@@ -286,6 +285,9 @@ def changed_lines(root: Path, base: str, env: Mapping[str, str]) -> dict[str, se
     tree (uncommitted changes included), and every line of an untracked module. The options
     that shape the output are all given, whatever the user's git configuration says (hunks
     merged by diff.interHunkContext would count the lines between them as changed)."""
+    # A folder git cannot read at all (no repository, dubious ownership) is git's reason, exit 3:
+    # the check of `base` below fails there too, and told the user to fetch it
+    _git(root, env, "rev-parse", "--git-dir")
     if _git(root, env, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}", check=False).returncode != 0:
         raise PytError(f"selftest --mutation --diff: {base!r} names no commit here (fetch it first, e.g. git fetch origin main)")
     text = _git(
@@ -504,12 +506,27 @@ def made(answer: Mapping[str, Any], original: bytes, file: str) -> tuple[str, st
     try:
         with _COMPILE_LOCK, warnings.catch_warnings():
             warnings.simplefilter("ignore")  # SyntaxWarnings of a mutant are no verdict
-            compile(code, file, "exec", dont_inherit=True)
+            # the bytes, as Python reads the module: a mutant of one saved with a UTF-8 BOM keeps
+            # it (U+FEFF first), which compile refuses in a str ("no valid Python", every mutant)
+            compile(code.encode("utf-8"), file, "exec", dont_inherit=True)
     except SyntaxError as e:
         return SKIPPED, f"the mutant is no valid Python: {e.msg} (line {e.lineno})", code
     except ValueError as e:  # a NUL byte, up to Python 3.11.3 (a SyntaxError since)
         return SKIPPED, f"the mutant is no valid Python: {e}", code
     return NOT_RUN, "", code
+
+
+def make_mutant(m: Mutant, original: bytes, snapshot: Path, driver: Driver) -> tuple[str, str, str | None]:
+    """The mutant `m` of the module whose bytes are `original` (its copy in `snapshot`, which
+    Cosmic Ray reads), as made() judges it. A module saved with a UTF-8 BOM is read without it, as
+    Python reads it and as Cosmic Ray places its mutants (parso leaves the BOM out of line 1's
+    columns), and its mutant keeps it, as Cosmic Ray's do."""
+    text = original.decode("utf-8-sig")
+    own = own_mutant(m, text)
+    if own is not None and original.startswith(codecs.BOM_UTF8):
+        own = "\ufeff" + own
+    request = {"op": "mutate", "path": str(snapshot / m.file), "operator": m.operator, "occurrence": m.occurrence}
+    return made({"code": own} if own is not None else driver.ask(request), original, m.file)
 
 
 def mutant_diff(original: str, mutated: str, limit: int = 12) -> list[str]:
@@ -549,11 +566,14 @@ _KEYBOARD_INTERRUPT = re.compile(r"^!+ KeyboardInterrupt !+$")  # pytest's banne
 
 def _interrupted_at(output: str) -> str | None:
     """Where pytest says a KeyboardInterrupt ended its session (the line after its banner:
-    "path:line: KeyboardInterrupt"), None when none did."""
+    "path:line: KeyboardInterrupt"), None when none did. A line over 200 characters keeps its
+    end: pytest names the test file by its absolute path, and under a long folder (a long
+    TMPDIR or base) the first 200 characters were folders, the file and line cut off."""
     lines = output.splitlines()
     for i, line in enumerate(lines):
         if _KEYBOARD_INTERRUPT.match(line.strip()):
-            return next((x.strip()[:200] for x in lines[i + 1 :] if x.strip()), "KeyboardInterrupt")
+            where = next((x.strip() for x in lines[i + 1 :] if x.strip()), "KeyboardInterrupt")
+            return where if len(where) <= 200 else "..." + where[-197:]
     return None
 
 
@@ -567,6 +587,17 @@ def _first_failure(output: str) -> str:
 def _last_line(output: str) -> str:
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     return lines[-1][:200] if lines else "no output"
+
+
+def _why_line(output: str) -> str:
+    """The line that says why, for a run with no pytest summary: pytest's own error line
+    (`ERROR: ...`, `pytest: error: ...`, a usage error) if there is one, else the last line
+    (the plain `rootdir:` line said nothing)."""
+    for line in reversed([line.strip() for line in output.splitlines() if line.strip()]):
+        low = line.lower()
+        if low.startswith("error:") or low.startswith("error ") or ": error:" in low or "usage:" in low:
+            return line[:200]
+    return _last_line(output)
 
 
 def classify(code: int | None, output: str, *, stopped: bool = False) -> tuple[str, str]:
@@ -588,13 +619,13 @@ def classify(code: int | None, output: str, *, stopped: bool = False) -> tuple[s
         return KILLED, f"a KeyboardInterrupt ended the tests: {where}"
     counts = pytest_counts(output)
     if counts is None:
-        return ERROR, f"exit code {proc.exit_code(code)} without pytest's summary line: {_last_line(output)}"
+        return ERROR, f"exit code {proc.exit_code(code)} without pytest's summary line: {_why_line(output)}"
     failures = _failures(counts)
     if code == 0 and failures == 0:
         return SURVIVED, ""
     if code in (1, 2) and failures:
         return KILLED, _first_failure(output)
-    return ERROR, f"exit code {proc.exit_code(code)}: {_last_line(output)}"
+    return ERROR, f"exit code {proc.exit_code(code)}: {_why_line(output)}"
 
 
 # --- Cosmic Ray (tools/mutation_cr.py) ------------------------------------------------------------
@@ -614,7 +645,7 @@ class Driver:
         self._lock = threading.Lock()
         try:
             self._child: subprocess.Popen[str] = subprocess.Popen(
-                argv, cwd=log.parent, env=proc.base_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err,
+                argv, cwd=log.parent, env=envs.without_lock_mode(proc.base_env()), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err,
                 text=True, encoding="utf-8", errors="replace",
             )  # fmt: skip
         except OSError as e:
@@ -680,8 +711,8 @@ def list_mutants(driver: Driver, root: Path, files: Sequence[str], changed: Mapp
         listed = answer.get("mutants")
         if "error" in answer or not isinstance(listed, list):
             raise PytError(f"selftest --mutation: Cosmic Ray could not list the mutants of {rel}: {answer.get('error', answer)}", 1)
-        try:
-            chosen = select(rel, listed, data.decode("utf-8"), None if changed is None else changed.get(rel, set()))
+        try:  # utf-8-sig: a module saved with a BOM is read as Python reads it (ast refuses U+FEFF)
+            chosen = select(rel, listed, data.decode("utf-8-sig"), None if changed is None else changed.get(rel, set()))
         except (SyntaxError, ValueError) as e:  # not UTF-8 (a UnicodeDecodeError is one), a NUL byte up to Python 3.11.3
             raise PytError(f"selftest --mutation: {rel} is no Python the runner can read: {e}", 1) from None
         originals[rel] = data
@@ -719,15 +750,24 @@ def default_base() -> Path:
 
 
 def prepare_base(base: Path, root: Path = ROOT) -> None:
-    if base.resolve() == root.resolve() or root.resolve() in base.resolve().parents:
-        raise PytError("selftest --mutation: the scratch base cannot be inside the project")
-    if base.exists() and not base.is_dir():
-        raise PytError(f"selftest --mutation: {base} is not a directory")
-    check_private_dir(base, "scratch folder (TMPDIR)")
-    if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
-        raise PytError(f"selftest --mutation: {base} is not empty and was not made by selftest --mutation (no {MARKER})")
-    base.mkdir(mode=0o700, parents=True, exist_ok=True)
-    (base / MARKER).write_text("Made by ./pyt selftest --mutation: safe to delete.\n", encoding="utf-8", newline="\n")
+    try:  # a base it cannot look into (below a folder it may not enter: Path.exists raises there on
+        # Python 3.11-3.13; its own without the read bit; a link loop: RuntimeError on 3.11 and 3.12)
+        resolved = base.resolve()
+        if resolved == root.resolve() or root.resolve() in resolved.parents:
+            raise PytError("selftest --mutation: the scratch base cannot be inside the project")
+        check_ceiling(base)  # the workers' git is kept inside it (child_env): refused before anything is made
+        if base.exists() and not base.is_dir():
+            raise PytError(f"selftest --mutation: {base} is not a directory")
+        check_private_dir(base, "scratch folder (TMPDIR)")
+        if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
+            raise PytError(f"selftest --mutation: {base} is not empty and was not made by selftest --mutation (no {MARKER})")
+    except (OSError, RuntimeError) as e:  # it was an internal-error traceback, exit 1
+        raise PytError(f"selftest --mutation: cannot use the scratch folder {base}: {unusable(e)}: set TMPDIR to another folder") from None
+    try:  # a TMPDIR below a file, in a folder it may not write, on a read-only mount
+        make_private_dir(base, "scratch folder (TMPDIR)")
+        (base / MARKER).write_text("Made by ./pyt selftest --mutation: safe to delete.\n", encoding="utf-8", newline="\n")
+    except OSError as e:  # it was an internal-error traceback, exit 1 (as --e2e's and --nvim's bases say it)
+        raise PytError(f"selftest --mutation: cannot create the scratch folder {base}: {e.strerror or e}: set TMPDIR to another folder") from None
 
 
 @contextmanager
@@ -745,8 +785,8 @@ def base_lock(base: Path) -> Iterator[None]:
                 import fcntl
 
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise PytError(f"selftest --mutation: another run is using {base}: wait for it to end") from None
+        except OSError as e:
+            raise lock_refusal("selftest --mutation", base, e) from None
         try:
             yield
         finally:
@@ -761,16 +801,49 @@ def base_lock(base: Path) -> Iterator[None]:
 
 def listed_files(root: Path, env: Mapping[str, str]) -> list[str]:
     """What a worker's copy holds: the files git lists (tracked, and untracked but not ignored),
-    as the working tree has them."""
+    as the working tree has them. git lists a submodule, and a repository nested in the project
+    (untracked, `libs/inner/`), as one folder, which make_copy skipped: their own files are listed
+    in its place, as git lists them there (each repository's ignores its own), as `new` copies a
+    submodule. A local library kept in a submodule (`./pyt add ./libs/mylib`) was missing from
+    every worker, whose `uv sync --locked` failed and stopped the run. One that is not checked out
+    (no .git in it: git there would answer for the project around it) holds nothing."""
     out = _git(root, env, "ls-files", "-z", "--cached", "--others", "--exclude-standard").stdout
-    return sorted({os.fsdecode(p) for p in out.split(b"\0") if p})
+    found: set[str] = set()
+    for name in {os.fsdecode(p) for p in out.split(b"\0") if p}:
+        folder = root / name
+        if not folder.is_dir() or folder.is_symlink():
+            found.add(name)
+        elif os.path.lexists(folder / ".git"):
+            prefix = name.rstrip("/")
+            found.update(f"{prefix}/{inner}" for inner in listed_files(folder, env))
+    return sorted(found)
+
+
+def executables(root: Path, env: Mapping[str, str]) -> list[str]:
+    """The files the project's index records as executable (mode 100755); none where git cannot
+    list them."""
+    r = _git(root, env, "ls-files", "-s", "-z", check=False)
+    found: list[str] = []
+    for entry in r.stdout.split(b"\0") if r.returncode == 0 else []:
+        meta, _, path = entry.partition(b"\t")
+        if path and meta.split(b" ", 1)[0] == b"100755":
+            found.append(os.fsdecode(path))
+    return found
 
 
 def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, str], contents: Mapping[str, bytes] | None = None) -> None:
     """A copy of the project with a git repository of its own (one commit of every file), so the
     tests that ask git about the project find one. Links stay links (where no link can be made,
     Windows without the right, the file or folder a link names takes its place). The files
-    `contents` names hold its bytes (list_mutants' snapshot), not the working tree's."""
+    `contents` names hold its bytes (list_mutants' snapshot), not the working tree's. Its index
+    records the project's executables as such: Git for Windows' `git init` writes core.filemode
+    = false (NTFS keeps no x bit), and `git add` then records every new file as 100644, so pyt
+    and pyt.ps1 lost the 100755 that test_launcher_sh and test_launcher_win read, and the
+    baselines of runner.project and runner.cmd_install failed (presets._git_init stages a new
+    project's launchers so too). What the project names outside its folder by a relative path,
+    a local library (`./pyt add ../mylib`: pyproject.toml and uv.lock) or a link's target, is
+    named from the copy (presets.rebase_local_sources, _rebase_links): from <base>/w<i> it named
+    another folder, and every worker's `uv sync --locked` stopped the run."""
     contents = contents or {}
     for rel, data in contents.items():
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -792,9 +865,45 @@ def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, st
                 shutil.copytree(src, target)
             else:
                 shutil.copy2(src, target)
+    rebase_local_sources(root, dest)
+    _rebase_links(root, dest, files)
     _git(dest, env, "init", "-q")
     _git(dest, env, "add", "-A")
+    # only what this index holds: a file the project tracks past its .gitignore (`git add -f`, a
+    # vendored library with its x bit) is left out by add -A, and update-index refused it ("cannot
+    # add to the index"), which stopped every worker
+    indexed = {os.fsdecode(p) for p in _git(dest, env, "ls-files", "-z").stdout.split(b"\0") if p}
+    marked = [rel for rel in executables(root, root_env()) if rel in indexed and (dest / rel).is_file() and not (dest / rel).is_symlink()]
+    for i in range(0, len(marked), 100):  # a Windows command line holds 32767 characters
+        _git(dest, env, "update-index", "--chmod=+x", "--", *marked[i : i + 100])
     _git(dest, env, *GIT_IDENTITY, "commit", "-q", "--no-verify", "-m", "selftest --mutation")
+
+
+def _rebase_links(root: Path, dest: Path, files: Sequence[str]) -> None:
+    """A link of the project with a relative target names from the copy what it names in the
+    project: a file or folder outside the project (`assets -> ../../shared`) the same one, one
+    inside it the copy's own. Copied as it was, the first named another one from <base>/w<i>.
+    One the copy holds as what it names (Windows without the right to make links) stays."""
+    real_root, real_dest = os.path.realpath(root), os.path.realpath(dest)
+    for rel in files:
+        copy = dest / rel
+        if not (root / rel).is_symlink() or not copy.is_symlink():
+            continue
+        target = os.readlink(root / rel)
+        if os.path.isabs(target):
+            continue
+        folder = os.path.dirname(rel)
+        aimed = os.path.normpath(os.path.join(real_root, folder, target))
+        inside = aimed == real_root or aimed.startswith(real_root.rstrip(os.sep) + os.sep)
+        wanted = os.path.normpath(os.path.join(real_dest, os.path.relpath(aimed, real_root))) if inside else aimed
+        if os.path.normpath(os.path.join(real_dest, folder, target)) == wanted:
+            continue
+        try:
+            new = os.path.relpath(wanted, os.path.join(real_dest, folder))
+        except ValueError:  # another drive (Windows)
+            new = wanted
+        copy.unlink()
+        os.symlink(new, copy, target_is_directory=os.path.isdir(aimed))
 
 
 def sync_copy(venv: envs.PyEnv, copy: Path) -> None:
@@ -814,7 +923,7 @@ def worker_env(worker_copy: Path, home: Path, tmp: Path, base_env: Mapping[str, 
     XDG ones default below its home): whatever a mutant makes a test write there stays in the
     base. `keep` holds uv's own folders as uv resolves them outside (nvimtest.uv_dirs: its cache,
     Pythons and tools), which the moved home would otherwise take away."""
-    env = {k: v for k, v in base_env.items() if not k.upper().startswith("XDG_") and k.upper() not in PYTEST_VARIABLES}
+    env = {k: v for k, v in envs.without_lock_mode(base_env).items() if not k.upper().startswith("XDG_") and k.upper() not in PYTEST_VARIABLES}
     env["HOME"] = str(home)
     if IS_WINDOWS:
         env.update(USERPROFILE=str(home), LOCALAPPDATA=str(home / "AppData" / "Local"), APPDATA=str(home / "AppData" / "Roaming"))
@@ -870,7 +979,7 @@ def descendants(pid: int) -> list[int]:
             if len(fields) > 1 and fields[1].isdigit():
                 children.setdefault(int(fields[1]), []).append(int(name))
     else:
-        ps = shutil.which("ps")
+        ps = proc.find_program("ps")
         try:
             out = b"" if ps is None else subprocess.run([ps, "-A", "-o", "pid=", "-o", "ppid="], stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=30).stdout
         except (OSError, subprocess.TimeoutExpired):
@@ -929,11 +1038,20 @@ class Runs:
 
     def run(self, worker: Worker, tests: Sequence[str], timeout: float, junit: Path | None = None) -> tuple[int | None, str, float]:
         """pytest on `tests` in the worker's copy: (exit code or None when ended, output, seconds).
-        The same seed for Hypothesis every time: a mutant is judged on the inputs its baseline had."""
+        The same seed for Hypothesis every time: a mutant is judged on the inputs its baseline had.
+        The suite's own settings (-c, as cli.cmd_selftest passes them), never those the copy's
+        pyproject.toml gives the app's tests: a coverage gate there failed every baseline.
+        --rootdir=. keeps the test ids and the JUnit classnames junit_seconds reads."""
         argv = [
-            str(worker.python), "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", "--color=no", f"--basetemp={worker.tmp}",
-            "--hypothesis-seed=0", *([f"--junitxml={junit}"] if junit else []), *tests,
+            str(worker.python), "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", "-c", f"{TESTS}/pytest.ini", "--rootdir=.",
+            "--color=no", f"--basetemp={worker.tmp}", "--hypothesis-seed=0", *([f"--junitxml={junit}"] if junit else []), *tests,
         ]  # fmt: skip
+        # A run that a time limit or a stop killed, or a test that a mutant made fail before it put
+        # a folder's mode back, leaves folders pytest's own cleanup of --basetemp cannot remove (no
+        # read or search bit): the next run of the worker errored at setup (FileExistsError), a
+        # kill for classify. rmtree empties it first, giving such folders back to their owner.
+        with suppress(OSError):
+            rmtree(worker.tmp)
         start = time.perf_counter()
         code: int | None = None
         with worker.log.open("wb") as out:
@@ -1118,7 +1236,14 @@ def selftest(cfg: Config, args: list[str]) -> int:
     if report.failed():
         ui.error("selftest --mutation: a baseline failed or some mutants could not be judged (above)")
         return 1
-    ui.ok("selftest --mutation: every mutant judged")
+    c = report.counts()
+    judged = c[KILLED] + c[TIMEOUT] + c[SURVIVED]
+    if c[UNTESTED]:  # mutants of a module no test file imports were never run (never judged)
+        ui.ok(f"selftest --mutation: {judged} mutant(s) judged, {c[UNTESTED]} untested (no test file imports their module)")
+    elif not judged:  # no mutant to test (no runner line changed since --diff's BASE), or every one skipped
+        ui.ok("selftest --mutation: no mutant judged" + (f" ({c[SKIPPED]} skipped)" if c[SKIPPED] else ""))
+    else:
+        ui.ok("selftest --mutation: every mutant judged")
     return 0
 
 
@@ -1161,7 +1286,8 @@ def run(cfg: Config, opts: Options, uv: str, root: Path, base: Path) -> Report:
 def deferred_interrupts() -> Iterator[list[int]]:
     """Ctrl+C, SIGTERM and SIGHUP wait while the block runs (a cleanup, the report): the list
     gets each one that came, and the old handlers come back at its end. Main thread only: other
-    threads never get a signal."""
+    threads never get a signal. A signal the runner ignores stays ignored (SIGHUP under nohup,
+    SIGINT in a background job): recorded, it made a run that went on through it interrupted."""
     import signal
 
     got: list[int] = []
@@ -1169,7 +1295,7 @@ def deferred_interrupts() -> Iterator[list[int]]:
     if threading.current_thread() is threading.main_thread():
         for name in ("SIGINT", "SIGTERM", "SIGHUP"):
             number = getattr(signal, name, None)  # no SIGHUP on Windows
-            if number is not None:
+            if number is not None and signal.getsignal(number) is not signal.SIG_IGN:
                 saved.append((number, signal.signal(number, lambda signum, frame: got.append(signum))))
     try:
         yield got
@@ -1254,12 +1380,9 @@ def _test(cfg: Config, opts: Options, uv: str, root: Path, base: Path, tests: Ma
 
     def mutant(worker: Worker, m: Mutant) -> None:
         original = originals[m.file]
-        own = own_mutant(m, original.decode("utf-8"))
-        request = {"op": "mutate", "path": str(snapshot / m.file), "operator": m.operator, "occurrence": m.occurrence}
-        answer = {"code": own} if own is not None else driver.ask(request)
-        m.status, m.detail, code_text = made(answer, original, m.file)
+        m.status, m.detail, code_text = make_mutant(m, original, snapshot, driver)
         if code_text is not None:
-            m.diff = mutant_diff(original.decode("utf-8"), code_text)
+            m.diff = mutant_diff(original.decode("utf-8-sig"), code_text.removeprefix("\ufeff"))
         if code_text is not None and m.status == NOT_RUN:
             target = worker.copy / m.file
             b = report.baselines[m.module]
@@ -1286,12 +1409,14 @@ def _test(cfg: Config, opts: Options, uv: str, root: Path, base: Path, tests: Ma
 
 def _remove_workers(base: Path) -> None:
     """The workers' copies (a .venv each), homes and temp folders, and the snapshot of the
-    modules: they always go."""
+    modules: they always go. Whatever stops it is a warning: the cleanup runs in run()'s
+    finally, and an error there lost the report of hours of runs (rmtree's TypeError on a
+    folder a test left unreadable did)."""
     try:
         for d in sorted(base.iterdir()):
             if d.is_dir() and (d.name == "snapshot" or re.fullmatch(r"[wht]\d+", d.name)):
                 rmtree(d)
-    except OSError as e:
+    except Exception as e:  # noqa: BLE001 - the report comes first (run())
         ui.warn(f"could not remove the workers' folders in {base}: {e}")
 
 
@@ -1299,5 +1424,5 @@ def _remove_logs(base: Path) -> None:
     """The logs, once nothing in them is worth reading (the lock is still held)."""
     try:
         rmtree(base / "logs")
-    except OSError as e:
+    except Exception as e:  # noqa: BLE001 - the report comes first (run())
         ui.warn(f"could not remove {base / 'logs'}: {e}")

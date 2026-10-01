@@ -5,9 +5,9 @@ The UI lives in {{pkg}}.ui (interpreted) and the heavy work in {{pkg}}.core (com
 
 
 def _main() -> None:
-    from {{pkg}}.ui.app import run
+    import {{pkg}}.ui.app as app
 
-    run()
+    app.run()
 
 
 if __name__ == "__main__":

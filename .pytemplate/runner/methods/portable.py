@@ -10,6 +10,7 @@ The only standalone option for PyPy (PyInstaller and Nuitka only support CPython
 
 from __future__ import annotations
 
+import ast
 import re
 import shlex
 import shutil
@@ -42,8 +43,10 @@ TCL_RE = re.compile(r"(lib)?(tcl|tk|itcl|thread)\d|_tkinter\.", re.IGNORECASE)
 # copy for programs that embed Python). Pruned only when the interpreter does not need it (its
 # ELF DT_NEEDED entries, _elf_needed): extension modules never link libpython on Linux (3.8+)
 LIBPYTHON_RE = re.compile(r"libpython3[.0-9]*[a-z]*\.so(\.[.0-9]+)?")
-# PyPy still ships lib2to3's deliberately broken test data: it never compiles
-COMPILE_EXCLUDE = r"[/\\]lib2to3[/\\]tests[/\\]"
+# Test data broken on purpose, which never compiles: PyPy still ships lib2to3's, and its stdlib
+# test package (kept by prune = false) has the badsyntax_* and bad_coding* files CPython's own
+# build leaves out the same way (its Makefile: compileall -x 'bad_coding|badsyntax|...')
+COMPILE_EXCLUDE = r"[/\\]lib2to3[/\\]tests[/\\]|[/\\](bad_coding|badsyntax)[^/\\]*\.py$"
 LONG_PREFIX = "\\\\?\\"
 LONG_UNC = LONG_PREFIX + "UNC\\"  # the extended-length form of \\server\share\...
 
@@ -175,13 +178,17 @@ def copy_runtime(cfg: Config, backend: str, dest: Path, lib: Path | None = None)
 
     ui.info(f"  runtime: {base} -> {rel(dest)}{' (pruned)' if prune else ''}")
     try:
-        shutil.copytree(long_path(base), long_path(dest), ignore=ignore, symlinks=True)
-    except (shutil.Error, OSError) as e:
-        raise PytError(
-            f"could not copy the interpreter to {rel(dest)}: {str(e)[:300]}\n"
-            "  On Windows this is usually the 260-character limit: shorten the project path or enable\n"
+        common.copy_tree(long_path(base), long_path(dest), ignore=ignore, symlinks=True)
+    except OSError as e:
+        from ..cli import NO_ROOM
+
+        if e.errno in NO_ROOM:
+            raise  # a full disk, a quota: cli.main says so in one line naming the file (exit 1)
+        hint = (
+            "\n  On Windows this is usually the 260-character limit: shorten the project path or enable\n"
             "  LongPathsEnabled (./pyt doctor checks it)."
-        ) from None
+        )
+        raise PytError(f"could not copy the interpreter to {rel(dest)}: {common.copy_failure(e)}{hint if IS_WINDOWS else ''}") from None
     for marker in dest.rglob("EXTERNALLY-MANAGED"):
         marker.unlink()
     if IS_WINDOWS and info["impl"] == "pypy":
@@ -273,7 +280,7 @@ def sh_launcher(cfg: Config, backend: str, out: Path, python: Path | None, env: 
         # The folder of this script. BASH_SOURCE first: shells that run sh scripts in-process
         # (niubash) keep the caller's $0. Symlinks are followed (a link in ~/.local/bin), each
         # relative target joined to the PHYSICAL folder of its link; CDPATH='' because an
-        # exported CDPATH made cd print the folder (HERE got two lines) or pick another one.
+        # exported CDPATH made cd print the folder (it got two lines) or pick another one.
         "_pt_self=${BASH_SOURCE:-$0}",
         "_pt_n=0",
         'while [ -h "$_pt_self" ] && [ "$_pt_n" -lt 40 ]; do',
@@ -287,20 +294,25 @@ def sh_launcher(cfg: Config, backend: str, out: Path, python: Path | None, env: 
         "    esac",
         "done",
         '_pt_dir=$(dirname "$_pt_self")',
-        "HERE=$(CDPATH='' cd -P -- \"$_pt_dir\" && pwd -P)",
-        "unset _pt_self _pt_dir _pt_link _pt_n",
-        *_env_lines(cfg, False, env),
+        "_pt_dir=$(CDPATH='' cd -P -- \"$_pt_dir\" && pwd -P)",
     ]
+    # What runs goes into the positional parameters, so no variable of the launcher's is left once
+    # the [deploy.portable] env variables are exported: they kept the folder in HERE and the
+    # interpreter in py, and a variable named HERE ran <its value>/boot.py (the app never started)
     if python is not None:
-        lines.append(f'exec "$HERE/{python.relative_to(out).as_posix()}" {flags} "$HERE/boot.py" "$@"')
+        lines.append(f'set -- "$_pt_dir/{python.relative_to(out).as_posix()}" {flags} "$_pt_dir/boot.py" "$@"')
+    else:
+        lines.append('set -- "$_pt_dir/boot.py" "$@"')
+    lines += ["unset _pt_self _pt_dir _pt_link _pt_n", *_env_lines(cfg, False, env)]
+    if python is not None:
+        lines.append('exec "$@"')
     else:
         need = "PyPy" if backend == "pypy" else "Python"
+        probe = shlex.quote(_version_probe(cfg))
+        for candidate in _system_candidates(cfg, backend, windows=False):
+            run = shlex.quote(candidate)
+            lines += [f"if {run} -c {probe} >/dev/null 2>&1; then", f'    exec {run} {flags} "$@"', "fi"]
         lines += [
-            f"for py in {' '.join(_system_candidates(cfg, backend, windows=False))}; do",
-            f"    if \"$py\" -c {shlex.quote(_version_probe(cfg))} >/dev/null 2>&1; then",
-            f'        exec "$py" {flags} "$HERE/boot.py" "$@"',
-            "    fi",
-            "done",
             f"echo \"{name}: needs {need} {cfg.min_python} or newer in PATH\" >&2",
             "exit 127",
         ]
@@ -349,6 +361,58 @@ def compile_calls(cfg: Config, python: Path, out: Path, version: str) -> list[li
     if stdlib is not None:
         calls.append([*base, "-x", COMPILE_EXCLUDE, "-o", str(cfg.deploy.optimize), stdlib])
     return calls
+
+
+# compileall's line for a file it could not compile (with -q; the name is a repr)
+_NOT_COMPILED = re.compile(r"^\*\*\* Error compiling (.+)\.\.\.$", re.MULTILINE)
+REPORTED_LINES = 40  # of compileall's output: under a too deep folder every file fails (Windows)
+
+
+def _not_compiled(output: str) -> list[Path]:
+    """The files compileall's `output` names as not compiled."""
+    files: list[Path] = []
+    for quoted in _NOT_COMPILED.findall(output):
+        try:
+            name = ast.literal_eval(quoted)
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(name, str):
+            files.append(Path(name))
+    return files
+
+
+def _precompile(cfg: Config, python: Path, out: Path, version: str) -> None:
+    """Run compile_calls and say what they could not compile: compileall's own lines (each file
+    and why, even with -q), then what it means. It said only "paths longer than 260 characters?"
+    (Windows' limit alone) and "The app still works", naming no file, also for a syntax error
+    in app/ that a --no-check build let through: that app never started."""
+    outputs: list[str] = []
+    codes: list[int] = []
+    for argv in compile_calls(cfg, python, out, version):
+        compiled = proc.run(argv, check=False, capture=True)
+        if compiled.returncode != 0:
+            codes.append(compiled.returncode)
+            outputs.append(((compiled.stdout or "") + (compiled.stderr or "")).strip())
+    if not codes:
+        return
+    lines = "\n".join(o for o in outputs if o).splitlines()
+    if len(lines) > REPORTED_LINES:
+        lines = [*lines[:REPORTED_LINES], f"... ({len(lines) - REPORTED_LINES} more lines)"]
+    if lines:
+        ui.report("\n".join(lines))
+    hint = " (paths longer than 260 characters? Shorten the project folder or enable LongPathsEnabled)" if IS_WINDOWS else ""
+    files = _not_compiled("\n".join(outputs))
+    app = [f for f in files if f.is_relative_to(out / "app")]
+    if app:
+        names = ", ".join(f.relative_to(out).as_posix() for f in app)
+        ui.warn(f"{len(app)} file(s) of the app do not compile (see above){hint}: the app fails where it imports them: {names}")
+    if len(files) > len(app):
+        ui.warn(
+            f"could not precompile {len(files) - len(app)} file(s) of lib/ or the runtime to .pyc (see above){hint}: "
+            "Python compiles them when the app first imports them, and an import of one that does not compile fails"
+        )
+    if not files:
+        ui.warn(f"compileall failed (exit code {codes[0]}, see above): the app compiles its modules when it first imports them")
 
 
 def make_archive(out: Path, fmt: str) -> Path:
@@ -405,16 +469,7 @@ def build(req: BuildRequest) -> Path:
 
     if console_python is not None:
         _check_interpreter(console_python)
-        failed = 0
-        for argv in compile_calls(cfg, console_python, out, host.version):
-            compiled = proc.run(argv, check=False, capture=True)
-            if compiled.returncode != 0:
-                failed += max(1, compiled.stdout.count("*** Error compiling"))
-        if failed:
-            ui.warn(
-                f"could not precompile {failed} file(s) to .pyc (paths longer than 260 characters?). "
-                "The app still works; it just starts a bit slower the first time."
-            )
+        _precompile(cfg, console_python, out, host.version)
 
     if upx.active(cfg):
         upx.pack_tree(cfg, out)  # before the smoke tests, so that they load the packed binaries
@@ -489,7 +544,7 @@ def _smoke_runtime(cfg: Config, python: Path, out: Path) -> None:
     marks = [ln for ln in result.stdout.splitlines() if ln.startswith(PREFIX_MARK)]
     if result.returncode != 0 or not marks:
         if result.stderr:
-            ui.info(result.stderr.rstrip())
+            ui.report(result.stderr.rstrip())  # why: shown even with -q
         raise PytError(f"the bundled interpreter {rel(python)} does not start (exit code {result.returncode})")
     prefix = Path(marks[-1].removeprefix(PREFIX_MARK))
     runtime = (out / "runtime").resolve()
@@ -523,7 +578,7 @@ def _smoke_compiled(cfg: Config, python: Path, out: Path) -> None:
     marks = [ln for ln in result.stdout.splitlines() if ln.startswith(SMOKE_MARK)]
     if result.returncode != 0 or not marks:
         if result.stderr:
-            ui.info(result.stderr.rstrip())
+            ui.report(result.stderr.rstrip())  # the traceback: shown even with -q
         raise PytError(f"the portable folder cannot import the compiled modules (exit code {result.returncode})")
     bad = marks[-1].removeprefix(SMOKE_MARK).strip()
     if bad:

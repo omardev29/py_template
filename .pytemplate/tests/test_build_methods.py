@@ -4,8 +4,10 @@ pyz/portable layouts and bootstraps. No network, no packager: the packager calls
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import importlib.machinery
+import io
 import json
 import ntpath
 import os
@@ -14,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tokenize
 import tomllib
 from collections.abc import Iterator
 from pathlib import Path, PureWindowsPath
@@ -63,6 +66,13 @@ def make(data: dict[str, Any]) -> Config:
     cfg: Config = config._build(Config, data, "")
     config.validate(cfg)
     return cfg
+
+
+def real(data: dict[str, Any]) -> Config:
+    """make() for a test that runs uv against this project's .venv: with its python.cpython (the
+    template's default, 3.14, is not the interpreter of a project on another minor)."""
+    own = config.load(set()).python.cpython
+    return make({**data, "python": {"cpython": own, **data.get("python", {})}})
 
 
 def fake_app(root: Path, pkg: str = "myapp", *, assets: bool = True) -> Path:
@@ -145,7 +155,10 @@ def test_exe_default_argv_and_output(sandbox: Path, monkeypatch: pytest.MonkeyPa
     assert argv[argv.index("--optimize") + 1] == "1"
     assert argv[argv.index("--python-option") + 1] == "X utf8"  # UTF-8 as in development
     assert "--noupx" in argv and "--noconsole" not in argv  # a console app by default
-    assert ["--add-data", f"{stage / 'assets'}:assets"] == argv[argv.index("--add-data") : argv.index("--add-data") + 2]
+    # relative to the folder of the spec, which PyInstaller reads a relative data source from
+    source, dest = argv[argv.index("--add-data") + 1].rsplit(":", 1)
+    spec = Path(argv[argv.index("--specpath") + 1])
+    assert dest == "assets" and (spec / source).resolve() == (stage / "assets").resolve()
     assert "--hidden-import" not in argv  # cpython: PyInstaller sees every import itself
     assert result == sandbox / "dist" / "myapp-cpython-exe" / ("myapp" + (".exe" if IS_WINDOWS else ""))
     assert result.is_file()
@@ -170,6 +183,34 @@ def test_exe_mypyc_hidden_imports_icon_and_extra_args_order(sandbox: Path, monke
     assert argv[-4:] == ["--collect-all", "x", "--log-level", "DEBUG"]  # extra_args, then the command line
     assert "--onedir" in argv
     assert result == sandbox / "dist" / "myapp-mypyc-exe" / "myapp" and result.is_dir()
+
+
+def _pyinstaller_split(value: str, pathsep: str) -> tuple[str, str]:
+    """--add-data SOURCE:DEST as PyInstaller 6.22.3 reads it (makespec.SourceDestAction): the one
+    separator, ':' or os.pathsep, that is not a Windows drive's."""
+    (separator,) = (m for m in re.finditer(rf"(^\w:[/\\])|[:{pathsep}]", value) if not m[1])
+    return value[: separator.start()], value[separator.end() :]
+
+
+@pytest.mark.parametrize("flet", [False, True])
+def test_exe_assets_hold_no_separator_pyinstaller_splits_at(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flet: bool) -> None:
+    # A project in C:\Users\me\games;2026\proj: PyInstaller found two separators in the absolute
+    # source (';' is os.pathsep on Windows) and stopped with "Wrong syntax, should be
+    # --add-data=SOURCE:DEST"; flet pack hands the value to PyInstaller unchanged
+    root = tmp_path / "games;2026"
+    monkeypatch.setattr(exe, "BUILD", root / "build")
+    monkeypatch.setattr(common, "BUILD", root / "build")  # exe.check_options: never the project's folder
+    monkeypatch.setattr(cmd_build, "DIST", root / "dist")
+    if flet:
+        rec = _flet_pack(root, monkeypatch, _flet_cfg(), "cpython", windows=True, macos=False)
+        spec = root / "build" / "flet-pack" / "cpython"  # flet pack writes the spec in its cwd
+    else:
+        _, rec = _pyinstaller(root, monkeypatch, make({}))
+        spec = root / "build" / "pyinstaller" / "cpython"  # --specpath
+    value = rec.argv[rec.argv.index("--add-data") + 1]
+    for pathsep in (":", ";"):  # os.pathsep on POSIX and on Windows
+        source, dest = _pyinstaller_split(value, pathsep)
+        assert dest == "assets" and (spec / source).resolve() == (root / "build" / "exe-stage" / "cpython" / "assets").resolve()
 
 
 def test_exe_without_assets_folder_adds_no_data(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,6 +385,73 @@ def test_flet_pack_console_and_utf8(sandbox: Path, monkeypatch: pytest.MonkeyPat
     assert "--pyinstaller-build-args=--noupx" in argv
 
 
+# Run in .venv: the hooks the pinned PyInstaller caches from each folder of the command line
+# (depend/imphook.py: ModuleHookCache._cache_hook_dirs, which keeps a weak proxy to the graph)
+_PYINSTALLER_HOOKS = r"""
+import json, sys
+from PyInstaller.depend.imphook import ModuleHookCache
+class Graph:
+    pass
+graph = Graph()
+print("PTHOOKS" + json.dumps({d: sorted(ModuleHookCache(graph, [(d, 0)])) for d in sys.argv[1:]}))
+"""
+
+
+def test_pyinstaller_finds_no_hook_in_a_folder_glob_reads_as_a_pattern(tmp_path: Path) -> None:
+    """The dependency defect exe.check_options refuses, pinned with the locked PyInstaller: it
+    lists a hook folder's scripts with glob.glob(os.path.join(hook_dir, 'hook-*.py')), and under
+    a folder named like `games [2026]` it finds none. When this fails PyInstaller escapes its
+    hook folders, and the refusal can go (CLAUDE.md 15.1)."""
+    python = envs.tool_env(real({})).python
+    if not python.is_file():
+        pytest.skip("needs .venv (./pyt setup)")
+    plain, bracketed = tmp_path / "games 2026" / "hooks", tmp_path / "games [2026]" / "hooks"
+    for folder in (plain, bracketed):
+        folder.mkdir(parents=True)
+        (folder / "hook-rich.py").write_text("hiddenimports = []\n", encoding="utf-8")
+    r = subprocess.run(
+        [str(python), "-c", _PYINSTALLER_HOOKS, str(plain), str(bracketed)],
+        env=proc.base_env(), capture_output=True, text=True, encoding="utf-8", timeout=120, check=False,
+    )  # fmt: skip
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTHOOKS")), None)
+    assert line is not None, r.stdout[-2000:] + r.stderr[-2000:]
+    found = json.loads(line[len("PTHOOKS") :])
+    assert found == {str(plain): ["rich"], str(bracketed): []}
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_exe_refuses_a_project_folder_glob_reads_as_a_pattern(no_build: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dry_run: bool) -> None:
+    # PyInstaller found none of its hooks under `games [2026]` (the pin above): the executable
+    # lacked rich's Unicode tables and died with ModuleNotFoundError at its first check mark, and
+    # flet pack's lacked the Flet client and icons.json, while the build said done. Refused before
+    # the checks and the payload, also in --dry-run
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    for folder, char in (("games [2026]", "["), ("old[", "["), ("a*b", "*"), ("what?", "?")):
+        root = tmp_path / folder / "proj"
+        monkeypatch.setattr(common, "ROOT", root)
+        monkeypatch.setattr(common, "BUILD", root / ".build")
+        with pytest.raises(PytError) as e:
+            cmd_build.cmd_build(make({}), ["cpython", "--method", "exe"])
+        assert e.value.code == 2 and repr(char) in str(e.value) and str(root) in str(e.value)
+        assert "PyInstaller would find none of its hooks" in str(e.value) and "--method portable, pyz or wheel" in str(e.value)
+    for folder in ("games 2026", "app$v2", "x]y"):  # nothing glob reads as a pattern: the build goes on
+        monkeypatch.setattr(common, "BUILD", tmp_path / folder / "proj" / ".build")
+        with pytest.raises(AssertionError, match="went past"):
+            cmd_build.cmd_build(make({}), ["cpython", "--method", "exe"])
+
+
+@pytest.mark.parametrize("preset", ["script", "flet"])
+def test_exe_build_itself_refuses_a_project_folder_glob_reads_as_a_pattern(sandbox: Path, monkeypatch: pytest.MonkeyPatch, preset: str) -> None:
+    # exe.build checks too (the method can be called without cmd_build), for flet pack as well
+    rec = Recorder()
+    monkeypatch.setattr(envs, "uv_run", rec)
+    monkeypatch.setattr(common, "BUILD", sandbox / "games [2026]" / "proj" / ".build")
+    cfg = _flet_cfg() if preset == "flet" else make({})
+    with pytest.raises(PytError, match="PyInstaller would find none of its hooks"):
+        exe.build(BuildRequest(cfg, "cpython", "exe", fake_app(sandbox / "payload", cfg.pkg)))
+    assert not rec.calls  # neither PyInstaller nor flet pack ran
+
+
 # --- nuitka ---------------------------------------------------------------------------------------
 
 EXT = importlib.machinery.EXTENSION_SUFFIXES[0]
@@ -486,6 +594,12 @@ def test_nuitka_argv_follows_the_config(sandbox: Path, monkeypatch: pytest.Monke
     cfg = make({"app": {"gui": True}, "deploy": deploy})
     app = _nuitka_app(sandbox / "payload", cfg.pkg)
     fake = FakeNuitka(cfg.pkg)
+    # A project under a folder named with '#' (C:\dev\C#\game): Nuitka reads what follows the
+    # last '#' of the icon option as an icon index, and stopped the build
+    root = sandbox / "C#" / "game"
+    (root / "art").mkdir(parents=True)
+    (root / "art" / "app.ico").write_bytes(b"\x00\x00\x01\x00icon")
+    monkeypatch.setattr(nuitka, "ROOT", root)
     monkeypatch.setattr(nuitka, "IS_WINDOWS", True)
     monkeypatch.setattr(envs, "uv", fake)
     monkeypatch.setattr(upx, "active", lambda cfg: True)
@@ -502,15 +616,80 @@ def test_nuitka_argv_follows_the_config(sandbox: Path, monkeypatch: pytest.Monke
     assert ("--python-flag=no_docstrings" in argv) is (optimize >= 2)
     assert "--nofollow-import-to=PIL" in argv and "--nofollow-import-to=ssl" in argv
     assert "--windows-console-mode=disable" in argv  # app.gui on Windows
-    from runner.project import ROOT
-
-    assert f"--windows-icon-from-ico={ROOT / 'art' / 'app.ico'}" in argv
-    assert "--include-data-dir=assets=assets" in argv  # relative to the stage: Nuitka splits a path at ',' and '='
-    assert not any(str(stage) in str(a) for a in argv if str(a).startswith("--include-data"))
+    # The icon is copied into the stage and named relative to it (Nuitka's cwd), with no '#'
+    # for Nuitka's "ICON#N" split: what its option check reads, os.path.exists from the stage
+    icon = next(a for a in argv if a.startswith("--windows-icon-from-ico=")).split("=", 1)[1]
+    assert icon == "pyt-icon.ico" and "#" not in icon
+    assert (stage / icon).read_bytes() == (root / "art" / "app.ico").read_bytes()
+    assert "--include-raw-dir=assets=assets" in argv  # relative to the stage: Nuitka splits a path at ',' and '='
+    assert not [a for a in argv if str(a).startswith("--include-data-dir")]  # it leaves out assets named like code
+    assert not any(str(stage) in str(a) for a in argv if str(a).startswith(("--include-data", "--include-raw")))
     # a standalone folder is packed when it is done (the excludes apply), never by Nuitka's plugin
     assert "--plugin-enable=upx" not in argv and packed == [out]
     assert argv[-2:] == ["--lto=no", "--report=r.xml"]  # extra_args, then the command line
     assert not [a for a in argv if a.startswith("--include-module=")]  # cpython: Nuitka follows the imports
+
+
+def test_nuitka_names_a_missing_icon_before_it_runs(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = make({"deploy": {"exe": {"icon": "art/none.ico"}}})
+    app = _nuitka_app(sandbox / "payload", cfg.pkg)
+    monkeypatch.setattr(nuitka, "ROOT", sandbox)
+    monkeypatch.setattr(nuitka, "IS_WINDOWS", True)
+    monkeypatch.setattr(envs, "uv", lambda *a, **k: pytest.fail("Nuitka ran without its icon"))
+    with pytest.raises(PytError, match=r"deploy\.exe\.icon = 'art/none\.ico' does not exist"):
+        nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+
+
+# Runs in an environment with the pinned Nuitka, in the stage (Nuitka's cwd): its own option
+# parsing of the data options nuitka.build passes, then its own collection of the data files. The
+# launching process's helper that nuitka/__main__.py installs is given its "no parent" answer.
+_NUITKA_DATA_FILES = r"""
+import json, sys
+import nuitka
+nuitka.getLaunchingNuitkaProcessEnvironmentValue = lambda name: None
+sys.argv = ["nuitka", "--mode=standalone", *sys.argv[1:], "main.py"]
+from nuitka.options import Options
+Options.parseArgs()
+from nuitka.freezer import IncludedDataFiles
+found = sorted(f.dest_path.replace("\\", "/") for f in IncludedDataFiles._addIncludedDataFilesFromFileOptions())
+print("PTDATA" + json.dumps(found))
+"""
+
+
+def test_nuitka_ships_every_asset_whatever_its_suffix(sandbox: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """--include-data-dir copies only what Nuitka calls non-code files: its default_ignored_suffixes
+    (.py .pyw .pyc .pyo .pyi .so .pyd .pyx .dll .dylib .exe .bin and the extension suffixes) left a
+    game's level1.bin, a model.bin, a helper tool.exe, a plugin.dll, libfmod.so or a level script
+    out of every nuitka build, without a word ("ok done"; the app then died on FileNotFoundError).
+    The pinned Nuitka (from uv's cache, offline) parses the data options nuitka.build passes and
+    collects the files itself."""
+    cfg = make({})
+    app = _nuitka_app(sandbox / "payload", cfg.pkg)
+    assets = ["logo.png", "notes.txt", "model.bin", "tool.exe", "plugin.dll", "libfmod.so", "levels/level1.bin", "levels/script.py", "levels/data.pyd"]
+    for name in assets:
+        (app / "assets" / name).parent.mkdir(parents=True, exist_ok=True)
+        (app / "assets" / name).write_bytes(b"x")
+    fake = FakeNuitka(cfg.pkg)
+    monkeypatch.setattr(envs, "uv", fake)
+    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+    data = [a for a in fake.argv if a.startswith(("--include-data", "--include-raw"))]
+    assert data == ["--include-raw-dir=assets=assets"]
+    stage = sandbox / "build" / "nuitka-stage" / "cpython"
+    probe = tmp_path / "probe.py"
+    probe.write_text(_NUITKA_DATA_FILES, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("UV_PROJECT", "UV_PYTHON", "VIRTUAL_ENV", "PYTEMPLATE_"))}
+    with_nuitka = [proc.find_uv(), "run", "--offline", "--no-project", "--python", sys.executable, "--with", nuitka.NUITKA, "python"]
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([*with_nuitka, *args], cwd=stage, env=env, capture_output=True, text=True, encoding="utf-8", timeout=300, check=False)
+
+    ready = run("-c", "import nuitka")
+    if ready.returncode != 0:
+        pytest.skip(f"{nuitka.NUITKA} is not in the uv cache: {ready.stderr.strip()[-300:]}")
+    r = run(str(probe), *data)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTDATA")), None)
+    assert line is not None, r.stdout[-3000:] + r.stderr[-3000:]
+    assert json.loads(line[len("PTDATA") :]) == sorted(f"assets/{name}" for name in ["logo.txt", *assets])
 
 
 def test_nuitka_upx_honours_the_excludes(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -596,7 +775,7 @@ def test_nuitka_pin_supports_the_default_python() -> None:
 
 
 @pytest.mark.parametrize("extra", [[], ["--experimental=python3.15"], ["--experimental", "python3.15"]])
-def test_nuitka_python_newer_than_the_pin_is_refused_before_any_work(monkeypatch: pytest.MonkeyPatch, extra: list[str]) -> None:
+def test_nuitka_python_newer_than_the_pin_is_refused_before_any_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra: list[str]) -> None:
     # nuitka==4.2.2 stops with FATAL on CPython 3.15 after the checks and the mypyc compile
     def must_not_run(*_a: Any, **_k: Any) -> Any:
         raise AssertionError("the build went ahead")
@@ -604,6 +783,10 @@ def test_nuitka_python_newer_than_the_pin_is_refused_before_any_work(monkeypatch
     monkeypatch.setattr(cmd_build, "run_checks", must_not_run)
     monkeypatch.setattr(cmd_build, "payload", must_not_run)
     monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)  # uv would download a CPython 3.15
+    # nuitka.check_options refuses a project folder SCons would expand (app$v2), or one glob reads
+    # as a pattern (games [2026]): not this test's
+    monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")
+    monkeypatch.setattr(common, "BUILD", tmp_path / ".build")
     cfg = make({"python": {"cpython": "3.15"}})
     if not extra:
         with pytest.raises(PytError) as e:
@@ -739,6 +922,93 @@ def test_nuitka_build_itself_refuses_pgo_with_mypyc(sandbox: Path, monkeypatch: 
         nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_nuitka_refuses_a_project_folder_scons_would_expand(no_build: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dry_run: bool) -> None:
+    # SCons substitutes $NAME, ${...}, $$, $( and $) in the paths Nuitka hands it: under app$v2
+    # the build wrote app/.../main.build outside the project, and failed where that path could
+    # not be made. Refused before the checks and the payload, also in --dry-run
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.setattr(nuitka, "IS_MACOS", False)
+    for folder, token in (("app$v2", "$v2"), ("a${x}b", "${x}"), ("cash$$", "$$"), ("x$(y", "$(")):
+        root = tmp_path / folder / "proj"
+        monkeypatch.setattr(nuitka, "ROOT", root)
+        monkeypatch.setattr(nuitka, "BUILD", root / ".build")
+        with pytest.raises(PytError) as e:
+            cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+        assert e.value.code == 2 and repr(token) in str(e.value) and "--method exe, portable or pyz" in str(e.value)
+    for folder in ("price$1", "cash$"):  # a '$' SCons leaves as it is: the build goes on
+        monkeypatch.setattr(nuitka, "BUILD", tmp_path / folder / "proj" / ".build")
+        with pytest.raises(AssertionError, match="went past"):
+            cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+
+
+# Run with the pinned Nuitka: what the glob of DataFilesPlugin (a data-files pattern of Nuitka's
+# package configuration joined to the package's folder) finds in each folder of the command line
+_NUITKA_PACKAGE_DATA = r"""
+import json, os, sys
+from nuitka.utils.FileOperations import resolveShellPatternToFilenames
+print("PTFOUND" + json.dumps([resolveShellPatternToFilenames(os.path.join(d, "cacert.pem")) for d in sys.argv[1:]]))
+"""
+
+
+def test_nuitka_finds_no_package_data_in_a_folder_glob_reads_as_a_pattern(tmp_path: Path) -> None:
+    """The dependency defect nuitka.check_options refuses, pinned with the pinned Nuitka (from
+    uv's cache, offline): DataFilesPlugin joins each `data-files: patterns:` entry of Nuitka's
+    package configuration (certifi's cacert.pem...) to the package's folder in .venv and resolves
+    it with resolveShellPatternToFilenames, a plain glob.glob, which finds nothing under a folder
+    named like `x [1]` (or the file of a folder `x 1` next to it). When this fails Nuitka escapes
+    the folder, and the refusal can go."""
+    plain, bracketed = tmp_path / "a" / "x 1" / "certifi", tmp_path / "b" / "x [1]" / "certifi"
+    for folder in (plain, bracketed):
+        folder.mkdir(parents=True)
+        (folder / "cacert.pem").write_text("-----BEGIN CERTIFICATE-----\n", encoding="ascii")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("UV_PROJECT", "UV_PYTHON", "VIRTUAL_ENV", "PYTEMPLATE_"))}
+    with_nuitka = [proc.find_uv(), "run", "--offline", "--no-project", "--python", sys.executable, "--with", nuitka.NUITKA, "python"]
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([*with_nuitka, *args], cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", timeout=300, check=False)
+
+    ready = run("-c", "import nuitka")
+    if ready.returncode != 0:
+        pytest.skip(f"{nuitka.NUITKA} is not in the uv cache: {ready.stderr.strip()[-300:]}")
+    r = run("-c", _NUITKA_PACKAGE_DATA, str(plain), str(bracketed))
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTFOUND")), None)
+    assert line is not None, r.stdout[-3000:] + r.stderr[-3000:]
+    assert json.loads(line[len("PTFOUND") :]) == [[str(plain / "cacert.pem")], []]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_nuitka_refuses_a_project_folder_glob_reads_as_a_pattern(no_build: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dry_run: bool) -> None:
+    # Nuitka resolves the data-files patterns of its package configuration with a glob of the
+    # package's folder in .venv (the pin above): under `x [1]` the binary lacked certifi's
+    # cacert.pem and the app died with FileNotFoundError, while Nuitka and the build said done.
+    # Refused before the checks and the payload, also in --dry-run
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.setattr(nuitka, "IS_MACOS", False)
+    for folder, char in (("x [1]", "["), ("a*b", "*"), ("what?", "?")):
+        root = tmp_path / folder / "proj"
+        monkeypatch.setattr(common, "ROOT", root)
+        monkeypatch.setattr(common, "BUILD", root / ".build")
+        with pytest.raises(PytError) as e:
+            cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+        assert e.value.code == 2 and repr(char) in str(e.value) and str(root) in str(e.value)
+        assert "package data its configuration names" in str(e.value) and "--method portable, pyz or wheel" in str(e.value)
+    monkeypatch.setattr(common, "BUILD", tmp_path / "x 1" / "proj" / ".build")  # nothing glob reads as a pattern
+    with pytest.raises(AssertionError, match="went past"):
+        cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+
+
+def test_nuitka_build_itself_refuses_a_project_folder_glob_reads_as_a_pattern(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # nuitka.build checks too (the method can be called without cmd_build)
+    rec = Recorder()
+    monkeypatch.setattr(envs, "uv", rec)
+    monkeypatch.setattr(common, "BUILD", sandbox / "x [1]" / "proj" / ".build")
+    cfg = make({})
+    with pytest.raises(PytError, match="package data its configuration names"):
+        nuitka.build(BuildRequest(cfg, "cpython", "nuitka", _nuitka_app(sandbox / "payload", cfg.pkg)))
+    assert not rec.calls  # Nuitka never ran
+
+
 def test_nuitka_dry_run_shows_the_flags(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(proc, "DRY_RUN", True)
     monkeypatch.setattr(nuitka, "IS_MACOS", False)
@@ -786,11 +1056,11 @@ def test_nuitka_keys_of_every_preset_load() -> None:
         assert nuitka.optimization_args(cfg) == ["--lto=auto"]
 
 
-# --- pyz: the bootstrap (templates/pyz/__main__.py), run for real ---------------------------------
+# --- pyz: the bootstrap (templates/pyz/), run for real -----------------------------------------------
 
 
 def _host_key() -> str:
-    """The key the bootstrap computes for THIS interpreter (templates/pyz/__main__.py _key)."""
+    """The key the bootstrap computes for THIS interpreter (templates/pyz/_pyz_bootstrap.py _key)."""
     key: str = _bootstrap_namespace()["_key"]()
     return key
 
@@ -818,7 +1088,8 @@ def fake_pyz(path: Path, *, build_id: str = "b1", targets: list[str] | None = No
         (root / name).write_text(text, encoding="utf-8", newline="")
     data = {"name": "demo", "build_id": build_id, "min_python": [3, 11], "targets": targets or [], "pure": pure, "backend": "cpython", **info}
     (root / "_pyz.json").write_text(json.dumps(data), encoding="utf-8")
-    shutil.copy2(TEMPLATES / "pyz" / "__main__.py", root / "__main__.py")
+    for name in pyz.BOOTSTRAP:
+        shutil.copy2(TEMPLATES / "pyz" / name, root / name)
     path.parent.mkdir(parents=True, exist_ok=True)
     pyz._write_archive(root, path)
     return path
@@ -898,7 +1169,7 @@ ABI_NAMES = {
     "_x.pypy311-pp73-x86_64-linux-gnu.so": "pypy311_pp73",
     "_x.pypy311-pp80-darwin.so": "pypy311_pp80",  # PyPy 8.0: a new ABI for the same pp311 key
     "_x.pypy311-pp73-win_amd64.pyd": "pypy311_pp73",
-    "_x.abi3.so": "",  # any CPython of the platform
+    "_x.abi3.so": "",  # no version: its wheel's tag says which CPython (wheel_abis)
     "_x.so": "",
     "_x.pyd": "",
     ".cpython-314-x86_64-linux-gnu.so": "cp314",  # EXT_SUFFIX itself (the bootstrap's _abi)
@@ -934,6 +1205,45 @@ def test_pyz_records_the_abi_of_every_targets_binaries(tmp_path: Path) -> None:
     assert info["abi"] == {LINUX: ["cp314"], WIN: ["cp314"]}
 
 
+def test_pyz_records_an_abi3_wheel_as_the_keys_own_cpython(tmp_path: Path) -> None:
+    # bcrypt 5.0.0 ships one cp39-abi3 wheel per platform: its files name no version, so "abi"
+    # stayed empty, a free-threaded 3.14t (which lists .abi3.so among its suffixes) took the target
+    # and died of a segmentation fault instead of the "no build for this interpreter" message
+    from runner.methods import pyz
+
+    root = tmp_path / "root"
+    wheels = {
+        LINUX: ("cp39-abi3-manylinux_2_28_x86_64", "bcrypt/_bcrypt.abi3.so"),
+        WIN: ("cp39-abi3-win_amd64", "bcrypt/_bcrypt.pyd"),  # Windows names an abi3 extension bare
+        "cp314-windows-aarch64": ("cp314-cp314-win_arm64", "dep/_speedups.pyd"),  # bare, yet for cp314
+        "pp311-linux-x86_64": ("pp311-pypy311_pp73-manylinux_2_28_x86_64", "dep/_speedups.pypy311-pp73-x86_64-linux-gnu.so"),
+        MAC: ("py3-none-macosx_13_0_arm64", "dep/libhelper.so"),  # a ctypes library: any Python loads it
+    }
+    for key, (tag, ext) in wheels.items():
+        _wheel(root / "targets" / key / "lib", "dep", "1.0", tag, {ext: b""})
+    assert pyz._target_abis(root, list(wheels)) == {
+        LINUX: ["cp314"],
+        WIN: ["cp314"],
+        "cp314-windows-aarch64": ["cp314"],
+        "pp311-linux-x86_64": ["pypy311_pp73"],
+    }
+    # pyz-merge records it from the wheels too
+    parts = [
+        fake_pyz(tmp_path / "p1.pyz", targets=[LINUX], pure=False, host=LINUX, files={
+            "common/app/main.py": MERGE_MAIN,
+            f"targets/{LINUX}/lib/bcrypt/_bcrypt.abi3.so": "",
+            f"targets/{LINUX}/lib/bcrypt-5.0.0.dist-info/WHEEL": "Wheel-Version: 1.0\nTag: cp39-abi3-manylinux_2_28_x86_64\n",
+        }),
+        fake_pyz(tmp_path / "p2.pyz", targets=[WIN], pure=False, host=WIN, files={
+            "common/app/main.py": MERGE_MAIN,
+            f"targets/{WIN}/lib/bcrypt/_bcrypt.pyd": "",
+            f"targets/{WIN}/lib/bcrypt-5.0.0.dist-info/WHEEL": "Wheel-Version: 1.0\nTag: cp39-abi3-win_amd64\n",
+        }),
+    ]
+    info, _ = _merge(parts, tmp_path / "m.pyz")
+    assert info["abi"] == {LINUX: ["cp314"], WIN: ["cp314"]}
+
+
 @pytest.mark.parametrize("pure", [False, True])
 def test_pyz_bootstrap_takes_no_target_built_for_another_abi(tmp_path: Path, pure: bool) -> None:
     # PyPy 8.0 (pp80) has the key pp311-... of a PyPy 7.3 build (pp73): it took that target and
@@ -956,10 +1266,162 @@ def test_pyz_bootstrap_takes_no_target_built_for_another_abi(tmp_path: Path, pur
     assert r.returncode == 0 and r.stdout.split()[:2] == ["ok", "target"], r.stderr  # its own ABI: the target
 
 
+@pytest.mark.parametrize(
+    ("tags", "floor"),
+    [
+        # librt's one wheel: any of its tags is enough, so the least of them
+        ([["cp314-cp314-manylinux_2_17_x86_64", "cp314-cp314-manylinux2014_x86_64", "cp314-cp314-manylinux_2_28_x86_64"]], "glibc 2.17"),
+        # the newest glibc a wheel of the target needs (a compressed tag set counts as its tags)
+        ([["cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64"], ["py3-none-manylinux_2_28_x86_64"], ["py3-none-any"]], "glibc 2.28"),
+        ([["cp311-cp311-manylinux2010_x86_64"], ["cp311-cp311-manylinux1_x86_64"]], "glibc 2.12"),
+        ([["cp314-cp314-musllinux_1_2_x86_64"]], "musl"),  # a build made on Alpine
+        ([["cp314-cp314-macosx_11_0_arm64"], ["cp314-cp314-macosx_13_0_arm64", "cp314-cp314-macosx_14_0_arm64"]], "macos 13.0"),
+        ([["cp314-cp314-macosx_10_9_x86_64"]], "macos 10.9"),
+        ([["cp314-cp314-linux_x86_64"]], "glibc"),  # built from its sdist on this (glibc) machine
+        ([["cp314-cp314-linux_x86_64"], ["cp314-cp314-manylinux_2_28_x86_64"]], "glibc 2.28"),
+        ([["cp314-cp314-manylinux_2_17_x86_64.musllinux_1_1_x86_64"]], ""),  # one wheel for both C libraries
+        ([["cp314-cp314-win_amd64"], ["py3-none-any"]], ""),  # Windows wheels need nothing more
+        ([["py3-none-any"]], ""),
+        ([], ""),
+    ],
+)
+def test_platform_floor_reads_what_the_wheels_need(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tags: list[list[str]], floor: str) -> None:
+    monkeypatch.setattr(common, "this_libc", lambda: "glibc")
+    for n, wheel in enumerate(tags):
+        info = tmp_path / f"dep{n}-1.0.dist-info"
+        info.mkdir()
+        (info / "WHEEL").write_text("Wheel-Version: 1.0\n" + "".join(f"Tag: {t}\n" for t in wheel), encoding="utf-8")
+    assert common.platform_floor(tmp_path) == floor
+
+
+@pytest.mark.parametrize(
+    ("confstr", "ext_suffix", "libc"),
+    [
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "glibc"),
+        (OSError(22, "Invalid argument"), ".cpython-314-x86_64-linux-musl.so", "musl"),  # os.confstr on musl
+        (OSError(22, "Invalid argument"), ".cpython-312.so", ""),  # another C library (Android)
+        (None, ".cpython-314-darwin.so", ""),
+    ],
+)
+def test_the_build_machine_and_the_bootstrap_name_the_c_library_alike(monkeypatch: pytest.MonkeyPatch, confstr: object, ext_suffix: str, libc: str) -> None:
+    # A wheel built on the build machine (linux_x86_64) needs its C library
+    import types
+
+    def fake_confstr(name: str) -> str | None:
+        assert name == "CS_GNU_LIBC_VERSION"
+        if isinstance(confstr, OSError):
+            raise confstr
+        return confstr if isinstance(confstr, str) else None
+
+    fake_sysconfig = types.SimpleNamespace(get_config_var=lambda name: ext_suffix if name == "EXT_SUFFIX" else None)
+    monkeypatch.setattr(common, "sys", types.SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(common, "os", types.SimpleNamespace(confstr=fake_confstr))
+    monkeypatch.setattr(common, "sysconfig", fake_sysconfig)
+    assert common.this_libc() == libc
+    namespace = _bootstrap_namespace()
+    namespace.update(os=types.SimpleNamespace(confstr=fake_confstr), sysconfig=fake_sysconfig)
+    assert namespace["_libc"]()[0] == libc
+
+
+@pytest.mark.parametrize(
+    ("confstr", "ext_suffix", "mac", "floor", "meets"),
+    [
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "", "glibc 2.28", True),
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "", "glibc 2.40", False),  # newer wheels than this glibc
+        ("glibc 2.17", ".cpython-314-x86_64-linux-gnu.so", "", "glibc 2.28", False),  # CentOS 7
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "", "glibc", True),
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "", "musl", False),  # a build made on Alpine
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "", "", True),
+        (OSError(22, "Invalid argument"), ".cpython-314-x86_64-linux-musl.so", "", "glibc 2.17", False),  # Alpine
+        (OSError(22, "Invalid argument"), ".cpython-314-x86_64-linux-musl.so", "", "glibc", False),
+        (OSError(22, "Invalid argument"), ".cpython-314-x86_64-linux-musl.so", "", "musl", True),
+        (OSError(22, "Invalid argument"), ".cpython-312.so", "", "glibc 2.17", False),  # Android's C library
+        (OSError(22, "Invalid argument"), ".cpython-312.so", "", "musl", False),
+        (None, ".cpython-314-darwin.so", "14.5", "macos 13.0", True),
+        (None, ".cpython-314-darwin.so", "12.7.6", "macos 13.0", False),
+        (None, ".cpython-314-darwin.so", "26.0", "macos 10.9", True),
+        (None, ".cpython-314-darwin.so", "10.16", "macos 13.0", True),  # an old SDK's name for any macOS 11+
+    ],
+)
+def test_pyz_bootstrap_meets_what_the_wheels_need(confstr: object, ext_suffix: str, mac: str, floor: str, meets: bool) -> None:
+    # A key does not tell glibc from musl nor their versions: a musl Python (Alpine) took the
+    # target of a glibc build and died in "No module named 'librt.base64'"
+    import types
+
+    def fake_confstr(name: str) -> str | None:
+        if isinstance(confstr, OSError):
+            raise confstr
+        return confstr if isinstance(confstr, str) else None
+
+    namespace = _bootstrap_namespace()
+    namespace.update(
+        os=types.SimpleNamespace(confstr=fake_confstr),
+        sysconfig=types.SimpleNamespace(get_config_var=lambda name: ext_suffix if name == "EXT_SUFFIX" else None),
+        platform=types.SimpleNamespace(mac_ver=lambda: (mac, ("", "", ""), "")),
+    )
+    assert namespace["_meets"](floor) is meets
+
+
+def _floors_of_this_machine() -> tuple[str, str]:
+    """A floor this machine does not meet, and one it meets."""
+    import platform
+
+    if sys.platform == "darwin":
+        return "macos 99.0", "macos 10.9"
+    if sys.platform == "win32":
+        return "glibc 2.5", ""  # no glibc there; Windows wheels need nothing more than their key
+    if platform.libc_ver()[0] != "glibc":
+        pytest.skip("a Linux without glibc")
+    return "glibc 99.0", "glibc 2.5"
+
+
+@pytest.mark.parametrize("pure", [False, True])
+def test_pyz_bootstrap_takes_no_target_this_machine_cannot_load(tmp_path: Path, pure: bool) -> None:
+    import sysconfig
+
+    key = _host_key()
+    mine = common.abi_tag(sysconfig.get_config_var("EXT_SUFFIX") or "")
+    unmet, met = _floors_of_this_machine()
+    files = {"common/app/main.py": MAIN_WAITS, "common/lib/lazymod.py": "WHERE = 'common'\n", f"targets/{key}/lib/lazymod.py": "WHERE = 'target'\n"}
+    other = fake_pyz(tmp_path / "other.pyz", build_id=f"o{pure}", targets=[key], pure=pure, files=files, floor={key: unmet})
+    r = run_pyz(other, pyz_env(tmp_path / "cache"))
+    if pure:
+        assert r.returncode == 0 and r.stdout.split()[:2] == ["ok", "common"], r.stderr
+    else:
+        assert r.returncode == 1 and "Traceback" not in r.stderr, r.stderr
+        assert f"no build for this interpreter and platform ({key}, {mine}, " in r.stderr
+        assert f"Built for: {key} ({unmet})" in r.stderr
+    for floor in ([met] if met else []) + (["musl"] if unmet.startswith("glibc 9") else []):
+        # its own C library and version: the target; and a musl build on this glibc machine: not
+        build = fake_pyz(tmp_path / "met.pyz", build_id=f"m{pure}{floor[:1]}", targets=[key], pure=pure, files=files, floor={key: floor})
+        r = run_pyz(build, pyz_env(tmp_path / "cache"))
+        taken = floor == met
+        assert r.stdout.split()[:2] == (["ok", "target"] if taken else ["ok", "common"] if pure else []), (floor, r.stderr)
+
+
+def test_pyz_records_what_every_targets_wheels_need(tmp_path: Path) -> None:
+    from runner.methods import pyz
+
+    root = tmp_path / "root"
+    _wheel(root / "targets" / "a" / "lib", "dep", "1.0", "cp314-cp314-manylinux_2_28_x86_64")
+    _wheel(root / "targets" / "b" / "lib", "dep", "1.0", "cp314-cp314-win_amd64")
+    (root / "targets" / "c" / "app").mkdir(parents=True)  # a mypyc overlay alone
+    assert pyz._target_floors(root, ["a", "b", "c"]) == {"a": "glibc 2.28"}
+    # pyz-merge records what the libs it wrote need
+    parts = [
+        fake_pyz(tmp_path / "p1.pyz", targets=[LINUX], pure=False, host=LINUX, files={"common/app/main.py": MERGE_MAIN, f"targets/{LINUX}/lib/dep-1.0.dist-info/WHEEL": "Tag: cp314-cp314-manylinux_2_17_x86_64\n"}),
+        fake_pyz(tmp_path / "p2.pyz", targets=[MAC], pure=False, host=MAC, files={"common/app/main.py": MERGE_MAIN, f"targets/{MAC}/lib/dep-1.0.dist-info/WHEEL": "Tag: cp314-cp314-macosx_11_0_arm64\n"}),
+    ]
+    info, _ = _merge(parts, tmp_path / "m.pyz")
+    assert info["floor"] == {LINUX: "glibc 2.17", MAC: "macos 11.0"}
+
+
 def _old_pythons() -> list[str]:
-    """Interpreters older than 3.11 on this machine (macOS's /usr/bin/python3 is 3.9)."""
+    """Interpreters older than 3.11 on this machine: macOS's /usr/bin/python3 is 3.9, the python3
+    of RHEL 8 and SLES 15 is 3.6, and a python2 may be there."""
     found: dict[str, str] = {}
-    for name in ("python3.8", "python3.9", "python3.10", "/usr/bin/python3"):
+    names = ("python2", "python2.7", "python3.6", "python3.7", "python3.8", "python3.9", "python3.10", "/usr/bin/python3", "/usr/bin/python")
+    for name in names:
         exe = shutil.which(name)
         if not exe:
             continue
@@ -970,14 +1432,43 @@ def _old_pythons() -> list[str]:
     return sorted(found.values())
 
 
+# What Python 2.7 and every Python 3 compile alike: the only node types the first stage of the pyz
+# bootstrap (__main__.py) may hold. No ast of an older grammar is at hand (ast.parse's
+# feature_version goes back to 3.7 at most, and never refuses a __future__ feature), so an allowlist
+ANY_PYTHON_NODES = (
+    ast.Module, ast.Expr, ast.Constant, ast.Import, ast.alias, ast.FunctionDef, ast.arguments, ast.arg, ast.Return, ast.Assign,
+    ast.Name, ast.Load, ast.Store, ast.Attribute, ast.Call, ast.Subscript, ast.Slice, ast.Tuple, ast.Compare, ast.Lt, ast.If,
+    ast.BinOp, ast.Mod, ast.Try,
+)  # fmt: skip
+
+
+def test_the_first_stage_of_the_pyz_bootstrap_compiles_on_any_python() -> None:
+    """Whatever Python starts the .pyz must get to its version check: `from __future__ import
+    annotations` (3.7+) and the f-strings of the bootstrap stopped Python 3.6 (python3 of RHEL 8
+    and SLES 15) and Python 2 with a SyntaxError traceback before it, so the check is the first
+    stage, __main__.py, in a syntax both compile (no annotation, f-string, keyword argument or
+    print), and the rest is _pyz_bootstrap.py, which it imports after the check."""
+    source = (TEMPLATES / "pyz" / "__main__.py").read_bytes()
+    assert source.isascii()  # Python 2 reads a file without a coding line as ASCII
+    tree = ast.parse(source)
+    assert not [type(node).__name__ for node in ast.walk(tree) if not isinstance(node, ANY_PYTHON_NODES)]
+    for node in ast.walk(tree):
+        assert not isinstance(node, ast.arg) or node.annotation is None
+        assert not isinstance(node, ast.arguments) or not (node.posonlyargs or node.kwonlyargs or node.vararg or node.kwarg)
+        assert not isinstance(node, ast.FunctionDef) or (node.returns is None and not node.decorator_list)
+        assert not isinstance(node, ast.Constant) or type(node.value) in (str, int, type(None))
+        assert not isinstance(node, ast.Name) or node.id != "print"  # a statement in Python 2
+    tokens = tokenize.tokenize(io.BytesIO(source).readline)
+    assert not [t.string for t in tokens if t.type == tokenize.NUMBER and "_" in t.string]  # 1_000: 3.6+
+    imports = [a.name for node in tree.body if isinstance(node, ast.Import) for a in node.names]
+    assert imports[-1] == "_pyz_bootstrap" and (TEMPLATES / "pyz" / "_pyz_bootstrap.py").is_file()
+
+
 def test_pyz_bootstrap_reaches_its_version_check_on_an_old_python(tmp_path: Path) -> None:
     # `def _lock(fd: int) -> bool | None` is evaluated when the module loads: Python 3.9 (macOS's
     # python3, Debian 11) died with "TypeError: unsupported operand type(s) for |" instead of
-    # "needs Python 3.11 or newer". Nothing before main()'s check may need a newer Python
-    source = (TEMPLATES / "pyz" / "__main__.py").read_text(encoding="utf-8")
-    tree = ast.parse(source, feature_version=(3, 7))
-    futures = {a.name for node in tree.body if isinstance(node, ast.ImportFrom) and node.module == "__future__" for a in node.names}
-    assert "annotations" in futures  # no annotation is evaluated: PEP 604 and list[int] need 3.10 / 3.9
+    # "needs Python 3.11 or newer", and Python 3.6 and 2 with a SyntaxError (the first stage's
+    # syntax: test_the_first_stage_of_the_pyz_bootstrap_compiles_on_any_python)
     old = _old_pythons()
     if not old:
         pytest.skip("no Python older than 3.11 here (macOS has one)")
@@ -1186,11 +1677,10 @@ def test_pyz_rerun_marks_a_build_as_recently_used(tmp_path: Path) -> None:
 
 
 def _bootstrap_namespace() -> dict[str, Any]:
-    """The bootstrap's functions, without running main()."""
-    source = (TEMPLATES / "pyz" / "__main__.py").read_text(encoding="utf-8")
-    assert source.rstrip().endswith("main()")
+    """The bootstrap's functions (the first stage, __main__.py, runs its main())."""
+    source = (TEMPLATES / "pyz" / "_pyz_bootstrap.py").read_text(encoding="utf-8")
     namespace: dict[str, Any] = {"__name__": "pt_bootstrap"}
-    exec(compile(source.rstrip()[: -len("main()")], "__main__.py", "exec"), namespace)  # noqa: S102
+    exec(compile(source, "_pyz_bootstrap.py", "exec"), namespace)  # noqa: S102
     return namespace
 
 
@@ -1323,7 +1813,7 @@ MAC = "cp314-macos-aarch64"
 def test_pyz_pure_build_layout(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     out, info, names = _pyz_build(sandbox, monkeypatch, {LINUX: lambda d: _wheel(d, "rich", "15.0.0")}, ["rich==15.0.0 ; implementation_name == 'cpython'"])
     assert info["pure"] is True and info["targets"] == [] and info["host"] == LINUX
-    assert {"common/lib/rich/__init__.py", "common/app/main.py", "common/app/assets/logo.txt", "__main__.py", "_pyz.json"} <= names
+    assert {"common/lib/rich/__init__.py", "common/app/main.py", "common/app/assets/logo.txt", "__main__.py", "_pyz_bootstrap.py", "_pyz.json"} <= names
     assert not [n for n in names if n.startswith("targets/")]
     assert len(info["deps"]) == 16 and info["build_id"]
     assert "pure: works with CPython >= 3.14 on any OS" in capsys.readouterr().err  # PyPy only when supported
@@ -1377,6 +1867,7 @@ def test_pyz_platform_wheel_without_extension_is_native(sandbox: Path, monkeypat
     assert info["pure"] is False and info["targets"] == sorted([LINUX, WIN])
     assert f"targets/{WIN}/lib/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe" in names
     assert "runs on:" in capsys.readouterr().err
+    assert info["floor"] == {LINUX: "glibc 2.17"}  # the bootstrap: never on musl nor an older glibc
 
 
 def test_pyz_mypyc_overlay_holds_only_extensions(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1406,6 +1897,119 @@ def test_pyz_accepts_payload_files_older_than_1980(sandbox: Path, monkeypatch: p
         assert archive.testzip() is None
         assert archive.getinfo("common/app/myapp/app.py").date_time[0] == 1980
     assert os.stat(app / "myapp" / "app.py").st_mtime == 1  # the payload itself is untouched
+
+
+def _no_room_for(name: str, monkeypatch: pytest.MonkeyPatch, error: int = errno.EFBIG) -> None:
+    """The copies of every file named `name` fail as a write past a file-size limit (`ulimit -f`)
+    or on a full disk does: shutil's copy loop raises the write's OSError, with no file name. On
+    Windows shutil.copy2 copies with _winapi.CopyFile2 (Python 3.12+) and never calls copyfile:
+    that one fails too (patched alone, every copy there succeeded and the tests failed)."""
+    real = shutil.copyfile
+
+    def copyfile(src: Any, dst: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(dst).name == name:
+            raise OSError(error, os.strerror(error))
+        return real(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "copyfile", copyfile)
+    winapi = getattr(shutil, "_winapi", None)
+    if winapi is not None and hasattr(winapi, "CopyFile2"):
+        real2 = winapi.CopyFile2
+
+        def copy_file2(src: str, dst: str, *args: Any) -> Any:
+            if Path(dst).name == name:
+                raise OSError(error, os.strerror(error))
+            return real2(src, dst, *args)
+
+        monkeypatch.setattr(winapi, "CopyFile2", copy_file2)
+
+
+def _build_error(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], build: Any) -> tuple[int, str]:
+    """Run `build` as ./pyt runs a command (cli.main's error handling): its exit code and stderr."""
+    from runner import cli
+
+    monkeypatch.setattr(cli, "dispatch", lambda rest: build())
+    code = cli.main(["build"])
+    return code, capsys.readouterr().err
+
+
+@pytest.mark.parametrize("where", ["lib", "app"])
+def test_a_pyz_build_that_finds_no_room_says_so_in_one_line(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], where: str) -> None:
+    # shutil.copytree goes on past a file it cannot copy and raises one shutil.Error with every
+    # failure as text and no errno: a full disk, a quota or `ulimit -f` during the pyz's copy of the
+    # dependencies or of the app ended in a traceback and "internal runner error ... is a bug"
+    app = fake_app(sandbox / "payload")
+    if where == "app":
+        (app / "myapp" / "big.dat").write_bytes(b"x")
+
+    def site(d: Path) -> None:
+        _wheel(d, "rich", "15.0.0", files={"rich/__init__.py": b"", **({"rich/big.dat": b"x"} if where == "lib" else {})})
+
+    _no_room_for("big.dat", monkeypatch)
+    code, err = _build_error(monkeypatch, capsys, lambda: _pyz_build(sandbox, monkeypatch, {LINUX: site}, ["rich==15.0.0"], app=app))
+    folder = Path("lib", "rich") if where == "lib" else Path("app", "myapp")
+    written = sandbox / "build" / "pyz" / "cpython" / "root" / "common" / folder / "big.dat"
+    assert code == 1 and f"cannot write {written}: {os.strerror(errno.EFBIG)}" in err, err
+    assert "internal runner error" not in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("method", ["exe", "nuitka", "mypyc stage"])
+def test_an_exe_or_nuitka_stage_that_finds_no_room_says_so_in_one_line(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], method: str
+) -> None:
+    cfg = make({})
+    app = fake_app(sandbox / "payload", cfg.pkg)
+    (app / "assets" / "big.dat").write_bytes(b"x")
+    _no_room_for("big.dat", monkeypatch, errno.ENOSPC)
+    if method == "exe":
+        monkeypatch.setattr(envs, "uv_run", Recorder())
+        code, err = _build_error(monkeypatch, capsys, lambda: exe.build(BuildRequest(cfg, "cpython", "exe", app)))
+        stage = sandbox / "build" / "exe-stage" / "cpython"
+    elif method == "nuitka":
+        monkeypatch.setattr(envs, "uv", Recorder())
+        code, err = _build_error(monkeypatch, capsys, lambda: nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app)))
+        stage = sandbox / "build" / "nuitka-stage" / "cpython"
+    else:
+        stage = sandbox / "exe-stage"
+        code, err = _build_error(monkeypatch, capsys, lambda: mypyc.exe_stage(cfg, app, stage))
+    assert code == 1 and f"cannot write {stage / 'assets' / 'big.dat'}: {os.strerror(errno.ENOSPC)}" in err, err
+    assert "internal runner error" not in err and "Traceback" not in err
+
+
+def test_a_runtime_copy_says_what_failed_and_names_the_path_limit_on_windows_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The portable runtime copy turned every failure into exit 2 with the first 300 characters of
+    # shutil.Error's tuple list and Windows' 260-character hint, on every OS: a full disk on Linux
+    # read as a path-length problem. A write that finds no room is now cli's one line (exit 1)
+    from runner.methods import portable
+
+    base = tmp_path / "base"
+    _fake_base(base, ["bin/python3.14", "lib/python3.14/os.py", "lib/python3.14/big.py"], {})
+    monkeypatch.setattr(envs, "interpreter_info", lambda python: {"base_prefix": str(base), "version": "3.14.7", "impl": "cpython"})
+    monkeypatch.setattr(common, "ensure_env", lambda env: env)
+    monkeypatch.setattr(common, "SRC", tmp_path / "src")
+    (tmp_path / "src").mkdir()
+    monkeypatch.setattr(portable, "IS_WINDOWS", False)
+
+    def copy(name: str) -> Path:
+        dest = tmp_path / name / "runtime"
+        return portable.copy_runtime(make({}), "cpython", dest, lib=tmp_path / "lib")
+
+    _no_room_for("big.py", monkeypatch)
+    code, err = _build_error(monkeypatch, capsys, lambda: copy("full"))
+    written = tmp_path.resolve() / "full" / "runtime" / "lib" / "python3.14" / "big.py"  # long_path resolves it
+    assert code == 1 and f"cannot write {written}: {os.strerror(errno.EFBIG)}" in err, err
+    assert "260-character" not in err and "internal runner error" not in err
+    _no_room_for("big.py", monkeypatch, errno.ENAMETOOLONG)  # any other failure: why, and no list of tuples
+    with pytest.raises(PytError) as e:
+        copy("long")
+    assert str(e.value).startswith("could not copy the interpreter to ") and os.strerror(errno.ENAMETOOLONG) in str(e.value)
+    assert "260-character" not in str(e.value) and "[(" not in str(e.value)
+    monkeypatch.setattr(portable, "IS_WINDOWS", True)  # where the path limit is the usual reason
+    monkeypatch.setattr(portable, "long_path", lambda path: str(path))
+    with pytest.raises(PytError, match="260-character limit"):
+        copy("windows")
 
 
 @pytest.mark.parametrize(("backend", "windowed"), [("cpython", ["pyw -3.14", "pythonw", "pythonw", "pypyw"]), ("pypy", ["pypyw", "pypyw", "pyw", "pythonw"])])
@@ -1505,6 +2109,23 @@ def test_pyz_merge_says_a_pure_result_runs_everywhere(tmp_path: Path, capsys: py
     assert f"runs on {LINUX}, {WIN}" in err and "pure:" not in err
 
 
+def test_pyz_merge_to_a_place_it_cannot_write_is_a_clear_error(tmp_path: Path) -> None:
+    # --out is the user's: in a folder it may not write (another user's, read-only, /sys) it
+    # ended in an "internal runner error" traceback
+    from runner.methods import pyz
+
+    a = _pure_part(tmp_path / "a.pyz", host="cp314-linux-x86_64")
+    b = _pure_part(tmp_path / "b.pyz", host="cp314-windows-x86_64")
+    (tmp_path / "file").write_text("a file where the folder must go", encoding="utf-8")
+    with pytest.raises(PytError, match=r"pyz-merge: cannot write .*file.*all\.pyz") as e:
+        pyz.merge([a, b], tmp_path / "file" / "all.pyz", make({}))
+    assert e.value.code == 2
+    (tmp_path / "out" / "all.pyz.tmp").mkdir(parents=True)  # the archive cannot be written there
+    with pytest.raises(PytError, match=r"pyz-merge: cannot write .*all\.pyz") as e:
+        pyz.merge([a, b], tmp_path / "out" / "all.pyz", make({}))
+    assert e.value.code == 2 and sorted(p.name for p in (tmp_path / "out").iterdir()) == ["all.pyz.tmp"]
+
+
 def test_pyz_merge_takes_each_lib_from_the_part_built_there(tmp_path: Path) -> None:
     # Every CI part carries targets/<every key>/lib with [deploy.pyz] targets: mixing two
     # installs file by file could mix versions; the part built ON that platform wins
@@ -1553,6 +2174,34 @@ def test_pyz_merge_refuses_invalid_parts(tmp_path: Path) -> None:
     with pytest.raises(PytError, match="unsafe member name"):
         _merge([evil, _native_part(tmp_path / "other.pyz", key=LINUX)], out)
     assert not out.exists() and not list(tmp_path.parent.glob("escaped.py"))
+
+
+def _damage(pyz: Path, member: str) -> None:
+    """Flip a byte in the middle of a member's compressed data; the central directory stays whole
+    (a CI artifact altered on its way)."""
+    import zipfile
+
+    with zipfile.ZipFile(pyz) as archive:
+        info = archive.getinfo(member)
+    data = bytearray(pyz.read_bytes())
+    at = info.header_offset  # zipfile counts the shebang in front of the archive
+    start = at + 30 + int.from_bytes(data[at + 26 : at + 28], "little") + int.from_bytes(data[at + 28 : at + 30], "little")
+    data[start + info.compress_size // 2] ^= 0xFF
+    pyz.write_bytes(bytes(data))
+
+
+@pytest.mark.parametrize("member", ["common/app/main.py", "common/lib/lazymod.py"])
+def test_pyz_merge_names_a_damaged_part(tmp_path: Path, member: str) -> None:
+    """Only _pyz.json was checked: a part with a damaged member made archive.read raise zlib.error
+    or BadZipFile (a bad CRC), and pyz-merge ended in an internal-error traceback."""
+    good = fake_pyz(tmp_path / "a.pyz")
+    damaged = fake_pyz(tmp_path / "b.pyz")
+    _damage(damaged, member)
+    out = tmp_path / "m" / "all.pyz"
+    with pytest.raises(PytError, match="is damaged") as e:
+        cmd_build.cmd_pyz_merge(make({}), [str(damaged), str(good), "--out", str(out)])
+    assert e.value.code == 2 and str(damaged) in str(e.value) and member in str(e.value)
+    assert not out.exists()
 
 
 def test_pyz_merge_refuses_two_compiled_apps_for_one_platform(tmp_path: Path) -> None:
@@ -1735,13 +2384,42 @@ def test_pyz_merge_dry_run_checks_the_parts(tmp_path: Path, monkeypatch: pytest.
     assert not (tmp_path / "m.pyz").exists() and not (tmp_path / "m.cmd").exists()
 
 
+def _wrappers(lib: dict[str, bytes]) -> set[str]:
+    """The console and GUI scripts the packages of a lib/ folder (relative POSIX path -> bytes)
+    name in their *.dist-info/entry_points.txt: what uv writes into bin/ for them."""
+    import configparser
+
+    names: set[str] = set()
+    for path, data in lib.items():
+        if path.count("/") == 1 and path.endswith(".dist-info/entry_points.txt"):
+            parser = configparser.ConfigParser(delimiters=("=",), interpolation=None)
+            parser.optionxform = str  # type: ignore[assignment,method-assign]
+            parser.read_string(data.decode("utf-8"))
+            names |= {key for section in ("console_scripts", "gui_scripts") if parser.has_section(section) for key in parser.options(section)}
+    return names
+
+
+def _uv_junk(lib: dict[str, bytes]) -> list[str]:
+    """What drop_install_junk must have taken out of a lib/ folder: uv's .lock, the wrappers of the
+    entry points and the scripts whose first line names this machine's project (its .venv python).
+    The other files of bin/ belong to their package: ruff's, uv's or a tool's binary, found there."""
+    wrappers = _wrappers(lib)
+    here = os.fsencode(str(ROOT))
+    junk = [path for path in lib if path == ".lock"]
+    for path, data in lib.items():
+        folder, _, name = path.rpartition("/")
+        if folder in ("bin", "Scripts") and (name in wrappers or name.removesuffix(".exe") in wrappers or (data.startswith(b"#!") and here in data[:4096])):
+            junk.append(path)
+    return junk
+
+
 @needs_rich
 def test_pyz_merge_of_a_real_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A REAL host .pyz (uv export of this project's lock + uv pip install), run with `python -S`,
     then merged with a native part of another platform and run again."""
     from runner.methods import pyz
 
-    cfg = make({})
+    cfg = real({})
     skip_when_older_than(cfg)
     app = fake_app(sandbox / "payload")
     (app / "main.py").write_text("import rich, sys\nprint('rich', rich.__name__, *sys.argv[1:])\n", encoding="utf-8")
@@ -1758,10 +2436,12 @@ def test_pyz_merge_of_a_real_build(sandbox: Path, monkeypatch: pytest.MonkeyPatc
         info = json.loads(archive.read("_pyz.json"))
         names = archive.namelist()
         app_files = {n: archive.read(n).decode() for n in names if n.startswith("common/app/")}
+        lib = {n.removeprefix("common/lib/"): archive.read(n) for n in names if n.startswith("common/lib/") and not n.endswith("/")}
     if not info["pure"] and not TEMPLATE_REPO:  # the template's lock is pure Python: there it must be pure
         pytest.skip("this project's dependencies are not pure Python: the merge below needs a pure host part")
     assert info["pure"] is True and info["host"] == _host_key()
-    assert not [n for n in names if "/bin/" in n or n.endswith("/.lock")]  # no uv junk
+    # no uv junk; a package's own files of bin/ stay (a dependency that ships one failed the test)
+    assert _wrappers(lib) and not _uv_junk(lib)  # rich's pygments has a console script
     # The same build made on another platform, whose dependencies are native there
     files = {**app_files, f"targets/{FOREIGN}/lib/dep.py": "WHERE = 'native'\n"}
     other = fake_pyz(sandbox / "native.pyz", targets=[FOREIGN], pure=False, files=files, name="myapp", min_python=info["min_python"], deps=info["deps"], host=FOREIGN)
@@ -1826,14 +2506,17 @@ def test_target_keys_of_the_locked_minor_work_everywhere(monkeypatch: pytest.Mon
     assert [t.key for t in common.targets_for(cfg, "pypy", ["pp311-linux-x86_64", WIN, LINUX])] == ["pp311-linux-x86_64", WIN, LINUX]
 
 
-def _install_recorder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, fail_first: bool = False) -> list[tuple[str, list[str], dict[str, str]]]:
+def _install_recorder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, fail_first: str = "") -> list[tuple[str, list[str], dict[str, str]]]:
+    """Record the uv calls of install_deps; `fail_first`: uv's error for the first one."""
     calls: list[tuple[str, list[str], dict[str, str]]] = []
 
-    def fake_uv(env: envs.PyEnv, argv: Any, *, extra_env: Any = None, **_: Any) -> subprocess.CompletedProcess[str]:
+    def fake_uv(env: envs.PyEnv, argv: Any, *, extra_env: Any = None, check: bool = True, **_: Any) -> subprocess.CompletedProcess[str]:
         args = [str(a) for a in argv]
         calls.append((env.key, args, dict(extra_env or {})))
         if fail_first and len(calls) == 1:
-            raise proc.CommandFailed(["uv", *args], 1)
+            if check:
+                raise proc.CommandFailed(["uv", *args], 2)
+            return subprocess.CompletedProcess(["uv", *args], 2, "", fail_first)
         return subprocess.CompletedProcess(args, 0, "", "")
 
     for name in ("cpython", "pypy"):
@@ -1869,7 +2552,9 @@ def test_host_linux_target_gets_the_platform_floor(tmp_path: Path, monkeypatch: 
     # the interpreter's full version: uv read 3.14 as 3.14.0 and dropped a requirement marked
     # python_full_version >= '3.14.1' from the build for this very 3.14.7 interpreter
     assert _flag(args, "--python-version") == ("3.14.7" if floor else None)
-    assert "--only-binary" not in args  # the host may still build an sdist
+    # wheels only at the floor, as for a cross target: an sdist uv built there failed, or shipped a
+    # binary built here instead of the locked wheel; without a floor the host may build any sdist
+    assert _flag(args, "--only-binary") == (":all:" if floor else None)
 
 
 def test_host_and_cross_builds_share_one_floor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1884,14 +2569,136 @@ def test_host_and_cross_builds_share_one_floor(tmp_path: Path, monkeypatch: pyte
     assert _flag(cross_args, "--only-binary") == ":all:"
 
 
+# What uv (0.10.12 and 0.12.19) says when a locked package has no wheel for the platform floor
+NO_FLOOR_WHEEL = (
+    "error: Package `newglibc` can't be installed because it doesn't have a source distribution or wheel for the current platform\n\n"
+    "hint: You're on Linux (`manylinux_2_28_x86_64`), but `newglibc` (v1.0) only has wheels for the following platform: `manylinux_2_34_x86_64`"
+)
+
+
 def test_host_floor_falls_back_to_the_host_wheels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    calls = _install_recorder(tmp_path, monkeypatch, fail_first=True)
+    calls = _install_recorder(tmp_path, monkeypatch, fail_first=NO_FLOOR_WHEEL)
     monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: ("glibc", "2.39"))
     site = tmp_path / "site"
     common.install_deps(make({}), "cpython", common.parse_key(LINUX), site, _requirements(tmp_path, "rich==15.0.0"))
     assert len(calls) == 2 and "--python-platform" in calls[0][1] and "--python-platform" not in calls[1][1]
-    assert "needs glibc 2.39 or newer" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "needs glibc 2.39 or newer" in err and "only has wheels for the following platform" in err  # uv's reason, then the fallback
     assert site.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("host", "tag", "needs"),
+    [(LINUX, "cp314-cp314-manylinux_2_34_x86_64", "glibc 2.34"), (MAC, "cp314-cp314-macosx_14_0_arm64", "macOS 14.0")],
+)
+def test_host_floor_fallback_names_what_the_wheels_it_took_need(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], host: str, tag: str, needs: str
+) -> None:
+    # The warning named this machine's glibc (2.39 on Ubuntu 24.04) as what the build needs, while
+    # the wheels it took needed 2.34, the floor _pyz.json records: it read as if Ubuntu 22.04 and
+    # Debian 12 were out
+    calls = _install_recorder(tmp_path, monkeypatch, fail_first=NO_FLOOR_BINARY)
+    record = envs.uv  # _install_recorder's
+
+    def install(env: envs.PyEnv, argv: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        done = record(env, argv, **kw)
+        if len(calls) == 2:  # the fallback: this machine's wheels
+            _wheel(Path(str(argv[argv.index("--target") + 1])), "newglibc", "1.0", tag)
+        return done
+
+    monkeypatch.setattr(envs, "uv", install)
+    monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: ("glibc", "2.39"))
+    if host == MAC:
+        monkeypatch.delenv("MACOSX_DEPLOYMENT_TARGET", raising=False)
+        monkeypatch.setattr(common, "host_os", lambda: "macos")
+        monkeypatch.setattr(common, "host_arch", lambda: "aarch64")
+        monkeypatch.setattr(common.platform, "mac_ver", lambda *a, **k: ("26.0", ("", "", ""), "arm64"))
+    site = common.install_deps(make({}), "cpython", common.parse_key(host), tmp_path / "site", _requirements(tmp_path, "newglibc==1.0"))
+    err = capsys.readouterr().err
+    assert f"so the build needs {needs} or newer where it runs" in err, err
+    assert common.platform_floor(site) == needs.replace("macOS", "macos")  # what _pyz.json records
+
+
+# What uv (0.10.12 and 0.12.19) says from the floor attempt, which asks for wheels only
+# (--only-binary :all:), when a locked package's wheels all need more than the floor: an sdist it
+# publishes too is no way out
+NO_FLOOR_BINARY = "error: Package `newglibc` can't be installed because it is marked as `--no-build` but has no binary distribution"
+
+
+def test_host_floor_takes_wheels_only_and_falls_back_on_uvs_no_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # The floor attempt built such a package's sdist (it failed without its toolchain, or shipped a
+    # binary built here instead of the locked wheel): now only what publishes no wheel is built there
+    calls = _install_recorder(tmp_path, monkeypatch, fail_first=NO_FLOOR_BINARY)
+    lock = tmp_path / "uv.lock"
+    lock.write_text(SOURCE_ONLY_LOCK, encoding="utf-8")
+    monkeypatch.setattr(common, "LOCK", lock)
+    monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: ("glibc", "2.39"))
+    common.install_deps(make({}), "cpython", common.parse_key(LINUX), tmp_path / "site", _requirements(tmp_path, "docopt==0.6.2", "six==1.17.0"))
+    (_, at_floor, _), (_, own, _) = calls
+    assert _flag(at_floor, "--python-platform") == "x86_64-manylinux_2_28" and _flag(at_floor, "--only-binary") == ":all:"
+    assert [at_floor[i + 1] for i, a in enumerate(at_floor) if a == "--no-binary"] == ["docopt", "mylib"]
+    assert "--python-platform" not in own and "--only-binary" not in own  # this machine's wheels, or a build
+    assert "a dependency has no wheel for x86_64-manylinux_2_28" in capsys.readouterr().err
+
+
+def test_host_floor_falls_back_for_real_on_uvs_own_words(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The fallback reads uv's error: pinned with the real uv (the uv-floor job runs the oldest), a
+    locked package that only has a manylinux_2_34 wheel, on a host whose glibc loads it."""
+    libc, version = common.platform.libc_ver()
+    have = common._version_tuple(version) if libc == "glibc" else None
+    if common.host_os() != "linux" or common.host_arch() != "x86_64" or have is None or have < (2, 34):
+        pytest.skip("needs Linux x86_64 with glibc 2.34 or newer")
+    cfg = real({})
+    if not envs.tool_env(cfg).python.is_file():
+        pytest.skip("needs .venv (./pyt setup)")
+    # the wheel of the Python that installs it (this project's .venv): a cp314 one had no
+    # interpreter to go to in a project on another minor, with the floor and without it
+    major, minor = (int(part) for part in str(envs.interpreter_info(envs.tool_env(cfg).python)["version"]).split(".")[:2])
+    tag = f"cp{major}{minor}-cp{major}{minor}-manylinux_2_34_x86_64"
+    requirements = _explicit_index_project(tmp_path, monkeypatch, {"newglibc": tag, "ptdemo": "py3-none-any"})
+    host = common.Target("cp", major, minor, "linux", "x86_64")
+    site = common.install_deps(cfg, "cpython", host, tmp_path / "site", requirements)
+    assert common.installed(site) == {("newglibc", "1.0"), ("ptdemo", "1.0")}
+    err = capsys.readouterr().err
+    assert "a dependency has no wheel for x86_64-manylinux_2_28" in err and "newglibc" in err
+    assert "so the build needs glibc 2.34 or newer" in err  # what the wheel needs, not this machine's glibc
+
+
+def test_host_floor_falls_back_for_a_package_whose_sdist_it_cannot_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A package with a manylinux_2_34 wheel and an sdist (tree-sitter-language-pack, ibm-db): the
+    floor attempt built the sdist instead of saying it has no wheel for the floor, and the pyz and
+    portable builds failed where it cannot build (or shipped a binary built here instead of the
+    locked wheel), while ./pyt run used the wheel. The real uv, offline."""
+    libc, version = common.platform.libc_ver()
+    have = common._version_tuple(version) if libc == "glibc" else None
+    if common.host_os() != "linux" or common.host_arch() != "x86_64" or have is None or have < (2, 34):
+        pytest.skip("needs Linux x86_64 with glibc 2.34 or newer")
+    requirements = _explicit_index_project(
+        tmp_path, monkeypatch, {"newglibc": "py3-none-manylinux_2_34_x86_64", "ptdemo": "py3-none-any"}, failing_sdists=("newglibc",)
+    )
+    host = common.Target("cp", 3, 14, "linux", "x86_64")
+    site = common.install_deps(make({}), "cpython", host, tmp_path / "site", requirements)
+    assert common.installed(site) == {("newglibc", "1.0"), ("ptdemo", "1.0")}
+    tags = common._wheel_tags(next(site.glob("newglibc-*.dist-info")) / "WHEEL")
+    assert tags == ["py3-none-manylinux_2_34_x86_64"]  # the locked wheel, never a build of the sdist
+    err = capsys.readouterr().err
+    assert "a dependency has no wheel for x86_64-manylinux_2_28" in err and "newglibc" in err
+    assert "needs a toolchain" not in err
+
+
+def test_host_floor_is_kept_when_the_install_fails_for_another_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # Any failure of the floor install (the network, an index, a hash, a failed sdist build) was
+    # blamed on a missing floor wheel and retried without the floor: the same error twice with a
+    # false explanation between them, and after a transient error a build that silently needed
+    # this machine's glibc although the floor's wheels existed
+    network = "error: Failed to download `rich==15.0.0`\n  Caused by: Network connectivity is disabled, but the requested data wasn't found in the cache"
+    calls = _install_recorder(tmp_path, monkeypatch, fail_first=network)
+    monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: ("glibc", "2.39"))
+    with pytest.raises(proc.CommandFailed) as failed:
+        common.install_deps(make({}), "cpython", common.parse_key(LINUX), tmp_path / "site", _requirements(tmp_path, "rich==15.0.0"))
+    assert failed.value.code == 2 and len(calls) == 1  # uv's own exit code, no second try
+    err = capsys.readouterr().err
+    assert "Network connectivity is disabled" in err and "no wheel for" not in err and "needs glibc" not in err
 
 
 def test_macos_targets_pin_the_deployment_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1940,6 +2747,25 @@ wheels = [{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.wh
 """
 
 
+# docopt (an sdist only) and six as `uv export --format pylock.toml` writes them (uv 0.12.19)
+SOURCE_ONLY_PYLOCK = """lock-version = "1.0"
+created-by = "uv"
+requires-python = ">=3.14"
+
+[[packages]]
+name = "docopt"
+version = "0.6.2"
+index = "https://pypi.org/simple"
+sdist = { url = "https://files.pythonhosted.org/packages/a2/55/8f8cab2afd404cf578136ef2cc5dfb50baa1761b68c9da1fb1e4eed343c9/docopt-0.6.2.tar.gz", size = 25901, hashes = { sha256 = "49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491" } }
+
+[[packages]]
+name = "six"
+version = "1.17.0"
+index = "https://pypi.org/simple"
+wheels = [{ url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", size = 11050, hashes = { sha256 = "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274" } }]
+"""
+
+
 @pytest.mark.parametrize(("docopt_tag", "error"), [("py3-none-any", None), ("cp314-cp314-linux_x86_64", "docopt")])
 def test_cross_target_builds_a_package_that_publishes_no_wheel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, docopt_tag: str, error: str | None) -> None:
     # --only-binary :all: refused docopt (an sdist only, pure Python) for every other OS, so no pyz
@@ -1980,14 +2806,21 @@ def test_cross_target_builds_a_pure_sdist_for_real(tmp_path: Path, monkeypatch: 
     )
     if probe.returncode != 0:
         pytest.skip(f"needs PyPI (uv could not resolve docopt): {probe.stderr.strip()[-200:]}")
-    if not envs.tool_env(make({})).python.is_file():
+    cfg = real({})
+    if not envs.tool_env(cfg).python.is_file():
         pytest.skip("needs .venv (./pyt setup)")
     lock = tmp_path / "uv.lock"
     lock.write_text(SOURCE_ONLY_LOCK, encoding="utf-8")
     monkeypatch.setattr(common, "LOCK", lock)
     req = tmp_path / "requirements.txt"
     req.write_text("docopt==0.6.2\nsix==1.17.0\n", encoding="utf-8")
-    site = common.install_deps(make({}), "cpython", common.parse_key(LINUX if IS_WINDOWS else WIN), tmp_path / "site", req)
+    # what install_deps installs, exported by a project on this python.cpython (uv checks the
+    # requires-python of the export against the .venv's interpreter, which installs it)
+    minor = cfg.python.cpython
+    pylock = SOURCE_ONLY_PYLOCK.replace('requires-python = ">=3.14"', f'requires-python = ">={minor}"')
+    common.pylock_path(req).write_text(pylock, encoding="utf-8")
+    target = common.parse_key(f"cp{minor.replace('.', '')}-{'linux' if IS_WINDOWS else 'windows'}-x86_64")  # a key the lock serves
+    site = common.install_deps(cfg, "cpython", target, tmp_path / "site", req)
     assert (site / "docopt.py").is_file() and (site / "six.py").is_file()
     assert common.installed(site) == {("docopt", "0.6.2"), ("six", "1.17.0")}
 
@@ -2043,6 +2876,104 @@ def test_install_deps_removes_uv_junk_but_keeps_native_tools(tmp_path: Path, mon
     (site / "bin" / "pygmentize").write_text("a package named bin keeps its modules\n")
     common.drop_install_junk(site)
     assert (site / "bin" / "pygmentize").is_file()
+
+
+def _tool_wheel(folder: Path) -> Path:
+    """pttool-1.0-py3-none-any.whl, pure Python: a console script (an entry point), a data script
+    whose first line is `#!python` (distutils scripts=, as awscli's bin/aws) and a binary data file
+    (as ruff's or uv's bin/ binary), which `uv pip install --target` all put in bin/."""
+    import base64
+    import zipfile
+
+    files = {
+        "pttool/__init__.py": b"def main() -> None:\n    print('pttool')\n",
+        "pttool-1.0.data/scripts/pttool-script": b"#!python\nimport pttool\npttool.main()\n",
+        "pttool-1.0.data/scripts/pttool-bin": b"\x7fELF\x02\x01\x01\x00 a native tool",
+        "pttool-1.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: pttool\nVersion: 1.0\n",
+        "pttool-1.0.dist-info/WHEEL": b"Wheel-Version: 1.0\nGenerator: hand\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        "pttool-1.0.dist-info/entry_points.txt": b"[console_scripts]\npttool-cli = pttool:main\n",
+    }
+    rows = [f"{name},sha256={base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()},{len(data)}" for name, data in files.items()]
+    wheel = folder / "pttool-1.0-py3-none-any.whl"
+    folder.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+        archive.writestr("pttool-1.0.dist-info/RECORD", "\n".join([*rows, "pttool-1.0.dist-info/RECORD,,"]) + "\n")
+    return wheel
+
+
+@pytest.mark.parametrize("blank", [False, True])
+def test_install_deps_drops_the_data_scripts_uv_pointed_at_this_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blank: bool) -> None:
+    """uv pip install --target rewrites a data script's `#!python` (awscli's bin/aws) to the
+    interpreter it installs with, this machine's .venv python: every pyz and portable folder of a
+    project that needs such a package shipped scripts dead on any other machine, which named the
+    developer's folder. A path with a blank gets uv's `#!/bin/sh` and `'''exec'` form instead.
+    The real uv installs a wheel with such a script for the host target."""
+    if blank and IS_WINDOWS:
+        pytest.skip("uv writes the #!/bin/sh form on POSIX only")
+    cfg = real({})
+    venv = envs.runtime_env(cfg, "cpython")
+    if not venv.python.is_file():
+        pytest.skip(f"no {venv.dir.name} here")
+    if blank:  # the same environment, through a folder name with a blank
+        (tmp_path / "a venv").symlink_to(venv.dir, target_is_directory=True)
+        venv = envs.PyEnv(venv.key, tmp_path / "a venv", venv.request, venv.preference)
+    monkeypatch.setattr(common, "ensure_env", lambda env: venv)
+    wheel = _tool_wheel(tmp_path / "w")
+    clean = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")}
+
+    def install(env: envs.PyEnv, argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        at = args.index("-r")
+        args[at : at + 2] = [str(wheel)]  # that package, not this project's export
+        r = subprocess.run([proc.find_uv(), *args, "--offline"], env=clean, capture_output=True, text=True, timeout=300, check=False)
+        assert r.returncode == 0, r.stderr
+        return r
+
+    monkeypatch.setattr(envs, "uv", install)
+    site = common.install_deps(cfg, "cpython", common.host_target(cfg, "cpython"), tmp_path / "site", _requirements(tmp_path, "pttool==1.0"))
+    scripts = next(folder for folder in (site / "bin", site / "Scripts") if folder.is_dir())
+    assert sorted(p.name for p in scripts.iterdir()) == ["pttool-bin"]  # the binary stays (ruff's)
+    python = os.fsencode(str(venv.python))
+    assert not [p for p in site.rglob("*") if p.is_file() and python in p.read_bytes()]
+
+
+def test_install_junk_keeps_the_scripts_that_name_no_interpreter_of_this_machine(tmp_path: Path) -> None:
+    # The lines are made from the path as this OS spells it (Windows: \home\o'brien\...): the
+    # wrapped form written with "/" never named a Windows Path, and the test failed there
+    python = Path("/home/o'brien/my game/.venv/bin/python")
+    quoted = "'" + str(python).replace("'", "'\\''") + "'"  # as uv quotes it for sh
+    scripts = tmp_path / "site" / "bin"
+    scripts.mkdir(parents=True)
+    texts = {
+        "rewritten": f"#!{python}\nimport x\n",
+        "wrapped": f"#!/bin/sh\n'''exec' {quoted} \"$0\" \"$@\"\n' '''\nimport x\n",
+        "env": "#!/usr/bin/env python3\nimport x\n",  # a package's own: uv rewrites `#!python` only
+        "system": "#!/usr/bin/python3\nimport x\n",
+        "other": f"#!{python}3.14\nimport x\n",
+        "shell": f"#!/bin/sh\necho {quoted}\n",
+    }
+    for name, text in texts.items():
+        (scripts / name).write_text(text, encoding="utf-8", newline="\n")
+    common.drop_install_junk(tmp_path / "site", python)
+    assert sorted(p.name for p in scripts.iterdir()) == ["env", "other", "shell", "system"]
+    common.drop_install_junk(tmp_path / "site")  # no interpreter named: nothing more goes
+    assert sorted(p.name for p in scripts.iterdir()) == ["env", "other", "shell", "system"]
+
+
+def test_install_junk_reads_the_interpreter_of_a_windows_script_in_any_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows names a file in any case: a data script whose line names the .venv python in
+    another case than the build's path is the same interpreter."""
+    scripts = tmp_path / "site" / "bin"
+    scripts.mkdir(parents=True)
+    (scripts / "aws").write_text("#!c:\\users\\o\\game\\.venv\\scripts\\python.exe\r\nimport x\r\n", encoding="utf-8", newline="")
+    python = Path("C:\\Users\\O\\game\\.venv\\Scripts\\python.exe")
+    common.drop_install_junk(tmp_path / "site", python)
+    assert (scripts / "aws").is_file() is (sys.platform != "win32")  # POSIX names files by their case
+    monkeypatch.setattr(sys, "platform", "win32")
+    common.drop_install_junk(tmp_path / "site", python)
+    assert not (scripts / "aws").exists()
 
 
 def test_install_junk_drops_the_build_machines_path_of_a_local_library(tmp_path: Path) -> None:
@@ -2263,24 +3194,67 @@ def test_skipped_requirements_reads_a_real_export_of_a_local_library_behind_a_ma
     assert common.skipped_requirements(requirements, site) == []
 
 
-def _workspace_project(root: Path, *, marked: str = "") -> Path:
+# A build backend in the library's own folder that needs nothing installed (uv builds the library
+# offline, whatever its cache holds): a wheel of src/<name>/ as it is on disk
+_IN_TREE_BACKEND = '''import os
+import tomllib
+import zipfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+    with open(os.path.join(HERE, "pyproject.toml"), "rb") as f:
+        project = tomllib.load(f)["project"]
+    name, version = project["name"], project["version"]
+    info = name + "-" + version + ".dist-info"
+    files = {}
+    for entry in sorted(os.listdir(os.path.join(HERE, "src", name))):
+        with open(os.path.join(HERE, "src", name, entry), "rb") as f:
+            files[name + "/" + entry] = f.read()
+    files[info + "/METADATA"] = ("Metadata-Version: 2.1\\nName: " + name + "\\nVersion: " + version + "\\n").encode()
+    files[info + "/WHEEL"] = b"Wheel-Version: 1.0\\nGenerator: test\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n"
+    wheel = name + "-" + version + "-py3-none-any.whl"
+    with zipfile.ZipFile(os.path.join(wheel_directory, wheel), "w") as z:
+        for member, data in files.items():
+            z.writestr(member, data)
+        z.writestr(info + "/RECORD", "".join(m + ",,\\n" for m in [*files, info + "/RECORD"]))
+    return wheel
+'''
+
+
+def _workspace_project(root: Path, *, marked: str = "", grouped: bool = False, buildable: bool = False) -> Path:
     """A project that depends on a local library the way `./pyt add ./libs/mylib` leaves it
     (a uv workspace member, which uv installs editable), locked offline (static metadata).
-    `marked` adds a second library, a dependency on win32 only."""
+    `marked` adds a second library, a dependency on win32 only. `grouped` adds two libraries in
+    dependency groups that [tool.uv] default-groups installs by default: `devlib` (dev) and
+    `toollib` (lint), as `./pyt add --group lint ...` leaves them. `buildable`: the libraries
+    build with _IN_TREE_BACKEND, offline (hatchling may not be in uv's cache)."""
     libs = ["mylib", marked] if marked else ["mylib"]
-    for lib in libs:
+    groups = ["devlib", "toollib"] if grouped else []
+    backend = (
+        '[build-system]\nrequires = []\nbuild-backend = "pt_backend"\nbackend-path = ["."]\n'
+        if buildable
+        else '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n'
+    )
+    for lib in [*libs, *groups]:
         (root / "libs" / lib / "src" / lib).mkdir(parents=True)
         (root / "libs" / lib / "pyproject.toml").write_text(
-            f'[project]\nname = "{lib}"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n\n'
-            '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n',
+            f'[project]\nname = "{lib}"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n\n' + backend,
             encoding="utf-8",
         )
+        if buildable:
+            (root / "libs" / lib / "pt_backend.py").write_text(_IN_TREE_BACKEND, encoding="utf-8")
         (root / "libs" / lib / "src" / lib / "__init__.py").write_text("VALUE = 42\n", encoding="utf-8")
     deps = '"mylib"' + (f", \"{marked} ; sys_platform == 'win32'\"" if marked else "")
+    grouping = '[dependency-groups]\ndev = ["devlib"]\nlint = ["toollib"]\n\n' if grouped else ""
     (root / "pyproject.toml").write_text(
         f'[project]\nname = "wsapp"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = [{deps}]\n\n'
-        f"[tool.uv.workspace]\nmembers = [{', '.join(repr('libs/' + lib) for lib in libs)}]\n\n"
-        "[tool.uv.sources]\n" + "".join(f"{lib} = {{ workspace = true }}\n" for lib in libs),
+        + grouping
+        + ('[tool.uv]\ndefault-groups = ["dev", "lint"]\n\n' if grouped else "")
+        + f"[tool.uv.workspace]\nmembers = [{', '.join(repr('libs/' + lib) for lib in [*libs, *groups])}]\n\n"
+        + "[tool.uv.sources]\n"
+        + "".join(f"{lib} = {{ workspace = true }}\n" for lib in [*libs, *groups]),
         encoding="utf-8",
     )
     env = {k: v for k, v in proc.base_env().items() if not k.startswith(("UV_PROJECT", "UV_PYTHON"))}
@@ -2307,6 +3281,248 @@ def test_export_ships_path_dependencies_and_refuses_a_stale_lock(tmp_path: Path,
     (project / "pyproject.toml").write_text(text.replace('["mylib"]', '["mylib", "six>=1.16"]'), encoding="utf-8")
     with pytest.raises(proc.CommandFailed):
         common.export_requirements(make({}))
+
+
+def _wheel_file(folder: Path, name: str, version: str, tag: str = "py3-none-any") -> Path:
+    """A minimal wheel (a flat index for uv: a folder of wheel files)."""
+    import zipfile
+
+    folder.mkdir(parents=True, exist_ok=True)
+    info = f"{name}-{version}.dist-info"
+    pure = "true" if tag.endswith("-none-any") else "false"
+    files = {
+        f"{name}/__init__.py": "VALUE = 1\n",
+        f"{info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+        f"{info}/WHEEL": f"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: {pure}\nTag: {tag}\n",
+    }
+    whl = folder / f"{name}-{version}-{tag}.whl"
+    with zipfile.ZipFile(whl, "w") as z:
+        for member, text in files.items():
+            z.writestr(member, text)
+        z.writestr(f"{info}/RECORD", "".join(f"{m},,\n" for m in [*files, f"{info}/RECORD"]))
+    return whl
+
+
+def _failing_sdist(folder: Path, name: str, version: str) -> Path:
+    """An sdist next to a package's wheels whose build always fails, as one does without the
+    toolchain it needs (Rust, a C library): its in-tree backend needs nothing to install."""
+    import io
+    import tarfile
+
+    folder.mkdir(parents=True, exist_ok=True)
+    root = f"{name}-{version}"
+    files = {
+        "PKG-INFO": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+        "pyproject.toml": '[build-system]\nrequires = []\nbuild-backend = "failing_backend"\nbackend-path = ["."]\n',
+        "failing_backend.py": (
+            "def build_wheel(*args, **kwargs):\n"
+            "    raise SystemExit('this sdist needs a toolchain this machine lacks')\n\n\n"
+            "build_sdist = prepare_metadata_for_build_wheel = build_wheel\n"
+        ),
+    }
+    sdist = folder / f"{root}.tar.gz"
+    with tarfile.open(sdist, "w:gz") as tar:
+        for member, text in files.items():
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(f"{root}/{member}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return sdist
+
+
+def _explicit_index_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wheels: dict[str, str], *, failing_sdists: tuple[str, ...] = ()) -> Path:
+    """A project whose dependencies (name: wheel tag, version 1.0) all come from an `explicit =
+    true` flat index, locked offline with the real uv; the runner works on it from here (offline),
+    and the return value is its export (common.export_requirements). `failing_sdists`: the
+    packages that also publish an sdist, one that never builds."""
+    if not envs.tool_env(make({})).python.is_file():
+        pytest.skip("needs .venv (./pyt setup)")
+    project = tmp_path / "proj"
+    index = tmp_path / "index"
+    for name, tag in wheels.items():
+        _wheel_file(index, name, "1.0", tag)
+    for name in failing_sdists:
+        _failing_sdist(index, name, "1.0")
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        f'[project]\nname = "xapp"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = {json.dumps(list(wheels))}\n\n'
+        f'[[tool.uv.index]]\nname = "local"\nurl = {json.dumps(index.as_uri())}\nformat = "flat"\nexplicit = true\n\n'
+        "[tool.uv.sources]\n" + "".join(f'{name} = {{ index = "local" }}\n' for name in wheels),
+        encoding="utf-8",
+    )
+    env = {k: v for k, v in proc.base_env().items() if not k.startswith(("UV_PROJECT", "UV_PYTHON"))}
+    r = subprocess.run([proc.find_uv(), "lock", "--offline", "--quiet"], cwd=project, env=env, capture_output=True, text=True, timeout=120, check=False)
+    if r.returncode != 0:
+        pytest.skip(f"uv could not lock the scratch project offline: {r.stderr.strip()[-300:]}")
+    monkeypatch.setattr(proc, "ROOT", project)
+    monkeypatch.setattr(common, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(common, "LOCK", project / "uv.lock")
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    return common.export_requirements(make({}))
+
+
+def test_pyz_and_portable_install_a_package_of_an_explicit_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `explicit = true` plus a [tool.uv.sources] `{ index = "name" }`, uv's way to take a package
+    # from a private index or PyTorch's: the requirements.txt export keeps no index and uv pip reads
+    # no sources, so `uv pip install -r requirements.txt` looked for it elsewhere ("No solution
+    # found") for every target, although README and the wheel's refusal sent such projects to pyz
+    # and portable. The real uv, offline: a flat index of one wheel
+    requirements = _explicit_index_project(tmp_path, monkeypatch, {"ptdemo": "py3-none-any"})
+    host = common.Target("cp", 3, 14, common.host_os(), common.host_arch())
+    cross = common.parse_key(WIN if common.host_os() != "windows" else LINUX)
+    for target in (host, cross):
+        site = common.install_deps(make({}), "cpython", target, tmp_path / "site" / target.key, requirements)
+        assert common.installed(site) == {("ptdemo", "1.0")}, target.key
+
+
+@pytest.mark.parametrize("link_mode", ["UV_LINK_MODE", "[tool.uv]", "uv.toml", "uv's default"])
+def test_the_dependencies_a_build_ships_are_copies_whatever_the_users_link_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link_mode: str) -> None:
+    # uv links the files of its cache into a --target install (hardlinks on Linux and Windows)
+    # and follows the user's link mode: with link-mode = "symlink" (UV_LINK_MODE, the user's
+    # uv.toml or the project's [tool.uv]) every file of a portable lib/ was an absolute link into
+    # this machine's uv cache, and the folder and its .tar.gz died with ModuleNotFoundError
+    # anywhere else (or after `uv cache clean`) while the build passed its smoke test and said
+    # done. The real uv, offline: a flat index of one wheel
+    if link_mode == "uv.toml" and IS_WINDOWS:
+        pytest.skip("uv reads the user's uv.toml from their Roaming folder on Windows, which this test does not move")
+    requirements = _explicit_index_project(tmp_path, monkeypatch, {"ptdemo": "py3-none-any"})
+    config = tmp_path / "config"
+    (config / "uv").mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))  # uv's user config on Linux and macOS: never this machine's
+    monkeypatch.delenv("UV_LINK_MODE", raising=False)
+    if link_mode == "UV_LINK_MODE":
+        monkeypatch.setenv("UV_LINK_MODE", "symlink")
+    elif link_mode == "uv.toml":
+        (config / "uv" / "uv.toml").write_text('link-mode = "symlink"\n', encoding="utf-8")
+    elif link_mode == "[tool.uv]":
+        pyproject = proc.ROOT / "pyproject.toml"  # the scratch project's, uv's working folder
+        pyproject.write_text(pyproject.read_text(encoding="utf-8") + '\n[tool.uv]\nlink-mode = "symlink"\n', encoding="utf-8")
+    host = common.Target("cp", 3, 14, common.host_os(), common.host_arch())
+    cross = common.parse_key(WIN if common.host_os() != "windows" else LINUX)
+    for target in (host, cross):
+        site = common.install_deps(make({}), "cpython", target, tmp_path / "site" / target.key, requirements)
+        assert common.installed(site) == {("ptdemo", "1.0")}, target.key
+        files = [p for p in site.rglob("*") if not p.is_dir()]
+        assert site / "ptdemo" / "__init__.py" in files
+        assert not [p for p in files if p.is_symlink()], target.key  # a link dies with the cache
+        assert not [p for p in files if p.stat().st_nlink > 1], target.key  # nothing shared with uv's cache
+
+
+def test_the_pylock_export_names_local_libraries_from_its_own_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # uv writes a pylock.toml's relative paths from the project folder but reads them, as PEP 751
+    # says, from the file's own folder: .build/deploy/pylock.toml named .build/deploy/libs/mylib
+    project = _workspace_project(tmp_path / "proj", marked="winlib")
+    monkeypatch.setattr(proc, "ROOT", project)
+    monkeypatch.setattr(common, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(common, "LOCK", project / "uv.lock")
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    lock = common.pylock_path(common.export_requirements(make({})))
+    packages = {p["name"]: p for p in tomllib.loads(lock.read_text(encoding="utf-8"))["packages"]}
+    for name in ("mylib", "winlib"):
+        folder = lock.parent / packages[name]["directory"]["path"]
+        assert folder.resolve() == (project / "libs" / name).resolve() and (folder / "pyproject.toml").is_file()
+    assert "sys_platform == 'win32'" in packages["winlib"]["marker"]
+
+
+def test_pyz_and_portable_ship_a_local_library_as_it_is_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # uv caches the wheel it builds from a local folder and builds it again only when the folder's
+    # pyproject.toml, setup.py or setup.cfg changes (its documented cache keys): once the library's
+    # code changed, every pyz and portable build installed the wheel of the first one, while ./pyt
+    # run (the library editable in .venv) ran the new code. The real uv, offline (UV_OFFLINE, which
+    # uv refuses next to --refresh-package), for the host and a cross target
+    cfg = real({})
+    if not envs.tool_env(cfg).python.is_file():
+        pytest.skip("needs .venv (./pyt setup)")
+    project = _workspace_project(tmp_path / "proj", buildable=True)
+    monkeypatch.setattr(proc, "ROOT", project)
+    monkeypatch.setattr(common, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(common, "LOCK", project / "uv.lock")
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    major, minor = (int(part) for part in cfg.python.cpython.split("."))
+    host = common.Target("cp", major, minor, common.host_os(), common.host_arch())
+    cross = common.Target("cp", major, minor, "linux" if IS_WINDOWS else "windows", "x86_64")
+    module = project / "libs" / "mylib" / "src" / "mylib" / "__init__.py"
+    for value in (42, 43):
+        module.write_text(f"VALUE = {value}\n", encoding="utf-8")
+        requirements = common.export_requirements(cfg)
+        for target in (host, cross):
+            site = common.install_deps(cfg, "cpython", target, tmp_path / "site" / f"{target.key}-{value}", requirements)
+            assert (site / "mylib" / "__init__.py").read_text(encoding="utf-8") == f"VALUE = {value}\n", target.key
+
+
+def test_the_pylock_rebase_moves_only_what_names_the_project(tmp_path: Path) -> None:
+    # A path uv already wrote from the file's folder (the fix upstream is on its way: uv#16299)
+    # must not move twice; an absolute one and one that names nothing stay too
+    project = tmp_path / "proj"
+    for folder in ("libs/a", "libs/b", "wheels"):
+        (project / folder).mkdir(parents=True)
+    (project / "wheels" / "c-1.0-py3-none-any.whl").write_bytes(b"")
+    lock = project / ".build" / "deploy" / "pylock.toml"
+    lock.parent.mkdir(parents=True)
+    absolute = json.dumps((project / "libs" / "a").as_posix())
+    lock.write_text(
+        '[[packages]]\nname = "a"\ndirectory = { path = "libs/a" }\n\n'
+        '[[packages]]\nname = "b"\ndirectory = { path = "../../libs/b" }\n\n'
+        '[[packages]]\nname = "c"\nversion = "1.0"\nwheels = [{ path = "wheels/c-1.0-py3-none-any.whl", hashes = {} }]\n\n'
+        f'[[packages]]\nname = "d"\ndirectory = {{ path = {absolute} }}\n\n'
+        '[[packages]]\nname = "e"\ndirectory = { path = "libs/gone" }\n',
+        encoding="utf-8",
+    )
+    common._rebase_paths(lock, project)
+    packages = {p["name"]: p for p in tomllib.loads(lock.read_text(encoding="utf-8"))["packages"]}
+    assert packages["a"]["directory"]["path"] == "../../libs/a"
+    assert packages["b"]["directory"]["path"] == "../../libs/b"
+    assert packages["c"]["wheels"][0]["path"] == "../../wheels/c-1.0-py3-none-any.whl"
+    assert packages["d"]["directory"]["path"] == (project / "libs" / "a").as_posix()
+    assert packages["e"]["directory"]["path"] == "libs/gone"
+
+
+def test_the_pylock_rebase_never_leaves_the_file_half_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every pyz and portable build of a project exports into the same .build/deploy, and the
+    # rebase rewrote pylock.toml in place (truncated, then written): a build started at that
+    # moment read it empty ("missing field `lock-version`") or cut after some [[packages]] (fewer
+    # packages installed, without an error). The file is replaced whole, and not written at all
+    # when no path moves: it is never opened for writing itself
+    project = tmp_path / "proj"
+    (project / "libs" / "a").mkdir(parents=True)
+    lock = project / ".build" / "deploy" / "pylock.toml"
+    lock.parent.mkdir(parents=True)
+    lock.write_text('lock-version = "1.0"\n\n[[packages]]\nname = "a"\ndirectory = { path = "libs/a" }\n', encoding="utf-8")
+    written: list[str] = []
+    real_open = io.open
+
+    def watched(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if any(c in mode for c in "wax+") and isinstance(file, (str, os.PathLike)):
+            written.append(os.path.realpath(file))
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(io, "open", watched)
+    common._rebase_paths(lock, project)
+    assert tomllib.loads(lock.read_text(encoding="utf-8"))["packages"][0]["directory"]["path"] == "../../libs/a"
+    assert written and os.path.realpath(lock) not in written  # a whole new file took its place
+    written.clear()
+    before = lock.stat()
+    common._rebase_paths(lock, project)  # nothing moves now
+    assert not written and lock.stat().st_mtime_ns == before.st_mtime_ns
+
+
+def test_the_builds_export_no_dependency_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `uv export --no-dev` leaves out the dev group only: with [tool.uv] default-groups naming
+    # another one (a lint group of tools), the pyz, the portable lib/ and the flet build project
+    # got its packages (ruff: a pure pyz became one for this platform only, and an apk build
+    # asked for a ruff Android has no wheel of). The real uv, offline, on a real lock
+    from runner.methods import flet
+
+    project = _workspace_project(tmp_path / "proj", grouped=True)
+    monkeypatch.setattr(proc, "ROOT", project)
+    monkeypatch.setattr(common, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(common, "LOCK", project / "uv.lock")
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    lines = common.export_requirements(make({})).read_text(encoding="utf-8").splitlines()
+    exported = {ln.split(";")[0].strip().replace("\\", "/") for ln in lines if ln.startswith(".")}
+    assert exported == {"./libs/mylib"}
+    pins = flet._pinned_requirements(envs.tool_env(make({})))
+    assert [pin.split(" @ ")[0] for pin in pins] == ["mylib"]
 
 
 def test_requirements_digest_ignores_the_header_and_hashes(tmp_path: Path) -> None:
@@ -2345,7 +3561,7 @@ ALL_BACKENDS = {"backend": {"supported": ["cpython", "pypy", "mypyc"]}}
 
 
 @pytest.fixture
-def no_build(monkeypatch: pytest.MonkeyPatch) -> None:
+def no_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Every argument error must come before the checks and the payload (minutes of work)."""
 
     def must_not_run(*_a: Any, **_k: Any) -> Any:
@@ -2353,6 +3569,24 @@ def no_build(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(cmd_build, "run_checks", must_not_run)
     monkeypatch.setattr(cmd_build, "payload", must_not_run)
+    # nuitka.check_options refuses a project folder SCons would expand (app$v2), and exe's and
+    # nuitka's one that glob reads as a pattern (games [2026]): not this one
+    monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")
+    monkeypatch.setattr(common, "BUILD", tmp_path / ".build")
+    _plain_pyproject(monkeypatch, tmp_path)
+
+
+def _plain_pyproject(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """wheel.check (cmd_build calls it for --method wheel) reads the project's pyproject.toml and
+    refuses a local library, a workspace member or a named index there, which pyz and portable
+    support: the tests that build a wheel for another reason failed in such a project. They get
+    a pyproject.toml without [tool.uv.sources]."""
+    from runner.methods import wheel
+
+    pyproject = tmp_path / "plain" / "pyproject.toml"
+    pyproject.parent.mkdir()
+    pyproject.write_text('[project]\nname = "myapp"\nversion = "0.1.0"\ndependencies = ["rich"]\n', encoding="utf-8")
+    monkeypatch.setattr(wheel, "PYPROJECT", pyproject)
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
@@ -2419,6 +3653,7 @@ def test_the_wheel_never_compiles_the_mypyc_stage_it_does_not_use(monkeypatch: p
 
     monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: pytest.fail("the payload of a wheel build"))
     monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)
+    _plain_pyproject(monkeypatch, tmp_path)  # wheel.check: never the sources of the project's own
     monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeWheel)
     assert cmd_build.cmd_build(make(ALL_BACKENDS), ["mypyc", "--method", "wheel", "--no-check"]) == 0
     assert seen[-1].app_dir == SRC and seen[-1].compiled
@@ -2438,6 +3673,8 @@ def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch,
             return out
 
     monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: tmp_path)
+    monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")  # nuitka.check_options: never the project's folder
+    monkeypatch.setattr(common, "BUILD", tmp_path / ".build")  # ...nor exe's and nuitka's glob rule
     monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeMethod)
     cfg = make(ALL_BACKENDS)
     assert cmd_build.cmd_build(cfg, ["cpython", "--method", "exe", "--no-check", "--onedir", "--add-data", "a:b", "--icon", "x.ico"]) == 0
@@ -2514,6 +3751,7 @@ def test_build_without_output_never_reports_done(monkeypatch: pytest.MonkeyPatch
             return out
 
     monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: tmp_path)
+    monkeypatch.setattr(common, "BUILD", tmp_path / ".build")  # exe.check_options: never the project's folder
     monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeMethod)
     with pytest.raises(PytError, match="no output") as e:
         cmd_build.cmd_build(make({}), ["--method", "exe", "--no-check", *extra])
@@ -2535,12 +3773,13 @@ def test_flet_method_refuses_before_any_work(no_build: None, monkeypatch: pytest
     monkeypatch.setattr(flet, "IS_WINDOWS", True)
     monkeypatch.setattr(flet, "host_os", lambda: "windows")
     monkeypatch.setattr(flet, "_developer_mode", lambda: False)
-    with pytest.raises(PytError, match="Developer Mode") as e:
-        cmd_build.cmd_build(_flet_cfg(), ["cpython", "--method", "flet"])
-    assert e.value.code == 3
-    # A web build needs no Developer Mode, nor does a machine that has it on: they go on
+    for cfg in (_flet_cfg(), _flet_cfg(deploy={"flet": {"target": "web"}})):  # a web build too
+        with pytest.raises(PytError, match="Developer Mode") as e:
+            cmd_build.cmd_build(cfg, ["cpython", "--method", "flet"])
+        assert e.value.code == 3
+    # A machine that has it on goes on, whatever the target
+    monkeypatch.setattr(flet, "_developer_mode", lambda: True)
     for cfg in (_flet_cfg(deploy={"flet": {"target": "web"}}), _flet_cfg()):
-        monkeypatch.setattr(flet, "_developer_mode", lambda: cfg.deploy.flet.target == "host")
         if dry_run:
             assert cmd_build.cmd_build(cfg, ["cpython", "--method", "flet", "--no-check"]) == 0
         else:
@@ -2726,7 +3965,7 @@ def test_portable_sh_launcher_via_symlinks_cdpath_and_spaces(tmp_path: Path, run
         python = out / "runtime" / "bin" / "python3"
         python.parent.mkdir(parents=True)
         python.symlink_to(Path(sys.executable).resolve())
-    cfg = make({"deploy": {"portable": {"runtime": runtime}}})
+    cfg = real({"deploy": {"portable": {"runtime": runtime}}})
     if runtime == "system":  # the launcher looks for cfg.min_python on PATH: this interpreter
         skip_when_older_than(cfg)
     launcher = out / "app.sh"
@@ -3072,7 +4311,7 @@ def test_the_runtime_prune_reads_the_folders_of_a_network_share(tmp_path: Path, 
     monkeypatch.setattr(portable, "long_path", lambda p: portable.LONG_UNC + base[2:] if p == Path(base).resolve() else str(p))
     seen: dict[str, Any] = {}
 
-    def copytree(src: str, dst: str, ignore: Any, symlinks: bool) -> None:
+    def copytree(src: str, dst: str, ignore: Any, symlinks: bool, **_: Any) -> None:
         seen.update(src=src, ignore=ignore)
 
     monkeypatch.setattr(portable.shutil, "copytree", copytree)
@@ -3174,6 +4413,67 @@ def test_portable_precompiles_the_stdlib_at_the_launcher_level(tmp_path: Path, o
         data = pyc.read_bytes()
         assert int.from_bytes(data[4:8], "little") == 0b11, pyc  # checked-hash (PEP 552)
         assert str(out).encode() not in data, pyc  # -s: this machine's folder is not embedded
+
+
+def test_portable_never_precompiles_the_runtimes_broken_test_data(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """PyPy ships its stdlib test package, which prune = false keeps in runtime/: its files broken
+    on purpose (badsyntax_*, bad_coding*: CPython's own build skips them the same way) failed
+    compileall, and every such build printed some 40 lines of errors and a warning that 12 files
+    of the runtime could not be precompiled. The real compileall runs."""
+    from runner.methods import portable
+
+    version = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    out = tmp_path / "out"
+    stdlib = out / "runtime" / ("Lib" if IS_WINDOWS else f"lib/{'pypy' if sys.implementation.name == 'pypy' else 'python'}{version}")
+    files = {
+        "test/__init__.py": b"",
+        "test/test_future_stmt/badsyntax_future3.py": b"from __future__ import nested_scopes\nfrom __future__ import rested_snopes\n",
+        "test/tokenizedata/bad_coding.py": b"# -*- coding: uft-8 -*-\nX = 1\n",
+        "test/tokenizedata/badsyntax_pep3120.py": b"print('b\xe4se')\n",
+        "json/__init__.py": b"X = 1\n",
+    }
+    for name, data in files.items():
+        (stdlib / name).parent.mkdir(parents=True, exist_ok=True)
+        (stdlib / name).write_bytes(data)
+    (out / "app").mkdir()
+    (out / "lib").mkdir()
+    portable._precompile(make({}), Path(sys.executable), out, version)
+    err = capsys.readouterr().err
+    assert "Error compiling" not in err and "warning" not in err, err
+    assert list((stdlib / "json").rglob("*.pyc"))  # the rest of the stdlib is compiled
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_portable_names_the_files_it_could_not_precompile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], windows: bool) -> None:
+    # compileall's output was captured and dropped: the warning named no file, blamed paths longer
+    # than 260 characters on every OS, and said "The app still works" for a syntax error in app/
+    # that a --no-check build let through, while the app did not start
+    from runner import ui
+    from runner.methods import portable
+
+    monkeypatch.setattr(ui, "QUIET", True)  # compileall's lines are the reason: -q keeps them
+    monkeypatch.setattr(portable, "IS_WINDOWS", windows)
+    out = tmp_path / "out"
+    for name, text in {
+        "app/pkg/__init__.py": "",
+        "app/pkg/app.py": "def main() -> int\n    return 0\n",
+        "lib/dep/__init__.py": "",
+        "lib/dep/old.py": "print 'python 2'\n",
+    }.items():
+        (out / name).parent.mkdir(parents=True, exist_ok=True)
+        (out / name).write_text(text, encoding="utf-8")
+    portable._precompile(make({}), Path(sys.executable), out, "0.0")
+    err = capsys.readouterr().err
+    assert "Error compiling" in err and "SyntaxError" in err  # compileall's own lines
+    assert "1 file(s) of the app do not compile" in err and "the app fails where it imports them: app/pkg/app.py" in err
+    assert "could not precompile 1 file(s) of lib/ or the runtime" in err
+    assert "still works" not in err
+    assert ("260 characters" in err) == windows  # Windows' own limit
+    capsys.readouterr()
+    (out / "app" / "pkg" / "app.py").write_text("def main() -> int:\n    return 0\n", encoding="utf-8")
+    (out / "lib" / "dep" / "old.py").write_text("X = 1\n", encoding="utf-8")
+    portable._precompile(make({}), Path(sys.executable), out, "0.0")
+    assert "compile" not in capsys.readouterr().err  # nothing to say
 
 
 def test_portable_pycs_survive_a_zip_round_trip(tmp_path: Path) -> None:
@@ -3368,6 +4668,35 @@ def test_a_previous_portable_output_in_use_is_left_whole_with_its_archives(
     assert _tree_bytes(dist) == before  # every previous file where it was, no scratch folder left
 
 
+def test_the_next_build_removes_a_previous_output_whose_delete_was_interrupted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """remove_output moves the previous output aside (dist/.<name>.old-*) and deletes it there: a
+    Ctrl+C or SIGTERM during that delete left the hidden copy (a portable folder of 70 to 190 MB)
+    for good, since every later build made a new aside and never looked for the old one."""
+    dist = tmp_path / "dist"
+    folder = dist / "x-cpython-portable"
+    (folder / "lib").mkdir(parents=True)
+    (folder / "lib" / "dep.py").write_text("X = 1\n", encoding="utf-8")
+    archive = dist / "x-cpython-portable.tar.gz"
+    archive.write_bytes(b"old")
+    real_rmtree = shutil.rmtree
+
+    def interrupted(*_a: Any, **_k: Any) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(common.shutil, "rmtree", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        common.remove_output(folder, archive)
+    monkeypatch.setattr(common.shutil, "rmtree", real_rmtree)
+    left = [p.name for p in dist.iterdir()]
+    assert len(left) == 1 and left[0].startswith(".x-cpython-portable.old-")  # what the interrupt left
+    common.remove_output(folder, archive)  # the next build: no previous output, its leftover goes
+    assert list(dist.iterdir()) == []
+    for name in (".x-cpython-portable.old-ab12", ".x-cpython-portable.tar.gz.old-cd34", ".y-cpython-portable.old-ef56", "x-cpython-portable"):
+        (dist / name).mkdir()
+    common.remove_output(folder, archive)
+    assert [p.name for p in dist.iterdir()] == [".y-cpython-portable.old-ef56"]  # another output's stays
+
+
 def test_remove_output_names_what_it_could_not_put_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     folder = tmp_path / "x-cpython-portable"
     folder.mkdir()
@@ -3442,6 +4771,24 @@ def test_a_lock_uv_cannot_check_is_not_called_stale(no_build: None, monkeypatch:
     assert e.value.code == 3 and "does not match" not in str(e.value) and "./pyt lock" not in str(e.value)
 
 
+@pytest.mark.parametrize("broken", ["pyproject.toml", "uv.lock"])
+def test_a_file_uv_cannot_parse_is_a_config_error(no_build: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, broken: str) -> None:
+    """A pyproject.toml (or uv.lock) uv cannot parse made `build` exit 3, a missing requirement,
+    where ./pyt lock and sync exit 2. The real uv says what it says about such a file."""
+    project = tmp_path / "p"
+    project.mkdir()
+    (project / "pyproject.toml").write_text('[project]\nname = "p"\nversion = "0"\nrequires-python = ">=3.11"\n', encoding="utf-8")
+    with (project / broken).open("a", encoding="utf-8") as f:
+        f.write("broken = [\n")
+    env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")}
+    said = subprocess.run([proc.find_uv(), "lock", "--check", "--offline"], cwd=project, env=env, capture_output=True, text=True, timeout=300, check=False)
+    assert said.returncode != 0, said.stderr
+    monkeypatch.setattr(envs, "uv", lambda env, args, **kw: subprocess.CompletedProcess(args, said.returncode, said.stdout, said.stderr))
+    with pytest.raises(PytError, match=f"cannot check uv.lock against pyproject.toml: Failed to parse.*{re.escape(broken)}") as e:
+        cmd_build.cmd_build(make({}), ["cpython", "--method", "pyz", "--no-check"])
+    assert e.value.code == 2
+
+
 def test_check_lock_reads_the_real_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project = _workspace_project(tmp_path / "proj")
     monkeypatch.setattr(proc, "ROOT", project)
@@ -3453,6 +4800,18 @@ def test_check_lock_reads_the_real_lock(tmp_path: Path, monkeypatch: pytest.Monk
     (project / "pyproject.toml").write_text(text.replace('["mylib"]', "[]"), encoding="utf-8")
     with pytest.raises(PytError, match="uv.lock does not match pyproject.toml"):
         cmd_build.check_lock(make({}))
+
+
+def test_check_lock_says_a_missing_lock_is_the_projects_to_fix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A uv.lock deleted or never committed was "cannot check" with exit 3 (a missing requirement)
+    # and uv's own hint, a bare `uv lock`, which skips the managed parts ./pyt lock writes first
+    project = _workspace_project(tmp_path / "proj")
+    monkeypatch.setattr(proc, "ROOT", project)
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    (project / "uv.lock").unlink()
+    with pytest.raises(PytError, match=r"uv.lock is missing\n.*Run ./pyt lock") as e:
+        cmd_build.check_lock(make({}))
+    assert e.value.code == 2
 
 
 @pytest.mark.parametrize("fail", [False, True])
@@ -3478,7 +4837,7 @@ def test_portable_system_folder_real_build_runs(sandbox: Path, monkeypatch: pyte
     .sh launcher with the machine's Python: it must import the locked dependencies from lib/."""
     from runner.methods import portable
 
-    cfg = make({"deploy": {"portable": {"runtime": "system"}}})
+    cfg = real({"deploy": {"portable": {"runtime": "system"}}})
     skip_when_older_than(cfg)
     app = fake_app(sandbox / "payload")
     (app / "main.py").write_text("import rich, sys\nprint('rich', rich.__file__, *sys.argv[1:])\n", encoding="utf-8")
@@ -3487,7 +4846,9 @@ def test_portable_system_folder_real_build_runs(sandbox: Path, monkeypatch: pyte
     except proc.CommandFailed as e:
         pytest.skip(f"uv could not export/install the locked dependencies (offline?): {e}")
     assert sorted(p.name for p in out.iterdir()) == ["app", "boot.py", "lib", "myapp.cmd", "myapp.sh"]
-    assert not (out / "lib" / "bin").exists() and not (out / "lib" / ".lock").exists()
+    # no uv junk; a package's own files of bin/ stay (a dependency that ships one failed the test)
+    lib = {p.relative_to(out / "lib").as_posix(): p.read_bytes() for p in (out / "lib").rglob("*") if p.is_file()}
+    assert _wrappers(lib) and not _uv_junk(lib)  # rich's pygments has a console script
     assert (sandbox / "dist" / "myapp-cpython-portable.tar.gz").is_file()
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
     env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
@@ -3549,6 +4910,24 @@ def test_portable_runtime_smoke_refuses_a_broken_runtime(tmp_path: Path, monkeyp
     monkeypatch.setattr(proc, "run", FakeRun(stdout.format(mark=portable.PREFIX_MARK, out=out), code, "boom"))
     with pytest.raises(PytError, match=re.escape(message)):
         portable._smoke_runtime(make({}), python, out)
+
+
+@pytest.mark.parametrize("smoke", ["_smoke_runtime", "_smoke_compiled"])
+def test_portable_smoke_runs_show_why_they_failed_even_with_q(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], smoke: str) -> None:
+    # -q hid the interpreter's traceback: only "does not start" or "cannot import" was left
+    from runner import mypyc, ui
+    from runner.methods import portable
+
+    out = tmp_path / "out"
+    python = _runtime_python(out)
+    monkeypatch.setattr(ui, "QUIET", True)
+    # make() is the template's own myapp: the compiled modules are named here, never looked for in
+    # the src/ of the project the suite runs in (a project made with ./pyt new has no src/myapp/)
+    monkeypatch.setattr(mypyc, "compiled_modules", lambda cfg: ["myapp.core"])
+    monkeypatch.setattr(proc, "run", FakeRun("", 1, "Traceback (most recent call last):\nImportError: libfoo.so: cannot open shared object file"))
+    with pytest.raises(PytError):
+        getattr(portable, smoke)(make({"backend": {"active": "mypyc"}}), python, out)
+    assert "ImportError: libfoo.so: cannot open shared object file" in capsys.readouterr().err
 
 
 def test_portable_build_stops_when_the_copied_runtime_has_no_interpreter(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3722,6 +5101,8 @@ def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str 
     (sandbox / "uv.lock").write_text(FLET_LOCK, encoding="utf-8")
     monkeypatch.setattr(common, "LOCK", sandbox / "uv.lock")
     monkeypatch.setattr(flet, "host_os", lambda: "linux")
+    # flet build on Windows needs Developer Mode, off by default there: not these tests' subject
+    monkeypatch.setattr(flet, "_developer_mode", lambda: True)
 
     def effect(args: list[str], cwd: Path | None) -> None:
         if produce:
@@ -3785,6 +5166,8 @@ def test_flet_build_names_local_libraries_by_absolute_url(tmp_path: Path, monkey
 def test_flet_build_argv_stage_and_pyproject(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import tomllib
 
+    from runner.methods import flet
+
     out, rec = _flet_build(sandbox, monkeypatch, exclude=["assets/big"])
     work = sandbox / "build" / "flet-build" / "cpython"
     assert out == sandbox / "dist" / "fletdemo-cpython-flet-linux"
@@ -3795,7 +5178,71 @@ def test_flet_build_argv_stage_and_pyproject(sandbox: Path, monkeypatch: pytest.
     data = tomllib.loads((work / "pyproject.toml").read_text(encoding="utf-8"))
     assert data["project"]["requires-python"] == "==3.14.*"
     assert data["project"]["dependencies"] == ["flet==1.0.1", "msgpack==1.1.0"]
-    assert data["tool"]["flet"] == {"org": "com.example", "app": {"path": "src", "module": "main"}}
+    assert data["tool"]["flet"] == {"org": "com.example", "app": {"path": "src", "module": "main"}, "flutter": {"pubspec": {"dependency_overrides": dict(flet.FLUTTER_OVERRIDES)}}}
+
+
+@pytest.mark.parametrize("local", [True, False])
+def test_flet_build_installs_a_local_library_again_at_every_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, local: bool) -> None:
+    # flet_cli 1.0.1 hashes the arguments of its package step, the build project's requirement
+    # lines among them, into <stage>/build/.hash/package, and when they did not change it passes
+    # --skip-site-packages to serious_python, which keeps the previous build's site-packages. A
+    # local library's line names its folder, which stays the same when its code changes: every
+    # flet build after the first shipped the library as the first one had installed it. The stamp
+    # goes when a pin is a local library; with index pins only it stays (flet skips a pip run)
+    from runner.methods import flet
+
+    stamp = sandbox / "build" / "flet-build" / "cpython" / flet.PACKAGE_STAMP
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text("the hash of the previous build's package arguments", encoding="utf-8")
+    library = f"mylib @ {(sandbox / 'libs' / 'mylib').as_uri()} ; python_full_version < '3.15'"
+    _flet_build(sandbox, monkeypatch, pins=["flet==1.0.1", library if local else "msgpack==1.1.0"])
+    assert stamp.exists() is not local
+
+
+@pytest.mark.parametrize("local", [True, False])
+def test_the_pinned_flet_installs_a_local_library_again(sandbox: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, local: bool) -> None:
+    """The pinned flet-cli's own HashStamp (from uv's cache, offline), at the path its build_base.py
+    names: after a build with the same requirement lines, flet skips the site-packages only while
+    the stamp of the previous build is there."""
+    import importlib.util
+
+    from runner.methods import flet
+
+    version = presets.constraints("flet").get("flet-cli")
+    if not version:
+        pytest.skip("the flet preset pins no flet-cli")
+    cli = tmp_path / "flet-cli"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("UV_PROJECT", "UV_PYTHON", "VIRTUAL_ENV", "PYTEMPLATE_"))}
+    got = subprocess.run(
+        [proc.find_uv(), "pip", "install", "--offline", "--quiet", "--no-deps", "--target", str(cli), "--python", sys.executable, f"flet-cli=={version}"],
+        env=env, capture_output=True, text=True, timeout=300, check=False,
+    )
+    if got.returncode != 0:
+        pytest.skip(f"flet-cli=={version} is not in the uv cache: {got.stderr.strip()[-300:]}")
+    source = (cli / "flet_cli" / "commands" / "build_base.py").read_text(encoding="utf-8")
+    # the folder flet build gets (the stage) is its python_app_path; the stamp is in its build_dir
+    assert 'self.build_dir = self.python_app_path.joinpath("build")' in source
+    assert 'HashStamp(self.build_dir / ".hash" / "package")' in source and '"--skip-site-packages"' in source
+    assert flet.PACKAGE_STAMP == Path("build", ".hash", "package")
+    spec = importlib.util.spec_from_file_location("pt_flet_hash_stamp", cli / "flet_cli" / "utils" / "hash_stamp.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def package_step(requirements: list[str]) -> Any:
+        stamp = module.HashStamp(sandbox / "build" / "flet-build" / "cpython" / flet.PACKAGE_STAMP)
+        for requirement in requirements:  # flet hashes "-r <requirement>" per dependency
+            stamp.update("-r")
+            stamp.update(requirement)
+        return stamp
+
+    pins = ["flet==1.0.1", f"mylib @ {(sandbox / 'libs' / 'mylib').as_uri()}" if local else "msgpack==1.1.0"]
+    package_step(pins).commit()  # the previous build
+    _flet_build(sandbox, monkeypatch, pins=pins)
+    work = sandbox / "build" / "flet-build" / "cpython"
+    dependencies = tomllib.loads((work / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+    assert dependencies == pins  # the very arguments of the previous build
+    assert package_step(dependencies).has_changed() is local  # changed: no --skip-site-packages
 
 
 def test_flet_build_cleanup_false_turns_flets_own_cleanup_off(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3862,23 +5309,52 @@ def test_flet_build_pyproject_points_at_the_staged_app(extra: str, expected: dic
     data = tomllib.loads('[project]\nname = "a"\nversion = "1"\n\n' + extra)
     before = json.dumps(data, sort_keys=True)
     tool = tomllib.loads(flet.build_pyproject(make({}), data, []))["tool"]["flet"]
-    assert tool == expected
+    assert tool == {**expected, "flutter": {"pubspec": {"dependency_overrides": dict(flet.FLUTTER_OVERRIDES)}}}
     assert json.dumps(data, sort_keys=True) == before  # the caller's data is not mutated
     assert ("is ignored" in capsys.readouterr().err) is ('path = "app"' in extra)
 
 
-def test_flet_build_needs_developer_mode_on_windows(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_flet_build_pins_the_dart_packages_flets_template_leaves_loose() -> None:
+    """Flet 1.0.1's build template overrides jni to 1.0.0 but leaves jni_flutter free, and
+    jni_flutter 1.0.4 (October 1, 2026) declares jni ^1.0.0 while its code needs 1.1.0: every
+    Android build stopped in Dart's compile ("The generated bindings expect package:jni ^1.1.0,
+    but 1.0.x was imported"). The build project pins it through [tool.flet.flutter.pubspec]
+    dependency_overrides, which flet merges into pubspec.yaml; the project's own entries win."""
+    import tomllib
+
+    from runner.methods import flet
+
+    head = '[project]\nname = "a"\nversion = "1"\n\n'
+    tool = tomllib.loads(flet.build_pyproject(make({}), tomllib.loads(head), []))["tool"]["flet"]
+    assert tool["flutter"]["pubspec"]["dependency_overrides"] == {"jni_flutter": "1.0.3"}
+    own = head + '[tool.flet.flutter.pubspec.dependency_overrides]\njni_flutter = "1.0.2"\nshimmer = "3.0.0"\n'
+    tool = tomllib.loads(flet.build_pyproject(make({}), tomllib.loads(own), []))["tool"]["flet"]
+    assert tool["flutter"]["pubspec"]["dependency_overrides"] == {"jni_flutter": "1.0.2", "shimmer": "3.0.0"}
+    with pytest.raises(PytError, match="dependency_overrides must be a table"):
+        flet.build_pyproject(make({}), tomllib.loads(head + "[tool.flet.flutter]\npubspec = 1\n"), [])
+
+
+@pytest.mark.parametrize("target", ["host", "windows", "apk", "aab", "web"])
+def test_flet_build_needs_developer_mode_on_windows(sandbox: Path, monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    # Every target: flet build turns Flutter's Windows desktop on there and its template holds a
+    # windows/ folder, so an apk or web build stopped late in Flutter's plugin symlinks, after the
+    # checks, the payload and a first Flutter download
     from runner.methods import flet
 
     monkeypatch.setattr(flet, "IS_WINDOWS", True)
     monkeypatch.setattr(flet, "_developer_mode", lambda: False)
     monkeypatch.setattr(flet, "host_os", lambda: "windows")
     monkeypatch.setattr(envs, "uv_run", lambda *a, **k: pytest.fail("flet build must not start"))
+    cfg = _flet_cfg(deploy={"flet": {"target": target}})
     with pytest.raises(PytError, match="Developer Mode") as e:
-        flet.build(BuildRequest(_flet_cfg(), "cpython", "flet", fake_app(sandbox / "p", "fletdemo")))
+        flet.check_options(cfg)
     assert e.value.code == 3
+    with pytest.raises(PytError, match="Developer Mode"):
+        flet.build(BuildRequest(cfg, "cpython", "flet", fake_app(sandbox / "p", "fletdemo")))
     with pytest.raises(PytError, match="flet preset"):
         flet.build(BuildRequest(make({}), "cpython", "flet", sandbox / "p"))
+    monkeypatch.setattr(flet, "_developer_mode", lambda: True)
+    flet.check_options(cfg)  # with it, nothing to refuse
 
 
 def test_flet_build_mobile_and_web_ship_the_py_code(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -4121,11 +5597,11 @@ def test_flet_build_upx_only_for_desktop_and_missing_output(sandbox: Path, monke
 
 
 def test_ci_uploads_the_pyz_where_the_build_writes_it(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # templates/ci.yml hard-codes dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz
-    ci = (TEMPLATES / "ci.yml").read_text(encoding="utf-8")
-    if "__BUILD_BACKEND__-pyz" not in ci:
-        pytest.skip("the CI template no longer uploads a pyz")
-    assert "path: dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz" in ci
+    # the shipped templates/ci.yml hard-codes dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz (a
+    # project may edit or delete its own, README): where the pyz method writes it, everywhere
+    if TEMPLATE_REPO:
+        ci = (TEMPLATES / "ci.yml").read_text(encoding="utf-8")
+        assert "path: dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz" in ci
     out, _, _ = _pyz_build(sandbox, monkeypatch, {LINUX: lambda d: _wheel(d, "rich", "15.0.0")}, ["rich==15.0.0"])
     assert out.relative_to(sandbox).as_posix() == "dist/myapp-cpython-pyz/myapp.pyz"
     assert BuildRequest(make({}), "mypyc", "pyz", sandbox).out_name == "myapp-mypyc-pyz"
@@ -4185,16 +5661,22 @@ def test_wheel_declares_git_and_url_sources_as_direct_references() -> None:
     from runner.methods import wheel
 
     data = {
-        "project": {"dependencies": ["rich>=15", "Tool_Kit[fast] ; sys_platform == 'linux'", "blob"]},
+        "project": {"dependencies": ["rich>=15", "Tool_Kit[fast] ; sys_platform == 'linux'", "blob", "langchain>=0.2", "hashed"]},
         "tool": {"uv": {"sources": {
             "tool-kit": {"git": "https://github.com/org/toolkit", "tag": "v1.2", "subdirectory": "python"},
             "blob": {"url": "https://example.com/blob-1.0-py3-none-any.whl"},
+            # an archive whose project is not at its root: the wheel dropped the folder, and its
+            # install built the archive's root (another project, or none)
+            "langchain": {"url": "https://example.com/langchain-0.2.0.tar.gz", "subdirectory": "libs/langchain"},
+            "hashed": {"url": "https://example.com/mono.tar.gz#sha256=" + "0" * 64, "subdirectory": "pkg"},
         }}},
     }
     assert wheel.dependencies(data) == [
         "rich>=15",
         "Tool_Kit[fast] @ git+https://github.com/org/toolkit@v1.2#subdirectory=python ; sys_platform == 'linux'",
         "blob @ https://example.com/blob-1.0-py3-none-any.whl",
+        "langchain @ https://example.com/langchain-0.2.0.tar.gz#subdirectory=libs/langchain",
+        "hashed @ https://example.com/mono.tar.gz#sha256=" + "0" * 64 + "&subdirectory=pkg",
     ]
     assert wheel.dependencies({"project": {"dependencies": ["rich"]}}) == ["rich"]
 
@@ -4219,3 +5701,100 @@ def test_wheel_refuses_a_source_it_cannot_declare(source: object, tmp_path: Path
     monkeypatch.setattr(wheel, "PYPROJECT", pyproject)
     with pytest.raises(PytError, match="b08lib"):
         wheel.check(make({}))  # cmd_build calls it before the checks and the payload
+
+
+# --- the suite in a setup it must pass in: another machine, another project ------------------------
+
+
+def _suite_run(folder: Path, tmp_path: Path, *selection: str, plugin: str = "") -> subprocess.CompletedProcess[str]:
+    """Tests of this suite run by pytest in the project `folder` as `./pyt selftest` runs them (the
+    suite's own pytest.ini, --rootdir=.). `plugin`: Python code pytest loads first (-p), which sets
+    what differs on the machine or in the project the run stands for (an attribute a check reads)."""
+    drop = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "PYTHONPATH")
+    env = {k: v for k, v in os.environ.items() if k not in drop and not k.startswith("PYTEMPLATE_")}
+    argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-c", ".pytemplate/tests/pytest.ini", "--rootdir=."]
+    argv += ["--basetemp", str(tmp_path / "t")]
+    if plugin:
+        (tmp_path / "plugin").mkdir()
+        (tmp_path / "plugin" / "pt_setup.py").write_text(plugin, encoding="utf-8")
+        env["PYTHONPATH"] = os.pathsep.join([str(tmp_path / "plugin"), str(folder / ".pytemplate")])
+        argv += ["-p", "pt_setup"]
+    return subprocess.run(
+        [*argv, *selection], cwd=folder, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900, check=False
+    )
+
+
+def test_the_flet_tests_pass_on_a_windows_without_developer_mode(tmp_path: Path) -> None:
+    """Developer Mode is off on a Windows machine by default (README asks for it for flet build
+    only), and flet.check_options refuses flet build there for every target: the six tests that
+    build through _flet_build failed `./pyt selftest` for every such user. They run here with the
+    platform check answering as it does on that machine."""
+    windows_without_developer_mode = "import runner.methods.flet as flet\n\nflet.IS_WINDOWS = True\nflet._developer_mode = lambda: False\n"
+    r = _suite_run(ROOT, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", "flet_build", plugin=windows_without_developer_mode)
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert " passed" in r.stdout and "deselected" in r.stdout, r.stdout[-2000:]
+
+
+def test_the_wheel_tests_pass_in_a_project_with_local_libraries(tmp_path: Path) -> None:
+    """A local library (`./pyt add ./libs/x`, a workspace member to uv), a path library or a named
+    index (PyTorch's) in pyproject.toml, which pyz and portable support, is what wheel.check
+    refuses: five tests that build a wheel to check something else ran it on the project's own
+    pyproject.toml and failed `./pyt selftest` there. They run here with such a pyproject.toml."""
+    pyproject = tmp_path / "project" / "pyproject.toml"
+    pyproject.parent.mkdir()
+    pyproject.write_text(
+        '[project]\nname = "game"\nversion = "0.1.0"\ndependencies = ["rich", "mylib", "sharedlib", "torch"]\n\n'
+        '[tool.uv.sources]\nmylib = { workspace = true }\nsharedlib = { path = "../shared lib" }\ntorch = { index = "pytorch-cpu" }\n',
+        encoding="utf-8",
+    )
+    plugin = f"from pathlib import Path\n\nimport runner.methods.wheel as wheel\n\nwheel.PYPROJECT = Path({str(pyproject)!r})\n"
+    wheel_tests = "wheel and (never_compiles or upx_is_resolved or refuses_a_stale_lock)"
+    r = _suite_run(ROOT, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", wheel_tests, plugin=plugin)
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert "5 passed" in r.stdout, r.stdout[-2000:]
+
+
+def test_the_nuitka_tests_pass_in_a_project_folder_scons_would_expand(tmp_path: Path) -> None:
+    """A project in a folder such as `app$v2`, which every method but nuitka supports (README):
+    the tests that run cmd_build with --method nuitka to check something else reached
+    nuitka.check_options on the project's own .build/ and failed `./pyt selftest` there. They run
+    here in a copy of the project in such a folder."""
+    own = tmp_path / "app$v2"
+    presets.copy_template(own)
+    nuitka_tests = "nuitka_python_newer_than_the_pin or forwards_extras_to_the_packagers"
+    r = _suite_run(own, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", nuitka_tests)
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert "4 passed" in r.stdout, r.stdout[-2000:]
+
+
+def test_the_exe_and_nuitka_tests_pass_in_a_project_folder_glob_reads_as_a_pattern(tmp_path: Path) -> None:
+    """A project in a folder such as `games [2026]`, where exe and nuitka refuse to build (their
+    packagers glob .venv unescaped, CLAUDE.md 15.1) and every other method works: a test that
+    builds with them to check something else reached that refusal on the project's own folder
+    and failed `./pyt selftest` there. They run here in a copy of the project in such a folder."""
+    own = tmp_path / "games [2026]"
+    presets.copy_template(own)
+    builds = "(test_exe_ or flet_pack or nuitka or forwards_extras_to_the_packagers or never_reports_done) and not in_a_project_folder"
+    r = _suite_run(own, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", builds)
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert " passed" in r.stdout and " failed" not in r.stdout, r.stdout[-2000:]
+
+
+@needs_rich
+def test_the_real_build_tests_pass_with_a_dependency_that_ships_files_in_bin(tmp_path: Path) -> None:
+    """A runtime dependency with files of its own in lib/bin, which drop_install_junk keeps (ruff's
+    and uv's binaries, found there): the real portable and pyz build tests asserted that lib/ held
+    no bin/ at all and failed `./pyt selftest` in such a project. They run here in a copy of the
+    project that depends on a package with a binary, a data script and a console script."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    wheel = _tool_wheel(own / "wheels")
+    env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")}
+    add = [proc.find_uv(), "add", "--offline", "--no-sync", wheel.relative_to(own).as_posix()]
+    added = subprocess.run(add, cwd=own, env=env, capture_output=True, text=True, timeout=600, check=False)
+    if added.returncode != 0:
+        pytest.skip(f"uv could not add a local wheel offline: {added.stderr.strip()[-500:]}")
+    real_builds = "portable_system_folder_real_build_runs or pyz_merge_of_a_real_build"
+    r = _suite_run(own, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", real_builds)
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert " failed" not in r.stdout, r.stdout[-2000:]

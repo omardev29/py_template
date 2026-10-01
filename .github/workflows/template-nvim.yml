@@ -4,7 +4,7 @@
 # API, installs the plugins and runs .pytemplate/nvim/tests/smoke.lua.
 #
 # Pushes and pull requests test pinned versions, so a red run is a regression, not upstream
-# drift: Neovim v0.12.5 on Windows here, and v0.12.5 and v0.11.2 (cmd_nvim.MIN_LAZYVIM, the
+# drift: Neovim v0.12.5 (and fd) on Windows here, and v0.12.5 and v0.11.2 (cmd_nvim.MIN_LAZYVIM, the
 # documented minimum) on Linux in the CI image (template-ci-image.yml), with the LazyVim starter
 # at cmd_nvim.STARTER_REV and the plugins of .pytemplate/nvim/tests/lazy-lock.json. The canary
 # (weekly, or by hand) runs the latest of everything: Neovim stable, the starter HEAD and the
@@ -64,6 +64,11 @@ jobs:
           - {os: windows-latest, nvim: v0.12.5} # Linux, with cmd_nvim.MIN_LAZYVIM too: the CI image
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      # fd: one release, the Windows x86_64 zip scoop and winget install. A new release: its tag
+      # and the SHA-256 of that zip (Chocolatey installed whatever fd was newest that day)
+      FD_VERSION: v10.5.0
+      FD_SHA256: a227701b8551c35a9931d9f6da75503cf86d88e182d71fb849a70864c5d57cd7
     defaults:
       run:
         shell: bash
@@ -78,8 +83,24 @@ jobs:
         run: nvim --version
       # venv-selector (LazyVim's lang.python extra) raises an error on the first Python buffer
       # without fd, which fails every smoke check that opens one (the CI image has it)
-      - name: fd
-        run: choco install fd -y --no-progress
+      - name: fd (a pinned release, SHA-256 checked)
+        shell: pwsh
+        run: |
+          $name = "fd-$env:FD_VERSION-x86_64-pc-windows-msvc"
+          $zip = "$env:RUNNER_TEMP\$name.zip"
+          for ($i = 1; ; $i++) {
+            try { Invoke-WebRequest "https://github.com/sharkdp/fd/releases/download/$env:FD_VERSION/$name.zip" -OutFile $zip; break }
+            catch { if ($i -ge 3) { throw }; Write-Host "fd download failed (try $i): $_"; Start-Sleep -Seconds (10 * $i) }
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          if ($hash -ne $env:FD_SHA256) {
+            Remove-Item $zip
+            throw "$name.zip has SHA-256 $hash, not the pinned $env:FD_SHA256"
+          }
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP -Force
+          Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\$name"
+      - name: fd version
+        run: fd --version
       - name: Runner environment
         run: ./pyt setup
       - name: LazyVim smoke test (script, raylib, flet)

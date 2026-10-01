@@ -15,6 +15,7 @@ meaning (parsed TOML), so a TOML formatter may lay them out as it likes.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import difflib
 import hashlib
@@ -22,7 +23,7 @@ import json
 import os
 import re
 import tomllib
-from collections.abc import Collection
+from collections.abc import Callable, Collection, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,11 @@ def mypy_ini(cfg: Config, profile: str, *, for_compile: Path | None = None) -> s
     else:
         head["mypy_path"] = ["src", "typings"] if typings else "src"
         head["files"] = ["src", "tests"] if _has_tests() else "src"
+        # Modules named from src (and the project folder, for tests/), as Python and mypyc
+        # (mypyc_build.py: --explicit-package-bases) name them: from the nearest folder with an
+        # __init__.py, src/nsx/fast.py of a namespace folder in compile.modules was `fast`, out of
+        # its [mypy-nsx.*] section, and an app package without __init__.py was found twice
+        head["explicit_package_bases"] = True
         if cfg.pypy_enabled:
             # what mypy_cli_args passes to check, for a mypy run with no arguments (VS Code's mypy
             # extension): mypy still reads the packages of the Python it runs on (sys.executable)
@@ -196,24 +202,32 @@ def mypy_cli_args(cfg: Config, python: Path) -> list[str]:
 # --- pyright / basedpyright ----------------------------------------------------------------------
 
 
+# The keys of a pyright configuration that hold paths, which pyright reads against the folder of
+# the file (pyright 1.1.414's initializeFromJson, `extends`, basedpyright's baselineFile), and
+# those of each execution environment
+PYRIGHT_PATH_LISTS = ("include", "exclude", "ignore", "strict", "extraPaths")
+PYRIGHT_PATHS = ("venvPath", "stubPath", "typeshedPath", "typingsPath", "baselineFile", "extends")
+
+
 def pyright_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict[str, Any]:
-    """`absolute`: for a copy outside the root (pyright resolves paths relative to the file)."""
+    """`absolute`: for a copy outside the root (./pyt check's, in .build/cfg): every path of it,
+    a profile's [pyright] ones included, anchored at ROOT (_anchored). pyright reads them against
+    the folder of the file: the copy's `**/.*` matched below .build/cfg only, and check read the
+    dot folders of src/ (.ipynb_checkpoints) that the editor's pyrightconfig.json skips."""
     data = load_profile(profile)
-
-    def path(p: str) -> str:
-        return (ROOT / p).as_posix() if absolute else p
-
-    include = [path("src"), path("tests")] if _has_tests() else [path("src")]
+    include = ["src", "tests"] if _has_tests() else ["src"]
     conf: dict[str, Any] = {
         "include": include,
-        "exclude": ["**/node_modules", "**/__pycache__", "**/.*", path("dist"), path("build")],
-        "extraPaths": [path("src")],
+        # the root's node_modules (pyright's own default, **/node_modules, also skipped a
+        # subpackage of that name); __pycache__ and dot folders hold no module anywhere
+        "exclude": ["node_modules", "**/__pycache__", "**/.*", "dist", "build"],
+        "extraPaths": ["src"],
         "pythonVersion": cfg.min_python,
-        "venvPath": path("."),
+        "venvPath": ".",
         "venv": ".venv",
     }
     if typings_dir():
-        conf["stubPath"] = path("typings")
+        conf["stubPath"] = "typings"
     conf.update(data.get("pyright", {}))
     # compile.exclude (modules and subpackages that stay interpreted) is left out of the rules
     # for compiled code: pyright has no exclusion inside `strict`, so a compiled package that
@@ -224,14 +238,43 @@ def pyright_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict
     tops = [t if t.endswith(".py") or _has_code(f"src/{t}") else f"{t}.py" for t in compiled_paths(cfg)]
     compiled = [p for top in tops for p in _paths_without(f"src/{top}", excluded)]
     if data.get("pyright_compiled", {}).get("strict"):
-        conf["strict"] = [path(p) for p in compiled]
+        conf["strict"] = compiled
     based = data.get("basedpyright_compiled")
     if cfg.typing.editor == "basedpyright" and based:
         # The first environment that matches a file wins: the excluded ones come first, without the Any rules
         conf["executionEnvironments"] = [
-            {"root": path(p), "extraPaths": [path("src")]} for p in sorted(excluded) if _has_code(p)
-        ] + [{"root": path(p), "extraPaths": [path("src")], **based} for p in compiled if _has_code(p)]
-    return conf
+            {"root": p, "extraPaths": ["src"]} for p in sorted(excluded) if _has_code(p)
+        ] + [{"root": p, "extraPaths": ["src"], **based} for p in compiled if _has_code(p)]
+    return _anchored(conf) if absolute else conf
+
+
+def _anchored(conf: dict[str, Any]) -> dict[str, Any]:
+    """`conf` with every path anchored at ROOT (PYRIGHT_PATH_LISTS, PYRIGHT_PATHS, an execution
+    environment's root and extraPaths); a path that is absolute already stays, and so does a
+    value that is no string (pyright names it)."""
+
+    def path(p: Any) -> Any:
+        return (ROOT / p).as_posix() if isinstance(p, str) else p
+
+    def paths(value: Any) -> Any:
+        return [path(p) for p in value] if isinstance(value, list) else value
+
+    out = dict(conf)
+    for key in PYRIGHT_PATH_LISTS:
+        if key in out:
+            out[key] = paths(out[key])
+    for key in PYRIGHT_PATHS:
+        if key in out:
+            out[key] = path(out[key])
+    environments = out.get("executionEnvironments")
+    if isinstance(environments, list):
+        out["executionEnvironments"] = [
+            {**env, **{k: path(env[k]) if k == "root" else paths(env[k]) for k in ("root", "extraPaths") if k in env}}
+            if isinstance(env, dict)
+            else env
+            for env in environments
+        ]
+    return out
 
 
 def _has_code(rel: str) -> bool:
@@ -303,12 +346,60 @@ def to_toml(data: dict[str, Any], prefix: str = "") -> str:
     return "\n".join(out).strip("\n")
 
 
-def ruff_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict[str, Any]:
-    """`absolute`: for copies outside the root (ruff resolves paths relative to the file itself)."""
+def relative_path(path: Path, start: Path) -> str:
+    """`path` relative to the folder `start`, POSIX style (absolute on another Windows drive)."""
+    try:
+        return Path(os.path.relpath(path, start)).as_posix()
+    except ValueError:  # another drive
+        return path.as_posix()
+
+
+# ruff's default `exclude` (ruff 0.16.9, test_render_core compares it with the pinned ruff's):
+# each name matches a folder of that name at ANY depth, so a subpackage or test folder called
+# venv, dist, _build or node_modules was never linted nor formatted, and `check`, `fmt --check`
+# and the hook passed its syntax errors. ruff_config replaces it: the names a Python package can
+# have are anchored to the project's root ("./venv"); a folder whose name starts with a dot holds
+# no importable module (pytest does not collect it either), so those stay excluded everywhere.
+RUFF_DEFAULT_EXCLUDE = (
+    ".bzr", ".direnv", ".eggs", ".git", ".git-rewrite", ".hg", ".ipynb_checkpoints", ".mypy_cache", ".nox", ".pants.d",
+    ".pyenv", ".pytest_cache", ".pytype", ".ruff_cache", ".svn", ".tox", ".venv", ".vscode", "__pypackages__", "_build",
+    "buck-out", "dist", "node_modules", "site-packages", "venv",
+)
+
+
+def _ruff_path(p: str, relative_to: Path | None) -> str:
+    return p if relative_to is None else relative_path(ROOT / p, relative_to)
+
+
+def _ruff_at_root(p: str, relative_to: Path | None) -> str:
+    rel = _ruff_path(p, relative_to)
+    return rel if "/" in rel else f"./{rel}"
+
+
+def ruff_exclude(relative_to: Path | None = None) -> list[str]:
+    """ruff's `exclude` for the project: RUFF_DEFAULT_EXCLUDE with every name a package can have
+    anchored at the root ("./venv"), the dot names as they are. ruff_config writes it, and the
+    PyPy precheck's ruff, which reads no configuration (--isolated, and then ruff's own defaults
+    skipped src/<pkg>/dist/ and the like), gets it on its command line, where ruff reads the
+    patterns against its working folder, ROOT (cmd_mode._precheck_py311)."""
+    return [p if p.startswith(".") else _ruff_at_root(p, relative_to) for p in RUFF_DEFAULT_EXCLUDE]
+
+
+def ruff_config(cfg: Config, profile: str, *, relative_to: Path | None = None) -> dict[str, Any]:
+    """`relative_to`: for the copies under .build/cfg that the runner hands ruff with --config,
+    whose paths ruff reads against its working folder, `relative_to`, never against the file.
+    Never absolute: ruff expands ~, $NAME and ${NAME} in them, and the absolute paths of a
+    project folder named like app$v2 named a variable that is not set (section 15.1).
+
+    Every folder it excludes is the root's own (RUFF_DEFAULT_EXCLUDE): ruff reads a pattern
+    without a slash as a name at any depth, and one with a slash from the project's root."""
     data = load_profile(profile).get("ruff", {})
 
     def path(p: str) -> str:
-        return (ROOT / p).as_posix() if absolute else p
+        return _ruff_path(p, relative_to)
+
+    def at_root(p: str) -> str:
+        return _ruff_at_root(p, relative_to)
 
     select = list(data.get("select", []))
     lint: dict[str, Any] = {"select": select, "ignore": list(data.get("ignore", []))}
@@ -319,7 +410,8 @@ def ruff_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict[st
         "target-version": "py" + cfg.min_python.replace(".", ""),
         "line-length": 100,
         "src": [path("src"), path("tests")],
-        "extend-exclude": [path(p) for p in (".build", "dist", ".pytemplate", "typings")],
+        "exclude": ruff_exclude(relative_to),
+        "extend-exclude": [at_root(p) for p in (".build", "dist", ".pytemplate", "typings")],
         "lint": lint,
         "format": {"docstring-code-format": True},
     }
@@ -340,6 +432,18 @@ def jsonc(data: Any) -> str:
 # --- CI ------------------------------------------------------------------------------------------
 
 CI_PLACEHOLDERS = ("__HEADER__", "__MATRIX__", "__LINUX_DEPS__", "__NAME__", "__BUILD_BACKEND__")
+# The packages a preset offers ([preset.<name>] package) that publish no wheel, and no sdist,
+# for a runner's OS: no backend can sync there, so the generated CI leaves that runner out.
+# raylib_software 6.0.1.0 (and every release before it): Linux and Windows wheels only (15.1)
+NO_WHEELS_FOR = {("raylib", "raylib-software"): ("macos",)}
+
+
+def _unsupported_oses(cfg: Config) -> set[str]:
+    """The runner OSes (the label's first word) the project's preset package has no wheel for."""
+    package = presets.options(cfg).get("package")
+    if not isinstance(package, str):
+        return set()
+    return set(NO_WHEELS_FOR.get((cfg.app.preset, re.sub(r"[-_.]+", "-", package).lower()), ()))  # PEP 503
 
 
 def ci_workflow(cfg: Config) -> str:
@@ -352,7 +456,10 @@ def ci_workflow(cfg: Config) -> str:
         raise PytError(f"{rel(path)} is not UTF-8 text: save it as UTF-8") from None
     builds = [b for b in ("mypyc", "cpython") if cfg.supports(b)]
     matrix: list[str] = []
+    unsupported = _unsupported_oses(cfg)
     for os_name in ("ubuntu-latest", "windows-latest", "macos-latest"):
+        if os_name.partition("-")[0] in unsupported:
+            continue  # that runner's job failed on every push: `./pyt sync` found no wheel to install
         backends = list(cfg.backend.supported)
         if os_name.startswith("macos") and cfg.app.preset == "raylib" and "pypy" in backends:
             backends.remove("pypy")  # raylib publishes no PyPy wheels for macOS arm64
@@ -488,6 +595,23 @@ def _save_state(files: dict[str, str]) -> None:
         raise PytError(f"cannot write {rel(STATE_FILE)}: {e.strerror or e}") from None
 
 
+def _in_the_way(path: str) -> str | None:
+    """What stops the generated file `path` from being written, or None: a file (or a link to
+    nothing) where one of its folders must be, `.vscode` left as a file (mkdir said only "File
+    exists", about the file to be written, and --check called it outdated), or a folder of its
+    own name."""
+    parent = ROOT
+    for part in Path(path).parts[:-1]:
+        parent = parent / part
+        if os.path.lexists(parent) and not parent.is_dir():
+            kind = "a link to nothing" if os.path.islink(parent) and not parent.exists() else "a file"
+            return f"{path} is generated, but {parent.relative_to(ROOT).as_posix()} is {kind}, where its folder must be: remove or rename it"
+    target = ROOT / path
+    if target.exists() and not target.is_file():
+        return f"{path} is generated, but a folder of that name is in the way: remove it"
+    return None
+
+
 def _write(path: str, target: Path, content: str) -> None:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -512,18 +636,28 @@ def _diff(path: str, generated: str, current: str) -> str:
     return "\n".join(lines)
 
 
+class NoPython(PytError):
+    """python.cpython names a CPython uv can neither find nor install here (envs.ensure_python
+    says why): .python-version is never written with it, so nothing is rendered."""
+
+
 def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: bool = False) -> tuple[list[str], list[str]]:
-    """Write the outdated files. Return (changed, hand_edited). --dry-run behaves like `check`."""
+    """Write the outdated files. Return (changed, hand_edited). --dry-run behaves like `check`.
+    NoPython before the first write when .python-version would name a CPython uv cannot provide."""
     check = check or proc.DRY_RUN
     state = _load_state()
     changed: list[str] = []
     edited: list[str] = []
     new_state = dict(state)
-    for path, content in outputs(cfg).items():
+    # .python-version first: the question it may need (below) comes before any other write
+    generated = sorted(outputs(cfg).items(), key=lambda item: item[0] != ".python-version")
+    for path, _ in generated:  # every path, before the first write: nothing half-rendered
+        problem = _in_the_way(path)
+        if problem is not None:
+            raise PytError(problem)
+    for path, content in generated:
         target = ROOT / path
         new_hash = _digest(content)
-        if target.exists() and not target.is_file():
-            raise PytError(f"{path} is generated, but a folder of that name is in the way: remove it")
         if target.is_file():
             try:
                 current = target.read_text(encoding="utf-8", errors="replace")
@@ -534,17 +668,25 @@ def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: b
                 new_state[path] = new_hash
                 continue
             recorded = state.get(path)
-            if recorded is not None and recorded != current_hash and not force:
+            hand_edited = recorded is not None and recorded != current_hash
+            if hand_edited and show_diff:
+                # --diff: shown even with -q, and before --force overwrites the edit (the diff
+                # asked for was skipped there, and the edit was gone without being seen)
+                ui.report(_diff(path, content, _norm(current)))
+            if hand_edited and not force:
                 edited.append(path)
-                if show_diff:
-                    ui.report(_diff(path, content, _norm(current)))  # --diff: shown even with -q
                 continue
         changed.append(path)
         if not check:
-            if path == ".python-version" and target.is_file():
-                # uv run by hand and the editors follow it: never a version uv cannot provide
-                # (the project's commands need that CPython anyway: cli._restart)
-                envs.ensure_python(content.strip())
+            if path == ".python-version":
+                # The launchers (once the project has .venv), uv run by hand and the editors follow
+                # it: never a version uv cannot provide, a missing file included (deleted by hand:
+                # a python.cpython typo written into it stopped every command, help and render
+                # included). The project's commands need that CPython anyway (cli._restart).
+                try:
+                    envs.ensure_python(content.strip())
+                except PytError as e:
+                    raise NoPython(str(e), e.code) from None
             _write(path, target, content)
             new_state[path] = new_hash
     if not check and new_state != state:
@@ -553,20 +695,59 @@ def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: b
 
 
 def auto(cfg: Config, *, force: bool = False) -> None:
-    """Silently render before every command: print one line if something changed."""
-    changed, edited = apply(cfg, force=force)
-    if changed:
-        ui.info(f"render: {'would update' if proc.DRY_RUN else 'updated'} {', '.join(changed)}")
+    """Silently render before every command: print one line if something changed. A
+    python.cpython uv cannot provide (NoPython) renders nothing and never stops the command:
+    doctor, which runs on any Python, then reports it with its other checks (it stopped with
+    exit 3 before any check); a command that needs that CPython stops on its own (cli._restart).
+    While a task runs (once_per_task) its plan and warnings print once."""
+    try:
+        changed, edited = apply(cfg, force=force)
+    except NoPython as e:
+        _say(ui.warn, f"generated files not rendered: {e}")
+        changed, edited = [], []
+    if changed and not proc.DRY_RUN:
+        ui.info(f"render: updated {', '.join(changed)}")  # a real write, each time one happens
+    elif changed:
+        _say(ui.info, f"render: would update {', '.join(changed)}")
     if edited:
-        ui.warn(
+        _say(
+            ui.warn,
             f"not overwriting hand-edited generated files: {', '.join(edited)}\n"
-            "  Change pytemplate.toml or .pytemplate/templates instead, or use ./pyt render --force"
+            "  Change pytemplate.toml or .pytemplate/templates instead, or use ./pyt render --force",
         )
     if pyproject_outdated(cfg):
-        ui.warn(
+        _say(
+            ui.warn,
             "pyproject.toml does not match pytemplate.toml (backend.supported / python / preset).\n"
-            "  Apply your pytemplate.toml changes with: ./pyt apply"
+            "  Apply your pytemplate.toml changes with: ./pyt apply",
         )
+
+
+# What auto() said while a task runs (cli.dispatch renders before the task and again before each
+# builtin among its deps: a dep such as `mode` may change pytemplate.toml); None outside one.
+_SAID: set[str] | None = None
+
+
+@contextlib.contextmanager
+def once_per_task() -> Iterator[None]:
+    """auto()'s plan and warnings print once while a task runs: they came again for every
+    builtin dep, three times for the `ci` task of every preset."""
+    global _SAID
+    outer = _SAID
+    if outer is None:
+        _SAID = set()
+    try:
+        yield
+    finally:
+        _SAID = outer
+
+
+def _say(emit: Callable[[str], None], message: str) -> None:
+    if _SAID is not None:
+        if message in _SAID:
+            return
+        _SAID.add(message)
+    emit(message)
 
 
 # --- pyproject.toml (managed parts) ---------------------------------------------------------------
@@ -750,7 +931,7 @@ def managed_values(text: str) -> dict[str, Any]:
         return {}
     try:
         return tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1]))
-    except tomllib.TOMLDecodeError:
+    except config.TOML_ERRORS:
         return {}
 
 
@@ -758,7 +939,7 @@ def _adopted(cfg: Config, lines: list[str], bounds: tuple[int, int] | None) -> s
     """The additive keys of the block that the project's [tool.uv] defines outside the markers."""
     try:
         data = tomllib.loads("\n".join(_outside_block(lines, bounds)))
-    except tomllib.TOMLDecodeError:
+    except config.TOML_ERRORS:
         return set()  # _verify says what is wrong
     return set(_table(data, "tool", "uv")) & set(tomllib.loads(managed_block(cfg))) & ADDITIVE_KEYS
 
@@ -837,7 +1018,7 @@ def _verify(cfg: Config, text: str, new: str) -> None:
     old_keys: set[str] = set()
     try:
         old = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
+    except config.TOML_ERRORS as e:  # a plain ValueError (an integer of 5000 digits) and a RecursionError too
         # Only one clash is repaired: the project's own list of an additive key next to the
         # block's (it added it while the block had it too), when both halves read on their own;
         # the rewrite leaves the key to the project. Anything else broken is the user's to fix.
@@ -846,16 +1027,16 @@ def _verify(cfg: Config, text: str, new: str) -> None:
             try:
                 tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1]))
                 rest = tomllib.loads("\n".join(_outside_block(lines, bounds)))
-            except tomllib.TOMLDecodeError:
+            except config.TOML_ERRORS:
                 rest = None
         if rest is None:
-            raise PytError(f"pyproject.toml is not valid TOML ({e}).\n  Fix it, then run ./pyt lock") from None
+            raise PytError(f"pyproject.toml is not valid TOML ({config.toml_error(e)}).\n  Fix it, then run ./pyt lock") from None
         old = rest
     else:
         if bounds:
             try:
                 old_keys = set(tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1])))
-            except tomllib.TOMLDecodeError:
+            except config.TOML_ERRORS:
                 pass  # the comparison below reports it
             # Only the keys a block writes may go; any other key there is the user's and the
             # rewrite would drop it (an index-url, a constraint: gone without a word)
@@ -872,9 +1053,9 @@ def _verify(cfg: Config, text: str, new: str) -> None:
     written = set(managed) - adopted
     try:
         data = tomllib.loads(new)
-    except tomllib.TOMLDecodeError as e:
+    except config.TOML_ERRORS as e:
         raise PytError(
-            f"pyproject.toml: writing the parts managed by pytemplate would give invalid TOML ({e}).\n"
+            f"pyproject.toml: writing the parts managed by pytemplate would give invalid TOML ({config.toml_error(e)}).\n"
             f"  Does [tool.uv] repeat a managed key ({', '.join(sorted(written))}) outside the markers? Delete it there\n"
             "  (./pyt lock writes the managed block again), or restore the markers"
         ) from None
@@ -920,7 +1101,7 @@ def gains_pypy(cfg: Config) -> bool:
         return False
     try:
         return not resolves_pypy(tomllib.loads(_read_pyproject()))
-    except (PytError, tomllib.TOMLDecodeError):
+    except (PytError, *config.TOML_ERRORS):
         return True
 
 
@@ -943,7 +1124,7 @@ def _same_meaning(text: str, new: str) -> bool:
         return True
     try:
         return tomllib.loads(text) == tomllib.loads(new)
-    except tomllib.TOMLDecodeError:
+    except config.TOML_ERRORS:
         return False
 
 

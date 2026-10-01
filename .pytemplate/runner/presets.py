@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import proc, ui
-from .config import APP_NAME, BACKENDS, NAME_RULE
+from .config import APP_NAME, BACKENDS, NAME_RULE, TOML_ERRORS, toml_error
 from .project import BUILD, INSTALL_RECORD, PRESETS, PYPROJECT, ROOT, TEMPLATE, rel, write_whole
 from .ui import PytError
 
@@ -52,9 +52,9 @@ CONSTRAINTS = "constraints.txt"
 RESERVED_PACKAGES = {
     "src": "src/ (paths relative to the root and to src/ would read the same: the problem matchers, rename)",
     "tests": "tests/ (a package too: the imports would clash)",
-    "typings": "typings/ (.ruff.toml excludes it: ruff would skip the app)",
-    "build": "build/ (.gitignore excludes it at any depth: the app would never reach git)",
-    "dist": "dist/ (.gitignore excludes it at any depth: the app would never reach git)",
+    "typings": "typings/ (the stubs at the root: paths relative to the root and to src/ would read the same)",
+    "build": "build/ (the packagers' output at the root: paths relative to the root and to src/ would read the same)",
+    "dist": "dist/ (the builds at the root: paths relative to the root and to src/ would read the same)",
     "assets": "src/assets/ (the data folder bundled with the app: app.assets)",
 }
 # Windows reserves these names (any case, any extension) for devices: src/aux/ cannot be created
@@ -255,8 +255,8 @@ def _read_text(path: Path, what: str) -> str:
 def _read_toml(path: Path, what: str) -> dict[str, Any]:
     try:
         return tomllib.loads(_read_text(path, what))
-    except tomllib.TOMLDecodeError as e:
-        raise PytError(f"{what} is not valid TOML: {e}") from None
+    except TOML_ERRORS as e:  # an integer of 5000 digits, arrays nested a thousand deep: no TOMLDecodeError
+        raise PytError(f"{what} is not valid TOML: {toml_error(e)}") from None
 
 
 def read_pyproject() -> dict[str, Any]:
@@ -311,6 +311,15 @@ def _is_project(entry: dict[str, Any]) -> bool:
     """The project's own entry in uv.lock (source virtual or editable ".")."""
     source = entry.get("source")
     return isinstance(source, dict) and "." in (source.get("virtual"), source.get("editable"))
+
+
+def locked_project_name(lock: Path | None = None) -> str | None:
+    """The project's own name in uv.lock, as uv writes it (normalized); None: no uv.lock, or none
+    that holds the project's entry."""
+    for entry in _lock_entries(lock):
+        if _is_project(entry):
+            return str(entry["name"])
+    return None
 
 
 def _requires(entry: dict[str, Any]) -> set[str]:
@@ -484,11 +493,14 @@ def _installed_import_names() -> dict[str, set[str]]:
     """The top-level modules of every distribution installed in an environment of the project
     (`.venv*`, either layout), by normalized distribution name: what a dependency the user
     added installs under another name (beautifulsoup4's bs4), which IMPORT_NAMES cannot know.
-    Empty without an environment (a fresh clone, the copy `new` makes: its source checked it)."""
+    Empty without an environment (a fresh clone, the copy `new` makes: its source checked it).
+    An environment this user may not enter (a root-owned 0700 .venv) holds nothing it can read
+    (os.path: before 3.14, pathlib's is_dir raised PermissionError there, and new, rename and
+    an apply that renames ended in an internal-error traceback)."""
     out: dict[str, set[str]] = {}
-    for env in sorted(p for p in ROOT.glob(".venv*") if p.is_dir()):
+    for env in sorted(p for p in ROOT.glob(".venv*") if os.path.isdir(p)):
         for site in (*env.glob("lib/*/site-packages"), env / "Lib" / "site-packages"):
-            for info in sorted(site.glob("*.dist-info")) if site.is_dir() else ():
+            for info in sorted(site.glob("*.dist-info")) if os.path.isdir(site) else ():
                 dist = _norm_name(info.name[: -len(".dist-info")].rsplit("-", 1)[0])
                 out.setdefault(dist, set()).update(_record_modules(info))
     return out
@@ -652,9 +664,19 @@ def shadows_stdlib(pkg: str) -> bool:
 
 def set_project_name(text: str, name: str) -> str:
     """`text` (a pyproject.toml) with [project] name = `name` (_set_project_name). PytError when
-    the result does not say so, so no caller reports a change it did not make (apply, rename)."""
+    the result does not say so, so no caller reports a change it did not make (apply, rename). A
+    text that is no valid TOML is said to be so (it was "edit that line by hand")."""
+    try:
+        data = tomllib.loads(text.lstrip("\ufeff"))
+    except TOML_ERRORS as e:
+        raise PytError(f'could not set [project] name = "{name}": pyproject.toml is not valid TOML: {toml_error(e)}') from None
     new = _set_project_name(text, name)
     if project_name(new) != name:
+        table = data.get("project")
+        if not isinstance(table, dict):  # no line to edit: say what to add ("edit that line" named none)
+            raise PytError(f'could not set [project] name = "{name}": pyproject.toml has no [project] table: add one, with name = "{name}"')
+        if "name" not in table:
+            raise PytError(f'could not set [project] name = "{name}": pyproject.toml has no [project] name: add name = "{name}" to that table')
         raise PytError(f'could not set [project] name = "{name}" in pyproject.toml: edit that line by hand and try again')
     return new
 
@@ -663,7 +685,7 @@ def project_name(text: str) -> str | None:
     """Return [project] name of a pyproject.toml text (None: missing, not a string or not TOML)."""
     try:
         value = tomllib.loads(text.lstrip("\ufeff")).get("project", {}).get("name")
-    except (tomllib.TOMLDecodeError, AttributeError):
+    except (*TOML_ERRORS, AttributeError):
         return None
     return value if isinstance(value, str) else None
 
@@ -717,9 +739,9 @@ def pyproject_after_init(cfg: Config, preset: str, name: str) -> str:
         managed = render.pyproject_expected(cfg, _set_extra_tables(_set_project_name(text, name), ""))
         text = _set_extra_tables(managed, extra)
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
+    except TOML_ERRORS as e:
         raise PytError(
-            f"pyproject.toml would not be valid TOML with the tables of the '{preset}' preset ({e}).\n"
+            f"pyproject.toml would not be valid TOML with the tables of the '{preset}' preset ({toml_error(e)}).\n"
             f"  One of them is probably defined outside the markers: {hint}"
         ) from None
     project = data.get("project")
@@ -775,7 +797,7 @@ def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> Ini
     """Every check `init` makes, in memory: nothing is written (the --dry-run of init prints it)."""
     from . import config, render
 
-    new_name = name or cfg.app.name
+    new_name = cfg.app.name if name is None else name  # an empty --name is refused, never the current name
     check_name_free(cfg, preset, new_name)  # the format too
     target = load(preset)
     if not force and not pristine(cfg):
@@ -1001,13 +1023,14 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
 
 # --- new -----------------------------------------------------------------------------------------
 
-# Never copied by `new`: history, builds, caches and the marker of the template repository itself
-SKIP_ANYWHERE = frozenset(
-    {".git", ".build", "dist", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".hypothesis", ".flet", "template-repo"}
-)
-# PyInstaller/Flet leftovers, Claude Code state (settings, agent worktrees), and the page and
-# license of the program this is: a project made with `new` is another program (TEMPLATE_DOCS)
-SKIP_AT_ROOT = frozenset({"build", ".claude", "README.md", "LICENSE"})
+# Never copied by `new`: history, caches and the marker of the template repository itself
+SKIP_ANYWHERE = frozenset({".git", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".hypothesis", ".flet", "template-repo"})
+# The root's own outputs (./pyt's .build/ and dist/, PyInstaller/Flet's build/: .gitignore names
+# them from the root, since src/<pkg>/build/ or docs/dist/ is source like any other, and skipped
+# at any depth a tracked docs/dist/ never reached the new project, without a word), Claude Code
+# state (settings, agent worktrees), and the page and license of the program this is: a project
+# made with `new` is another program (TEMPLATE_DOCS)
+SKIP_AT_ROOT = frozenset({".build", "dist", "build", ".claude", "README.md", "LICENSE"})
 # Where a project keeps the template repository's README (the manual of ./pyt, of the
 # version it was made from) and LICENSE (the notice the MIT license asks for, for the copied
 # runner). A project copies them on like any tracked file when it runs `new` itself.
@@ -1065,11 +1088,20 @@ def _git_path(line: str) -> str:
     return os.fsdecode(bytes(raw))
 
 
+# What git said when the last _git_files call found a repository in ROOT that git refuses to
+# read (dubious ownership: a clone that another user owns; a broken repository), and the line
+# of git's message that says how to let it ("" for none): the callers name them (new warns, as
+# its copy then takes every file; install refuses). Both "" otherwise.
+_git_refused = ""
+_git_refused_fix = ""
+
+
 def _git_files(*args: str) -> list[str] | None:
-    """`git ls-files ARGS` in ROOT (paths relative to it, _git_path); None without git or a work
-    tree. Any other git failure (dubious ownership, a broken repository) is said out loud: the
-    copy then takes every file, untracked ones included."""
-    git = shutil.which("git")
+    """`git ls-files ARGS` in ROOT (paths relative to it, _git_path); None without git, a work
+    tree, or when git refuses the repository (_git_refused then says why)."""
+    global _git_refused, _git_refused_fix
+    _git_refused = _git_refused_fix = ""
+    git = proc.find_program("git")
     if git is None:
         return None
     env = {**_git_env(), "LC_ALL": "C"}  # git's messages in English: "not a git repository"
@@ -1079,10 +1111,18 @@ def _git_files(*args: str) -> list[str] | None:
     if r.returncode != 0:
         reason = (r.stderr or r.stdout or "").strip()
         if "not a git repository" not in reason:
-            first = reason.splitlines()[0] if reason else f"exit code {r.returncode}"
-            ui.warn(f"git ls-files failed in {ROOT} ({first}): the copy includes files git does not track")
+            _git_refused = reason.splitlines()[0] if reason else f"exit code {r.returncode}"
+            _git_refused_fix = next((ln.strip() for ln in reason.splitlines() if "safe.directory" in ln and ln.strip().startswith("git ")), "")
         return None
     return [_git_path(line) for line in r.stdout.split("\n") if line]
+
+
+def git_refusal_fix() -> str:
+    """How to let git read the repository in ROOT, after it refused it (_git_refused): install
+    said "not a git work tree ... use a git clone" for a clone that another user owns."""
+    if "dubious ownership" in _git_refused:
+        return "run pyt as the folder's owner, or let git read it: " + (_git_refused_fix or f"git config --global --add safe.directory {ROOT}")
+    return "repair the repository, or use a fresh git clone"
 
 
 def _installed() -> bool:
@@ -1103,6 +1143,8 @@ def _tracked_template() -> tuple[list[str] | None, str]:
     The installed template (global mode) is a clean copy of a template's tracked files made by
     `pyt install`, with no .git: every file, without asking a git (the folder may even lie in
     a repository of the user's, such as a home folder kept in git)."""
+    global _git_refused, _git_refused_fix
+    _git_refused = _git_refused_fix = ""  # what an earlier call left (a stand-in _git_files sets nothing)
     if _installed():
         return None, "every file"
     tracked = _git_files("--cached")
@@ -1110,12 +1152,23 @@ def _tracked_template() -> tuple[list[str] | None, str]:
         return tracked, "the files git tracks"
     if tracked is not None:
         return None, "every file, ignored ones included: git does not track this project's files (never committed?)"
-    return None, "every file, ignored ones included: " + ("git not found" if shutil.which("git") is None else "not a git work tree")
+    if _git_refused:
+        return None, "every file, ignored ones included: git refuses to read this repository"
+    return None, "every file, ignored ones included: " + ("git not found" if proc.find_program("git") is None else "not a git work tree")
+
+
+def _warn_refused(verb: str) -> None:
+    """new's warning when git refused the repository: the copy takes every file, secrets (.env)
+    and untracked ones included."""
+    if _git_refused:
+        ui.warn(f"git ls-files failed in {ROOT} ({_git_refused}): the copy {verb} files git does not track\n  {git_refusal_fix()}")
 
 
 def copy_scope() -> str:
     """What copy_template would copy from here (`new --dry-run`)."""
-    return _tracked_template()[1]
+    how = _tracked_template()[1]
+    _warn_refused("would include")
+    return how
 
 
 def _copy_entry(src: Path, target: Path, rel_path: str, errors: list[tuple[str, str, str]]) -> None:
@@ -1147,6 +1200,148 @@ def _raise_copy_errors(dest: Path, errors: list[tuple[str, str, str]]) -> None:
         raise PytError(f"could not copy the template into {dest}:\n  " + "\n  ".join(lines) + more, 1)
 
 
+# What uv names from the project by a relative path: the local sources of pyproject.toml's
+# [tool.uv.sources] and of uv.lock, a file (path) or a folder (directory, editable, virtual); a
+# local wheelhouse or index of uv's settings (pyproject.toml's [tool.uv], a uv.toml next to it):
+# find-links, an index url ([[tool.uv.index]] url, index-url, extra-index-url, and the same of
+# [tool.uv.pip]); and uv.lock's record of a package found there, `source = { registry = "../w" }`
+_SOURCE_KEYS = ("path", "directory", "editable", "virtual")
+_INDEX_KEYS = frozenset({("index", "url"), *((*pre, k) for pre in ((), ("pip",)) for k in ("find-links", "index-url", "extra-index-url"))})
+# Their `key = "value"` forms, for a text the TOML statement scanner cannot read
+_SOURCE_VALUE = re.compile(r"""(\b(?:path|directory|editable|virtual|registry|url)\s*=\s*)("(?:[^"\\\n]|\\.)*"|'[^'\n]*')""")
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]+:")  # a scheme (https:, file:): a drive (C:) has one letter
+
+
+def _uv_place(path: tuple[str, ...]) -> bool:
+    """Whether `path` (keys below [tool.uv], or of a uv.toml) holds a local source or index."""
+    return (path[:1] == ("sources",) and path[-1] in _SOURCE_KEYS) or path in _INDEX_KEYS
+
+
+# Each file that names them: its name, the statements that may (the scanner's key paths), and
+# the values that do (`place` of their key path, list positions left out)
+_REBASED: tuple[tuple[str, tuple[str, ...], Callable[[tuple[str, ...]], bool]], ...] = (
+    ("pyproject.toml", ("tool", "uv"), lambda p: p[:2] == ("tool", "uv") and _uv_place(p[2:])),
+    ("uv.toml", (), _uv_place),
+    ("uv.lock", (), lambda p: bool(p) and p[-1] in (*_SOURCE_KEYS, "registry")),
+)
+
+
+def _inside(path: str, folder: str) -> bool:
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def _map_places(node: Any, place: Callable[[tuple[str, ...]], bool], f: Callable[[str], str], path: tuple[str, ...] = ()) -> Any:
+    """`node` (parsed TOML) with `f` applied to each string `place` names: `path` holds the keys
+    from the top, list positions left out (the strings of a list are its key's values)."""
+    if isinstance(node, dict):
+        return {k: _map_places(v, place, f, (*path, k)) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_map_places(item, place, f, path) for item in node]
+    return f(node) if isinstance(node, str) and place(path) else node
+
+
+def _rebased_text(text: str, found: dict[str, str], scope: tuple[str, ...]) -> str:
+    """`text` with each string literal whose value `found` names written anew, in the statements
+    at or below `scope` (the TOML statement scanner's; a string of an array or inline table too,
+    never a comment), or, in a text the scanner cannot read, in its `key = "value"` forms."""
+    from .config import _string_end, scan, toml_value
+
+    def new_literal(literal: str) -> str | None:
+        try:
+            value = tomllib.loads(f"v = {literal}")["v"]
+        except tomllib.TOMLDecodeError:
+            return None
+        return toml_value(found[value]) if isinstance(value, str) and value in found else None
+
+    stmts = scan(text)
+    if stmts is None:
+        return _SOURCE_VALUE.sub(lambda m: m[0] if (new := new_literal(m[2])) is None else m[1] + new, text)
+    out: list[str] = []
+    at = 0
+    for s in stmts:
+        if s.kind != "key" or s.path[: len(scope)] != scope[: len(s.path)]:
+            continue
+        i, stop = s.value
+        while i < stop:
+            if text[i] in "\"'":
+                end = _string_end(text, i)
+                new = new_literal(text[i:end])
+                if new is not None:
+                    out += [text[at:i], new]
+                    at = end
+                i = end
+            elif text[i] == "#":  # a comment of a multi-line array
+                nl = text.find("\n", i, stop)
+                i = stop if nl < 0 else nl
+            else:
+                i += 1
+    return "".join(out) + text[at:]
+
+
+def rebase_local_sources(src: Path, dest: Path) -> None:
+    """In `dest`, a copy of the project `src`: what uv names from the project by a relative path
+    that leaves `src` names the same file or folder from `dest`, in every file alike, so `uv lock
+    --check` still passes there (uv 0.10.12 and 0.12.19). A local library (`./pyt add ../mylib`:
+    `mylib = { path = "../mylib" }` in pyproject.toml's [tool.uv.sources], `directory =
+    "../mylib"` in uv.lock, which writes every path from the project, a library's own local
+    dependencies too), and a local wheelhouse or index (`find-links = ["../wheels"]`, an index
+    `url = "../wheels"` of uv's settings, `source = { registry = "../wheels" }` in uv.lock).
+    Copied as they were, they named another folder from the copy: `new` stopped in __init's `uv
+    add` ("Distribution not found", "Failed to read `--find-links` directory"), and so did
+    selftest --e2e and --nvim (their `new`), the workers of selftest --mutation, `new` from the
+    installed template and the tests that lock a copy of the project. What lies inside `src`
+    stays (the copy holds it at the same place), and so does a URL. A file that does not read,
+    one that is no file of `dest` (a link out of it: never written through), or an edit that
+    would change anything else in it, stays as it is, with a warning when it names such a
+    source."""
+    root, there = os.path.realpath(src), os.path.realpath(dest)
+
+    def from_dest(value: str) -> str | None:
+        if ".." not in value or os.path.isabs(value) or re.match(r"[A-Za-z]:|[\\/]", value) or _URL.match(value):
+            return None  # inside, absolute (drive-relative too) or a URL: the same from anywhere
+        target = os.path.normpath(os.path.join(root, value))
+        if _inside(target, root):
+            return None
+        try:
+            new = os.path.relpath(target, there)
+        except ValueError:  # another drive (Windows)
+            new = target
+        new = new.replace(os.sep, "/")
+        return None if any("\ud800" <= c <= "\udfff" for c in new) else new  # no TOML string holds it
+
+    for name, scope, place in _REBASED:
+        path = dest / name
+        try:
+            raw = path.read_bytes()
+            if b".." not in raw:
+                continue  # no relative path leaves the project
+            bom = raw.startswith(b"\xef\xbb\xbf")
+            text = raw.decode("utf-8-sig")
+            before = tomllib.loads(text)
+        except (OSError, UnicodeDecodeError, *TOML_ERRORS):
+            continue  # nothing to rebase, or a file the command that reads it names
+        found: dict[str, str] = {}
+
+        def note(value: str) -> str:
+            new = from_dest(value)
+            if new is not None and new != value:
+                found[value] = new
+            return value
+
+        _map_places(before, place, note)
+        if not found:
+            continue
+        edited = _rebased_text(text, found, scope)
+        try:
+            ok = tomllib.loads(edited) == _map_places(before, place, lambda v: found.get(v, v))
+        except TOML_ERRORS:
+            ok = False
+        if not ok or not _inside(os.path.realpath(path), there):
+            ui.warn(f"{path}: its local sources {', '.join(sorted(found))} are not named from this copy: uv may not find them from {dest}")
+            continue
+        write_whole(path, (b"\xef\xbb\xbf" if bom else b"") + edited.encode("utf-8"))
+
+
 def copy_template(dest: Path) -> None:
     """Copy the template to `dest`, without history, environments, builds, caches or the
     template repository's own files (_skipped).
@@ -1158,7 +1353,8 @@ def copy_template(dest: Path) -> None:
     installed template (global mode), without a word about it. A symbolic link is
     copied as a link, as git tracks it (a link to a folder is not the folder's content, and a
     dangling one is still a tracked file). A copy that fails is a PytError (exit 1) naming what
-    failed.
+    failed. The local sources that name a folder outside the project by a relative path (a
+    library `../mylib`) name it from `dest` (rebase_local_sources).
     """
     if dest.exists() and any(dest.iterdir()):
         raise PytError(f"{dest} already exists and is not empty")
@@ -1171,7 +1367,9 @@ def copy_template(dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     errors: list[tuple[str, str, str]] = []
     if tracked is None:
-        if not _installed():  # a clean copy by construction: nothing to say about it
+        if _git_refused:
+            _warn_refused("includes")
+        elif not _installed():  # a clean copy by construction: nothing to say about it
             ui.info(f"  copying {how}")
         names = sorted(os.listdir(ROOT))
         left_out = _ignore(str(ROOT), names)
@@ -1179,6 +1377,7 @@ def copy_template(dest: Path) -> None:
             if name not in left_out:
                 _copy_entry(ROOT / name, dest / name, name, errors)
         _raise_copy_errors(dest, errors)
+        rebase_local_sources(ROOT, dest)
         return
     deleted: list[str] = []
     for rel_path in tracked:
@@ -1196,6 +1395,7 @@ def copy_template(dest: Path) -> None:
         if paths:
             more = f" and {len(paths) - 5} more" if len(paths) > 5 else ""
             ui.info(f"  not copied ({what}): {', '.join(paths[:5])}{more}")
+    rebase_local_sources(ROOT, dest)
 
 
 def _copy_link(src: Path, target: Path, rel_path: str, command: str = "new") -> None:
@@ -1225,12 +1425,31 @@ def _outermost_missing(path: Path) -> Path | None:
     return top
 
 
+def ignored_by_work_tree(git: str, folder: Path, cwd: Path) -> bool:
+    """Whether the git work tree around `folder` ignores it (`git check-ignore <folder>/pyt`, as
+    hooks asks): a home folder kept in git with `*` in its .gitignore, a monorepo that ignores its
+    apps/. A project made there is never part of that repository, so it gets one of its own.
+    `folder` need not exist yet (git matches the path); `cwd`, an existing folder inside that
+    work tree, is where git runs (exit 0: ignored; 1: not; 128: no work tree, or an error).
+    check-ignore refuses the user's GIT_*_PATHSPECS (exit 128, "pathspec magic not supported":
+    CLAUDE.md 15.1), which read as "not ignored": new then made no repository and warned that the
+    CI would not run. They are left out here, as hooks leaves them out of its git calls."""
+    from .hooks import PATHSPEC_VARS  # hooks imports render, mypyc and more
+
+    env = {k: v for k, v in _git_env().items() if k not in PATHSPEC_VARS}
+    path = Path(os.path.relpath(folder / "pyt", cwd)).as_posix()
+    r = proc.run([git, "check-ignore", "-q", "--", path], cwd=cwd, env=env, capture=True, check=False, echo=False)
+    return r.returncode == 0
+
+
 def _git_init(dest: Path) -> None:
     """A git repository on branch main (the branch the generated CI runs on), with pyt and
     pyt.ps1 executable. Inside a work tree (a monorepo) no repository; only where that one
     has core.filemode = false (Git for Windows) the two launchers are staged executable: a
-    later `git add` would record them as 100644, and the pre-commit hook refuses that."""
-    git = shutil.which("git")
+    later `git add` would record them as 100644, and the pre-commit hook refuses that. A work
+    tree that ignores the project (ignored_by_work_tree) does not count: the project got no
+    repository at all there, and setup then said to `git init` it."""
+    git = proc.find_program("git")
     if git is None:
         ui.info("  git not found: the project is not a git repository (later: git init -b main)")
         return
@@ -1238,10 +1457,10 @@ def _git_init(dest: Path) -> None:
     inside = proc.run(
         [git, "rev-parse", "--is-inside-work-tree"], cwd=dest.parent, env=env, capture=True, check=False, echo=False
     )
-    if inside.returncode == 0 and inside.stdout.strip() == "true":
+    if inside.returncode == 0 and inside.stdout.strip() == "true" and not ignored_by_work_tree(git, dest, dest.parent):
         # --bool: git's own reading of the value (off, no and 0 are false too); every git has it
         filemode = proc.run([git, "config", "--bool", "--get", "core.filemode"], cwd=dest, env=env, capture=True, check=False, echo=False)
-        if filemode.stdout.strip() == "false":  # an ignored folder: git refuses, and that is fine
+        if filemode.stdout.strip() == "false":
             proc.run([git, "add", "--chmod=+x", "--", "pyt", "pyt.ps1"], cwd=dest, env=env, capture=True, check=False)
         return
     if (dest / ".git").exists():
@@ -1306,7 +1525,7 @@ def _set_description(text: str, description: str) -> str:
     try:
         if not isinstance(tomllib.loads(text).get("project"), dict):
             return text
-    except tomllib.TOMLDecodeError:
+    except TOML_ERRORS:
         return text  # init says what is wrong with it
     try:
         return config.set_value(text, "project", "description", description)
@@ -1326,6 +1545,39 @@ def preset_python(preset: str) -> str:
     return str(version)
 
 
+def check_destination(dest: Path, prefix: str = "") -> None:
+    """Refuse, before anything is written, a destination `new` cannot use: one it may not look
+    into (below a folder it may not enter, a name too long: Path.exists raised that
+    PermissionError on Python 3.11-3.13, an internal-error traceback, and 3.14 read the folder as
+    missing, so git's start in the folder above said "cannot run git"), something that is not a
+    folder, a folder with content, one it cannot list (a traceback too), or a path below a file
+    (the copy failed with a bare `[Errno 20] Not a directory`, and new said it had removed a
+    project it never made). `prefix` starts each message."""
+    try:
+        info: os.stat_result | None = os.stat(dest)
+    except (FileNotFoundError, NotADirectoryError):
+        info = None  # missing, or below a file (the parents say which)
+    except OSError as e:
+        raise PytError(f"{prefix}cannot access {dest}: {e.strerror or e}") from None
+    if info is None:
+        if os.path.lexists(dest):  # a symbolic link whose target is gone
+            raise PytError(f"{prefix}{dest} exists and is not a folder")
+        parent = dest.parent
+        while not os.path.lexists(parent) and parent.parent != parent:
+            parent = parent.parent
+        if not parent.is_dir():
+            raise PytError(f"{prefix}{parent} is not a folder: {dest} cannot be made in it")
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        raise PytError(f"{prefix}{dest} exists and is not a folder")
+    try:
+        empty = next(iter(dest.iterdir()), None) is None
+    except OSError as e:
+        raise PytError(f"{prefix}cannot read the folder {dest}: {e.strerror or e}") from None
+    if not empty:
+        raise PytError(f"{prefix}{dest} already exists and is not empty")
+
+
 def new(dest: Path, preset: str, name: str | None, python: Path | None = None) -> None:
     """`./pyt new`: copy the template to `dest` and run `init` in the copy, on `python` (the
     preset's python.cpython, which the caller made sure uv has: envs.ensure_python), else on the
@@ -1338,14 +1590,11 @@ def new(dest: Path, preset: str, name: str | None, python: Path | None = None) -
     dest = dest.resolve()
     if dest == ROOT or ROOT in dest.parents:
         raise PytError(f"new: the destination folder cannot be inside {source_name()}")
-    app_name = name or name_from_folder(dest.name)
+    app_name = name_from_folder(dest.name) if name is None else name  # an empty name is refused below
     if not APP_NAME.fullmatch(app_name):
         raise PytError(f"'{app_name}' is not a valid app name: it may only contain {NAME_RULE}.\n  Choose one with --name NAME")
     load(preset)
-    if os.path.lexists(dest) and not dest.is_dir():
-        raise PytError(f"{dest} exists and is not a folder")
-    if dest.is_dir() and any(dest.iterdir()):
-        raise PytError(f"{dest} already exists and is not empty")
+    check_destination(dest)
     top = _outermost_missing(dest)
     ui.step(f"new project in {dest}")
     try:
@@ -1358,18 +1607,24 @@ def new(dest: Path, preset: str, name: str | None, python: Path | None = None) -
         proc.run(proc.runner_argv(proc.find_uv(), dest, [*loud, *init], python=python), cwd=dest)
     except BaseException as e:
         if top is not None:
+            made = os.path.lexists(top)
             left = [] if _remove(top) else [str(top)]
         else:
-            left = [str(child) for child in dest.iterdir() if not _remove(child)]
+            children = list(dest.iterdir())
+            made = bool(children)
+            left = [str(child) for child in children if not _remove(child)]
         note = (
-            f"the half-made project in {dest} was removed"
+            "nothing was written"  # it said it had removed a project it never made
+            if not made
+            else f"the half-made project in {dest} was removed"
             if not left
             else f"could not delete everything the failed copy wrote ({', '.join(left[:3])}): delete {dest} by hand"
         )
         if not isinstance(e, Exception):  # Ctrl+C: cleaned up, stop as asked
             ui.error(note)
             raise
-        raise PytError(f"{e}\n  {note}", e.code if isinstance(e, PytError) else 1) from e
+        what = f"{e.filename}: {e.strerror or e}" if isinstance(e, OSError) and e.filename else str(e)
+        raise PytError(f"{what}\n  {note}", e.code if isinstance(e, PytError) else 1) from e
     _git_init(dest)
     ui.ok(f"project created in {dest}. Next:")
     for line in next_steps(dest):
@@ -1403,5 +1658,14 @@ def next_steps(dest: Path) -> list[str]:
         escaped = path.replace("\\", "\\\\").replace('"', '\\"')
         return [f"cd '{path}'" if "'" not in path else f'cd "{escaped}"', setup]
     if cmd:
-        return [f'cd /d "{path}"', r".\pyt setup"]  # a Windows path never holds a double quote
+        return [f"cd /d {cmd_path(path)}", r".\pyt setup"]
     return [f"cd {shlex.quote(path)}", "./pyt setup"]
+
+
+def cmd_path(path: str) -> str:
+    """`path` as cmd reads it on a typed line: in double quotes (a Windows path never holds one),
+    each `%` outside them as `^%`. cmd expands %NAME% of a typed line inside quotes too (the hint
+    for a folder `a%OS%b` led to `aWindows_NTb`), but leaves one whose name is no variable: the
+    name between two `%` then ends in `^` (or starts with a quote), and the caret, outside the
+    quotes, is dropped after that expansion. cd strips the quotes."""
+    return "^%".join(f'"{part}"' if part else "" for part in path.split("%"))

@@ -84,7 +84,19 @@ local function text(v, max)
   if type(v) ~= "string" then
     return ""
   end
-  return (v:gsub("%c", " ")):sub(1, max or 200)
+  v = v:gsub("%c", " ")
+  local cut = max or 200
+  -- at a character boundary: a [tasks] help is the user's text, in any language, and a cut
+  -- inside a UTF-8 sequence left a lone lead byte (a garbled n with tilde in the pickers). While
+  -- the byte after the cut continues a sequence (0x80-0xBF), the cut moves back before its lead
+  for _ = 1, 3 do
+    local b = v:byte(cut + 1)
+    if not b or b < 0x80 or b >= 0xC0 then
+      break
+    end
+    cut = cut - 1
+  end
+  return v:sub(1, cut)
 end
 local function list(v)
   return (type(v) == "table" and vim.islist(v)) and v or {}
@@ -202,6 +214,9 @@ function M.info()
     local raw = fd and fd:read("*a") or ""
     if fd then
       fd:close()
+    end
+    if raw:sub(1, 3) == "\239\187\191" then -- a UTF-8 BOM (an editor, PS 5.1): render leaves it (it hashes without it), so accept it
+      raw = raw:sub(4)
     end
     local ok, data = pcall(vim.json.decode, raw, { luanil = { object = true, array = true } })
     local clean = ok and type(data) == "table" and data.schema == 1 and M.sanitize(data) or nil
@@ -348,9 +363,20 @@ function M.uv_candidates()
     end
   end
   add(vim.env.UV)
-  -- Windows: only a real uv.exe from PATH (a uv.cmd/uv.bat shim earlier on PATH would go through
-  -- cmd.exe and parse the arguments again), like pyt.cmd and pyt.ps1
-  add(vim.fn.exepath(exe))
+  if M.is_win then
+    -- only a real uv.exe from PATH (a uv.cmd/uv.bat shim earlier on PATH would go through cmd.exe
+    -- and parse the arguments again), and only from PATH's absolute folders, like pyt.cmd and
+    -- pyt.ps1: vim.fn.exepath() also searches Neovim's current folder first (while 'shell' is
+    -- cmd.exe, the default) and a relative entry from it, so a uv.exe there ran every task
+    for _, d in ipairs(vim.split(vim.env.PATH or "", ";", { plain = true, trimempty = true })) do
+      d = d:gsub('"', "")
+      if d:match("^%a:[\\/]") or d:match("^[\\/][\\/]") then
+        dir(d)
+      end
+    end
+  else
+    add(vim.fn.exepath(exe))
+  end
   dir(vim.env.UV_INSTALL_DIR)
   dir(vim.env.UV_INSTALL_DIR, "/bin")
   dir(vim.env.XDG_BIN_HOME)

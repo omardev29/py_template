@@ -14,23 +14,36 @@ and mypycify there could not see the project's dependencies.
 
 from __future__ import annotations
 
+import glob
 import json
+import os
 import re
-import shutil
 import tomllib
 from pathlib import Path
 from typing import Any
 
-from .. import envs, mypyc, render, ui
+from .. import envs, mypyc, proc, render, ui
 from ..cmd_build import BuildRequest, dist_path
-from ..config import Config, compiled_paths
+from ..config import TOML_ERRORS, Config, compiled_paths, toml_error, toml_value
 from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, rel
 from ..ui import PytError
 from . import common
 
 
+def _read_toml(path: Path) -> dict[str, Any]:
+    """pyproject.toml or uv.lock, read as uv reads them (a BOM is fine). One that cannot be read
+    or is no valid TOML is a PytError naming it: wheel.check reads pyproject.toml before
+    cmd_build.check_lock, and a broken one ended in an internal-error traceback."""
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except OSError as e:
+        raise PytError(f"wheel: cannot read {path.name}: {e.strerror or e}") from None
+    except TOML_ERRORS as e:  # an integer of 5000 digits, arrays nested a thousand deep: no TOMLDecodeError
+        raise PytError(f"wheel: {path.name} is not valid TOML: {toml_error(e)}") from None
+
+
 def _locked_version(package: str) -> str:
-    lock = tomllib.loads((PYPROJECT.parent / "uv.lock").read_text(encoding="utf-8-sig"))
+    lock = _read_toml(PYPROJECT.parent / "uv.lock")
     for pkg in lock.get("package", []):
         if pkg.get("name") == package:
             return str(pkg["version"])
@@ -89,7 +102,10 @@ def dependencies(data: dict[str, Any]) -> list[str]:
                 ref = next((source[k] for k in ("rev", "tag", "branch") if isinstance(source.get(k), str)), "")
                 where = url + (f"@{ref}" if ref else "") + (f"#subdirectory={source['subdirectory']}" if source.get("subdirectory") else "")
             elif isinstance(source.get("url"), str):
-                where = source["url"]
+                # An archive whose project is not at its root: uv's own requirement names the
+                # folder (without it pip and uv built the archive's root: another project, or none)
+                sub = source.get("subdirectory")
+                where = source["url"] + (f"{'&' if '#' in source['url'] else '#'}subdirectory={sub}" if sub else "")
         if not where:
             refused.append(f"{name} ({json.dumps(source, ensure_ascii=False)})")
             continue
@@ -107,11 +123,32 @@ def dependencies(data: dict[str, Any]) -> list[str]:
 
 def check(cfg: Config) -> None:
     """What the wheel cannot build, refused before the checks and the payload (also --dry-run)."""
-    dependencies(tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig")))
+    dependencies(_read_toml(PYPROJECT))
 
 
-def _pyproject(cfg: Config, compiled: bool) -> str:
-    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))
+def _package_data(package: Path) -> list[str]:
+    """The package-data patterns that name every file of a package copied into the build project.
+
+    setuptools expands them with the stdlib glob, whose "**/*" matches no name that starts with
+    a dot and enters no folder that does (glob's include_hidden stays off): the wheel left out
+    src/assets/.fonts/, data/.keep or a .env-style file without a word, while every other method
+    ships them. Each such file is named by its own path, escaped: glob returns a literal path that
+    exists, and a pattern whose name starts with a dot matches a hidden one.
+    """
+    patterns = ["**/*"]
+    for folder, dirs, files in os.walk(package):
+        dirs.sort()
+        for name in sorted(files):
+            path = (Path(folder) / name).relative_to(package).as_posix()
+            if not any(part.startswith(".") for part in path.split("/")):
+                continue  # "**/*" matches it
+            patterns.append(glob.escape(path))  # every name is UTF-8: _copy_tree refused the others
+    return patterns
+
+
+def _pyproject(cfg: Config, compiled: bool, src: Path | None = None) -> str:
+    """The build project's pyproject.toml; `src`: its src/ folder, whose hidden files are listed."""
+    data = _read_toml(PYPROJECT)
     project = data["project"]
     outside = _outside_package(cfg)
     modules = [top.removesuffix(".py") for top in outside if top.endswith(".py")]
@@ -119,6 +156,10 @@ def _pyproject(cfg: Config, compiled: bool) -> str:
     entry = cfg.deploy.wheel.entry or f"{cfg.pkg}.app:main"
     # Informational: the build runs without isolation, with what .venv has (these exact versions)
     requires = [f"setuptools=={_locked_version('setuptools')}"] + ([f"mypy=={_locked_version('mypy')}"] if compiled else [])
+    # A mypyc wheel is a cpXY platform wheel: with the project's open range uv tool install took
+    # the newest CPython it has (3.14 for a python.cpython of 3.13, 3.15 once installed) and
+    # found "no wheels with a matching Python version tag"; pinned, it takes (or fetches) this one
+    python = f"=={cfg.python.cpython}.*" if compiled else project.get("requires-python", ">=3.11")
     lines = [
         "[build-system]",
         f"requires = {json.dumps(requires)}",
@@ -127,8 +168,10 @@ def _pyproject(cfg: Config, compiled: bool) -> str:
         "[project]",
         f"name = {json.dumps(project['name'])}",
         f"version = {json.dumps(project['version'])}",
-        f"description = {json.dumps(project.get('description', ''), ensure_ascii=False)}",
-        f"requires-python = {json.dumps(project.get('requires-python', '>=3.11'))}",
+        # toml_value, never json.dumps: JSON leaves DEL raw, which a TOML string cannot hold, and
+        # uv refused the build project of a description holding one
+        f"description = {toml_value(project.get('description', ''))}",
+        f"requires-python = {json.dumps(python)}",
         f"dependencies = {json.dumps(dependencies(data))}",
         "",
         # A GUI app gets a launcher without a console window on Windows (like exe's console = auto)
@@ -142,10 +185,38 @@ def _pyproject(cfg: Config, compiled: bool) -> str:
         # Every file of the package travels with it: data files, py.typed, vendored native
         # libraries, and the assets (copied into <pkg>/assets, where resources.py looks)
         "[tool.setuptools.package-data]",
-        *(f'{json.dumps(name)} = ["**/*"]' for name in packages),
+        *(f"{json.dumps(name)} = {toml_value(_package_data(src / name) if src else ['**/*'])}" for name in packages),
     ]
     return "\n".join(lines) + "\n"
 
+
+# The install step bdist_wheel runs, in every generated setup.py. setuptools expands $NAME and
+# {NAME} in the install prefix, sys.prefix: the .venv of a project folder such as app$v2 or br{x}
+# stopped every wheel build ("invalid variable 'v2'"), and inside a virtual environment it
+# ignores a prefix given in setup.cfg. The wheel never installs there (bdist_wheel names every
+# folder it installs to), so the class gives the step a prefix that holds nothing to expand.
+INSTALL_CLASS = '''\
+from setuptools.command.install import install
+
+
+class Install(install):
+    """The install step of bdist_wheel, with a prefix that holds no $NAME: setuptools expands
+    those of sys.prefix, the .venv of the project folder, which the wheel never installs to."""
+
+    def finalize_options(self):
+        if self.prefix is None and self.home is None and not self.user and self.install_base is None:
+            self.prefix = "."
+        super().finalize_options()
+'''
+
+PURE_SETUP_PY = '''\
+"""Generated by ./pyt build --method wheel."""
+from setuptools import setup
+
+{install}
+
+setup(cmdclass={{"install": Install}})
+'''
 
 SETUP_PY = '''\
 """Generated by ./pyt build --method wheel: compiles the modules in compile.modules with mypyc."""
@@ -182,12 +253,17 @@ if compiler.compiler_type == "unix":
 for ext in extensions:
     ext.extra_compile_args = [*ext.extra_compile_args, *flags]
 
-setup(ext_modules=extensions)
+{install}
+
+setup(ext_modules=extensions, cmdclass={{"install": Install}})
 '''
 
 
-def setup_py(cfg: Config) -> str:
-    """Return the setup.py of a mypyc wheel: the same [compile] options as the mypyc stage."""
+def setup_py(cfg: Config, compiled: bool = True) -> str:
+    """Return the setup.py of the wheel's build project: for mypyc the same [compile] options as
+    the mypyc stage; every one runs the install step with INSTALL_CLASS."""
+    if not compiled:
+        return PURE_SETUP_PY.format(install=INSTALL_CLASS)
     return SETUP_PY.format(
         files=[f"src/{p.relative_to(SRC).as_posix()}" for p in mypyc.compiled_sources(cfg)],
         opt=cfg.compile.opt_level,
@@ -197,19 +273,61 @@ def setup_py(cfg: Config) -> str:
         separate=cfg.compile.separate,
         strict_dunder_typing=cfg.compile.strict_dunder_typing,
         group=None if cfg.compile.separate else mypyc.group_name(cfg),
+        install=INSTALL_CLASS,
     )
 
 
-def _skip(directory: str, names: list[str]) -> set[str]:
-    """Caches, and build outputs left in src/ (a stray in-place compile): an extension next to
-    the .py it was built from, or a mypyc shared lib. Other .so/.pyd files are app content."""
-    skip = {n for n in names if n in mypyc.SKIP_DIRS}
-    for n in names:
-        if n.endswith(EXT_SUFFIXES):
-            stem = n.split(".")[0]
-            if stem.endswith("__mypyc") or f"{stem}.py" in names:
-                skip.add(n)
-    return skip
+def _stray_output(path: Path) -> bool:
+    """A build output left in src/ (a stray in-place compile): an extension next to the .py it
+    was built from, or a mypyc shared lib. Other .so/.pyd files are app content."""
+    if not path.name.endswith(EXT_SUFFIXES):
+        return False
+    stem = path.name.split(".")[0]
+    return stem.endswith("__mypyc") or path.with_name(f"{stem}.py").is_file()
+
+
+def _copy_tree(src: Path, dst: Path) -> None:
+    """Copy a folder of src/ into the build project as the stage and the payloads copy it
+    (mypyc.walk: a symlinked folder is followed, a link back up its own path is not, caches stay
+    out; a broken link is a warning), leaving out stray build outputs; a file already there is
+    replaced (the assets go into the package's folder). shutil.copytree followed a link cycle
+    until the path was too long, and stopped on a dangling link, in an internal-error traceback.
+    Every copy is owner-writable (mypyc.copy_writable): build_ext --inplace writes next to the
+    sources, and the next build must be able to delete them."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for path in mypyc.walk(src):
+        target = dst / path.relative_to(src)
+        if path.is_dir():
+            _utf8_name(path, src)
+            target.mkdir(exist_ok=True)
+        elif not path.exists():
+            ui.warn(f"{rel(path)}: broken symbolic link, not copied")
+        elif not _stray_output(path):
+            _utf8_name(path, src)
+            _copy_file(path, target)
+
+
+def _utf8_name(path: Path, top: Path) -> None:
+    """A wheel holds UTF-8 names only: setuptools' zip writer died in a UnicodeEncodeError
+    traceback, with uv's generic "build failures" hint, for a data file named otherwise (Linux and
+    other POSIX systems keep a name's bytes). One error naming the file in src/, before the build."""
+    if any("\ud800" <= c <= "\udfff" for c in path.relative_to(top).as_posix()):
+        shown = os.fsencode(rel(path)).decode("utf-8", "backslashreplace")
+        raise PytError(f"wheel: {shown}: its name is not valid UTF-8, which a wheel cannot hold: rename it")
+
+
+def _copy_file(path: Path, target: Path) -> None:
+    """Copy one file of src/ into the build project: one it cannot copy (another user's, a file
+    another program holds open, a named pipe) is one error naming it, never an internal-error
+    traceback (a lone top-level module of compile.modules was one); a full disk stays itself."""
+    from ..cli import NO_ROOM
+
+    try:
+        mypyc.copy_writable(os.fspath(path), os.fspath(target))
+    except OSError as e:
+        if e.errno in NO_ROOM:
+            raise  # a full disk: cli.main names the file
+        raise PytError(f"wheel: cannot copy {rel(path)}: {e.strerror or e}") from None
 
 
 def build(req: BuildRequest) -> Path:
@@ -221,25 +339,21 @@ def build(req: BuildRequest) -> Path:
     if work.exists():
         mypyc.remove_tree(work)
     (work / "src").mkdir(parents=True)
-    # Copies from src/ itself: owner-writable (mypyc.copy_writable, and make_writable for the
-    # folders, whose modes copytree copies too): build_ext --inplace writes next to the sources,
-    # and the next build must be able to delete them
-    copy = mypyc.copy_writable
-    shutil.copytree(package, work / "src" / cfg.pkg, ignore=_skip, copy_function=copy)
+    _copy_tree(package, work / "src" / cfg.pkg)
     for top in _outside_package(cfg):  # compile.modules outside the package (a lone module)
         if (SRC / top).is_dir():
-            shutil.copytree(SRC / top, work / "src" / top, ignore=_skip, copy_function=copy)
+            _copy_tree(SRC / top, work / "src" / top)
         else:
-            copy(str(SRC / top), str(work / "src" / top))
+            _copy_file(SRC / top, work / "src" / top)
     assets = cfg.app.assets
     if assets and (SRC / assets).is_dir():
         # In a wheel the assets travel inside the package (resources.py looks for them there)
-        shutil.copytree(SRC / assets, work / "src" / cfg.pkg / "assets", ignore=_skip, dirs_exist_ok=True, copy_function=copy)
+        _copy_tree(SRC / assets, work / "src" / cfg.pkg / "assets")
     mypyc.make_writable(work / "src")
-    (work / "pyproject.toml").write_text(_pyproject(cfg, req.compiled), encoding="utf-8", newline="\n")
+    (work / "pyproject.toml").write_text(_pyproject(cfg, req.compiled, work / "src"), encoding="utf-8", newline="\n")
+    (work / "setup.py").write_text(setup_py(cfg, req.compiled), encoding="utf-8", newline="\n")
     if req.compiled:
         (work / "mypy.ini").write_text(render.mypy_ini(cfg, "mypyc", for_compile=work), encoding="utf-8", newline="\n")
-        (work / "setup.py").write_text(setup_py(cfg), encoding="utf-8", newline="\n")
     tool = envs.tool_env(cfg)
     # Synced first (a `--no-check` build never ran `uv run --locked`), before the previous wheel
     # is removed: a failed sync left no wheel at all. `uv build` ignores UV_PROJECT_ENVIRONMENT
@@ -248,9 +362,24 @@ def build(req: BuildRequest) -> Path:
     out = dist_path(req)
     common.remove_output(out)
     argv: list[str | Path] = ["build", "--wheel", "--no-build-isolation", "--python", tool.python, "--out-dir", out, work]
-    envs.uv(tool, argv, extra_env={"VSLANG": "1033"})
+    # -q hides uv's progress, never why the build failed (mypy's errors, the C compiler's, which
+    # uv's --quiet dropped): captured then, and shown when it fails
+    built = envs.uv(tool, argv, extra_env={"VSLANG": "1033"}, capture=ui.QUIET, check=False)
+    if built.returncode != 0:
+        output = ((built.stdout or "") + (built.stderr or "")).rstrip()
+        if output:
+            ui.report(output)
+        # A C compiler mypyc cannot start is a missing requirement (exit 3 and how to get one),
+        # as for the stage: uv's exit code 2 and its generic "build failures" hint said neither
+        missing = mypyc.missing_compiler(tool) if req.compiled else None
+        if missing:
+            raise PytError(f"wheel: {missing}", 3)
+        raise proc.CommandFailed(built.args, built.returncode)
     wheels = sorted(out.glob("*.whl"))
     if not wheels:
         raise PytError("uv build did not produce any wheel")
-    ui.info(f"  install it with: uv tool install {rel(wheels[0])}   (command: {cfg.app.name})")
+    # uv tool install takes the newest CPython it has, whatever the wheel's Requires-Python says
+    # (uv 0.10.12 and 0.12.19): a mypyc wheel, which loads only in its minor, needs the request
+    python = f"--python {cfg.python.cpython} " if req.compiled else ""
+    ui.info(f"  install it with: uv tool install {python}{rel(wheels[0])}   (command: {cfg.app.name})")
     return wheels[0]

@@ -6,6 +6,7 @@ plain PyInstaller the app would download a ~40 MB client on first startup.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from .. import envs, mypyc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT
-from .common import remove_output
+from .common import copy_tree, refuse_a_globbed_folder, remove_output
 
 
 def _console(req: BuildRequest) -> bool:
@@ -32,7 +33,7 @@ def _stage(req: BuildRequest) -> Path:
         return mypyc.exe_stage(req.cfg, req.app_dir, dest)
     if dest.exists():
         mypyc.remove_tree(dest)
-    shutil.copytree(req.app_dir, dest, ignore=shutil.ignore_patterns("__pycache__"), copy_function=mypyc.copy_writable)
+    copy_tree(req.app_dir, dest, ignore=shutil.ignore_patterns("__pycache__"), copy_function=mypyc.copy_writable)
     return dest
 
 
@@ -42,11 +43,20 @@ def _hidden(req: BuildRequest, stage: Path) -> list[str]:
     return sorted(set(hidden))
 
 
-def _data_args(req: BuildRequest, stage: Path) -> list[str]:
+def _data_args(req: BuildRequest, stage: Path, spec_dir: Path) -> list[str]:
+    """--add-data for the assets, the source relative to `spec_dir`, the folder of the .spec file
+    PyInstaller writes and reads a relative data source from (--specpath; flet pack: its cwd):
+    PyInstaller splits SOURCE:DEST at ':' and at os.pathsep, and the absolute source of a project
+    in a folder named with ';' (legal on Windows, where uv works in it) gave it two separators:
+    "Wrong syntax, should be --add-data=SOURCE:DEST"."""
     assets = req.cfg.app.assets
-    if assets and (stage / assets).is_dir():
-        return ["--add-data", f"{stage / assets}:{assets}"]
-    return []
+    if not (assets and (stage / assets).is_dir()):
+        return []
+    try:
+        source = os.path.relpath(stage / assets, spec_dir)
+    except ValueError:  # another drive (Windows): only the absolute path names it
+        source = str(stage / assets)
+    return ["--add-data", f"{source}:{assets}"]
 
 
 def _icon_args(req: BuildRequest) -> list[str]:
@@ -80,7 +90,22 @@ def size_args(cfg: Config) -> tuple[list[str], dict[str, str]]:
     return args, env
 
 
+def check_options(cfg: Config) -> None:
+    """What the build refuses before any work (cmd_build calls this before the checks, also in
+    --dry-run): a project folder whose path holds '[', '*' or '?'. PyInstaller lists the hook
+    scripts of each hook folder (its own, pyinstaller-hooks-contrib's, flet_cli's: all in .venv)
+    with glob.glob(os.path.join(hook_dir, 'hook-*.py')), and under `games [2026]` it found none:
+    the executable lacked what the hooks collect (rich's Unicode tables, Flet's client and icons)
+    while the build said done, and flet pack said its client was inside."""
+    refuse_a_globbed_folder(
+        "exe",
+        "PyInstaller would find none of its hooks in .venv, and the executable would lack what they "
+        "collect (rich's Unicode tables, Flet's client and icons) while the build says done",
+    )
+
+
 def build(req: BuildRequest) -> Path:
+    check_options(req.cfg)
     if req.cfg.app.preset == "flet":
         return _flet_pack(req)
     cfg = req.cfg
@@ -108,7 +133,7 @@ def build(req: BuildRequest) -> Path:
     for h in _hidden(req, stage):
         argv += ["--hidden-import", h]
     size, size_env = size_args(cfg)
-    argv += size + _data_args(req, stage) + _icon_args(req) + cfg.deploy.exe.extra_args + req.extra
+    argv += size + _data_args(req, stage, work) + _icon_args(req) + cfg.deploy.exe.extra_args + req.extra
     remove_output(out)
     envs.uv_run(envs.tool_env(cfg), argv, extra_env=size_env)
     result = out / (cfg.app.name + (".exe" if IS_WINDOWS else "")) if onefile else out / cfg.app.name
@@ -146,9 +171,7 @@ def _flet_pack(req: BuildRequest) -> Path:
         argv.append("--debug-console=true")
     for h in _hidden(req, stage):
         argv += ["--hidden-import", h]
-    assets = cfg.app.assets
-    if assets and (stage / assets).is_dir():
-        argv += ["--add-data", f"{stage / assets}:{assets}"]
+    argv += _data_args(req, stage, work)  # flet pack writes the spec in its cwd, work
     if cfg.deploy.exe.icon:
         argv += ["--icon", str(ROOT / cfg.deploy.exe.icon)]
     size, size_env = size_args(cfg)

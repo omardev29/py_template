@@ -160,8 +160,10 @@ function M.parse_line(line, sev)
   if k == "N" then
     return nil
   end
-  -- mypy (and mypyc, always under the blocking mypyc profile) `error:` lines, and ruff codes
-  local kind = forced or (k == "E" and sev.mypy) or k or (rest:match("^%u+%d+") and sev.ruff or "E")
+  -- mypy (and mypyc, always under the blocking mypyc profile) `error:` lines, and ruff codes: a
+  -- coded rule (F401) or a hyphenated name (invalid-syntax), as the VS Code RUFF matcher accepts
+  local ruff = rest:match("^%u+%d+") ~= nil or rest:match("^%l+%-[%l%-]*:?%s") ~= nil
+  local kind = forced or (k == "E" and sev.mypy) or k or (ruff and sev.ruff or "E")
   return {
     filename = absolute(file),
     lnum = tonumber(lnum),

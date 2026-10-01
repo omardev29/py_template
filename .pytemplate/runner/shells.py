@@ -103,9 +103,10 @@ _FIX_ASCII = "Keep the launchers ASCII-only: cmd, sh and Windows PowerShell 5.1 
 
 def _git_modes(names: Sequence[str]) -> dict[str, str]:
     """Return the git index mode of each launcher (missing: untracked, or not a git checkout)."""
-    if not shutil.which("git"):
+    git = proc.find_program("git")
+    if not git:
         return {}
-    r = proc.run(["git", "ls-files", "-s", "--", *names], capture=True, check=False, echo=False)
+    r = proc.run([git, "ls-files", "-s", "--", *names], capture=True, check=False, echo=False)
     modes: dict[str, str] = {}
     if r.returncode == 0:
         for line in r.stdout.splitlines():
@@ -171,14 +172,18 @@ PS_EDITIONS = (("Windows PowerShell 5.1", "Desktop", "powershell"), ("PowerShell
 
 
 def _ps_policies() -> list[tuple[str, str, str]]:
-    """Return (label, edition, ExecutionPolicy) for Windows PowerShell 5.1 and PowerShell 7."""
-    found = [(label, edition, exe) for label, edition, name in PS_EDITIONS if (exe := shutil.which(name))]
+    """Return (label, edition, ExecutionPolicy) for Windows PowerShell 5.1 and PowerShell 7: the
+    policy a new window gets. A session started with -ExecutionPolicy X (a way around a blocked
+    pyt.ps1, the VS Code PowerShell console) hands its children PSExecutionPolicyPreference=X, its
+    Process scope, which then won over a Restricted CurrentUser or LocalMachine policy."""
+    found = [(label, edition, exe) for label, edition, name in PS_EDITIONS if (exe := proc.find_program(name))]
+    env = {k: v for k, v in os.environ.items() if k.upper() != "PSEXECUTIONPOLICYPREFERENCE"}
 
     def policy(exe: str) -> str:
         try:
             r = subprocess.run(
                 [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Get-ExecutionPolicy"],
-                capture_output=True, text=True, timeout=60, check=False, stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=60, check=False, stdin=subprocess.DEVNULL, env=env,
             )
         except (OSError, subprocess.SubprocessError):
             return ""
@@ -218,7 +223,7 @@ def doctor(check: Check, *, in_project: bool = True) -> None:
         return  # the shell checks are Windows' (the bash stub, execution policies) and WSL's
     ui.step("shell")
     if IS_WINDOWS:
-        bash = shutil.which("bash") or ""
+        bash = proc.find_program("bash") or ""
         if "system32" in bash.lower():
             check(
                 None,
@@ -500,7 +505,7 @@ def discover(
     path = env.get("PATH") or env.get("Path")
 
     def default_which(name: str) -> str | None:
-        return shutil.which(name, path=path)
+        return proc.find_program(name, path=path)
 
     finder = which or default_which
     return _discover_windows(env, finder, standard, distros) if windows else _discover_posix(finder)
@@ -615,7 +620,9 @@ def command_text(sh: Shell, project: Path, where: str, args: Sequence[str], mini
     if sh.family == "nu":
         name = "pyt.cmd" if IS_WINDOWS else "pyt"
         word = {"root": f"./{name}", "sub": f"../{name}", "abs": str(project / name)}[where]
-        return " ".join([f"^'{word}'", *map(nu_quote, args)])  # '...': no escapes in nu
+        # run-external (what ^word stands for) takes the program as a string: a raw string holds
+        # any path (^'<path>' ended at a quote of the project folder's path: /home/o'brien).
+        return " ".join(["run-external", nu_quote(word), *map(nu_quote, args)])
     raise ValueError(f"unknown shell family {sh.family}")
 
 
@@ -777,6 +784,7 @@ class Context:
     sysroot: str = "C:\\Windows"
     running: set[subprocess.Popen[bytes]] = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    stopped: threading.Event = field(default_factory=threading.Event)  # interrupted: start no probe
 
     def minimal_path(self, sh: Shell) -> str:
         if sh.family == "wsl" or not IS_WINDOWS:
@@ -799,7 +807,7 @@ class Context:
 def _kill(p: subprocess.Popen[bytes]) -> None:
     """Kill a probe and everything it started (uv, python)."""
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True, check=False)
+        proc.taskkill(p.pid)
     else:
         try:
             os.killpg(p.pid, signal.SIGKILL)
@@ -813,7 +821,10 @@ def _kill(p: subprocess.Popen[bytes]) -> None:
 
 def spawn(ctx: Context, argv: list[str] | str, *, cwd: Path, env: Mapping[str, str], tag: str, stdin: bytes | None = None) -> ProbeRun:
     """Run one probe process with a timeout (output to files: a pipe held open by a leftover
-    grandchild would block forever) and parse its PTPROBE line."""
+    grandchild would block forever) and parse its PTPROBE line. Once the suite is interrupted
+    (ctx.stopped) no probe starts, and one that started meanwhile is killed."""
+    if ctx.stopped.is_set():
+        return ProbeRun(None, "", "", 0, None, "not run: the suite was interrupted")
     out_file = ctx.tmp / "out" / f"{tag}.out"
     err_file = ctx.tmp / "out" / f"{tag}.err"
     in_file = ctx.tmp / "out" / f"{tag}.in"
@@ -832,8 +843,13 @@ def spawn(ctx: Context, argv: list[str] | str, *, cwd: Path, env: Mapping[str, s
         else:
             with ctx.lock:
                 ctx.running.add(p)
+                stopped = ctx.stopped.is_set()  # set after the check above: _run_all killed the others
             try:
-                rc = p.wait(timeout=ctx.timeout)
+                if stopped:
+                    _kill(p)
+                    error = "stopped: the suite was interrupted"
+                else:
+                    rc = p.wait(timeout=ctx.timeout)
             except subprocess.TimeoutExpired:
                 _kill(p)
                 error = f"timed out after {ctx.timeout:g} s"
@@ -1072,11 +1088,33 @@ def report_json(project: Path, shells: Sequence[Shell], results: Sequence[Result
 
 MAX_TIMEOUT = 86400  # a day per probe
 SELFTEST_USAGE = "./pyt selftest --shells [NAME,...] [--list] [--json] [--keep] [--project DIR] [--tests T1,...] [--jobs N] [--timeout S]"
+SELFTEST_OPTIONS = """
+./pyt __probe through every shell of this machine, or the NAMEs given (a prefix selects a
+family: msys2 = every msys2-* shell), then a table of the results; exit 1 on any FAIL.
+
+options:
+  NAME,...        the shells to test (default: every one found)
+  --list          list the shells found and test none
+  --json          the report (or the --list) as JSON on stdout
+  --keep          keep the scratch folder, and name it
+  --project DIR   probe the launchers of another copy of the project
+  --tests T1,...  the tests to run (default: all of them)
+  --jobs N        shells tested at once (default: min(8, CPUs))
+  --timeout S     seconds per probe (default: 60)
+"""
+
+
+def selftest_help() -> str:
+    """What `selftest --shells -h` prints: the usage, the options and the tests (this module's
+    docstring names them), like the argparse help of the other suites."""
+    tests = [line for line in (__doc__ or "").splitlines() if re.match(r"    T\d |              ", line)]
+    return f"usage: {SELFTEST_USAGE}\n{SELFTEST_OPTIONS}" + ("\ntests:\n" + "\n".join(tests) + "\n" if tests else "")
 
 
 @dataclass
 class Options:
     names: list[str] = field(default_factory=list)
+    help_only: bool = False
     list_only: bool = False
     as_json: bool = False
     keep: bool = False
@@ -1098,6 +1136,9 @@ def parse_options(args: Sequence[str]) -> Options:
                 raise PytError(f"{key} needs a value  (usage: {SELFTEST_USAGE})")
             return v
 
+        if key in ("-h", "--help"):  # the suite's help, as after --nvim, --e2e and --mutation
+            opts.help_only = True
+            return opts
         if key == "--list":
             opts.list_only = True
         elif key == "--json":
@@ -1160,9 +1201,11 @@ def _run_all(ctx: Context, shells: Sequence[Shell], tests: Sequence[str], jobs: 
             failed = [r.test for r in got if r.status == "fail"]
             ui.info(f"  {futures[future].name}: " + (f"FAIL {' '.join(failed)}" if failed else "ok"))
     except KeyboardInterrupt:
-        with ctx.lock:
-            for p in list(ctx.running):
-                _kill(p)
+        with ctx.lock:  # a probe that starts from now on sees it and kills itself (spawn)
+            ctx.stopped.set()
+            running = list(ctx.running)
+        for p in running:
+            _kill(p)
         pool.shutdown(wait=False, cancel_futures=True)
         raise
     pool.shutdown(wait=True)
@@ -1173,6 +1216,9 @@ def _run_all(ctx: Context, shells: Sequence[Shell], tests: Sequence[str], jobs: 
 def selftest(cfg: Config, args: list[str]) -> int:
     """selftest --shells [NAME,...] [--list] [--json] [--keep] [--project DIR]: ./pyt __probe through every shell."""
     opts = parse_options(args)
+    if opts.help_only:
+        print(selftest_help(), end="")
+        return 0
     shells = select(discover(), opts.names)
     if opts.list_only:
         _list_shells(shells, opts.as_json)
@@ -1202,8 +1248,14 @@ def selftest(cfg: Config, args: list[str]) -> int:
 
     ui.step(f"selftest --shells: {len(shells)} shells x {len(opts.tests)} tests, project {project}")
     started = time.perf_counter()
+    # SIGTERM and SIGHUP stop the run like Ctrl+C (the running probes, in sessions of their own,
+    # are killed and the scratch folder goes): their default action killed the runner at once
+    # and left the folder behind, as for the other harnesses (e2e.termination_as_interrupt).
+    from .e2e import termination_as_interrupt
+
     try:
-        results = _run_all(ctx, shells, opts.tests, opts.jobs)
+        with termination_as_interrupt():
+            results = _run_all(ctx, shells, opts.tests, opts.jobs)
     finally:
         if opts.keep:  # asked for, and a random name: shown even with -q
             ui.report(f"scratch files kept in {tmp}")

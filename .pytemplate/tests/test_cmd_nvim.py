@@ -8,11 +8,13 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -225,6 +227,31 @@ def test_extras_in_a_config_that_cannot_be_written(tmp_path: Path, monkeypatch: 
     assert sorted(p.name for p in tmp_path.iterdir()) == ["lazyvim.json"]
 
 
+def test_extras_in_a_config_that_cannot_be_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A lazyvim.json that exists but cannot be read (another user's 0600 file, a link into a
+    # folder the user may not enter) ended `nvim extras` in an internal-error traceback (A9-07):
+    # one error, exit 3, naming the file and the extras to enable by hand; nothing written
+    config = tmp_path / "c"
+    config.mkdir()
+    path = config / "lazyvim.json"
+    path.write_text(FRESH_LAZYVIM_JSON, encoding="utf-8", newline="\n")
+    real_read_bytes = Path.read_bytes
+
+    def denied(self: Path) -> bytes:
+        if self.name == "lazyvim.json":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", denied)
+    nv = cmd_nvim.Nvim("nvim", (0, 12, 5), config, tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    with pytest.raises(PytError, match=r"cannot read .*lazyvim\.json: Permission denied\. Enable the extras by hand .*lang\.python") as e:
+        cmd_nvim.cmd_extras(nv)
+    assert e.value.code == 3
+    assert sorted(p.name for p in config.iterdir()) == ["lazyvim.json"]
+    monkeypatch.setattr(Path, "read_bytes", real_read_bytes)
+    assert path.read_text(encoding="utf-8") == FRESH_LAZYVIM_JSON
+
+
 def test_extras_keep_a_linked_lazyvim_json_a_link(tmp_path: Path) -> None:
     # dotfiles managers link lazyvim.json into a repository: the file behind the link changes
     if sys.platform == "win32":
@@ -255,6 +282,69 @@ def test_bootstrap_says_what_to_do_when_the_starter_git_cannot_be_removed(tmp_pa
     with pytest.raises(PytError, match=r"the starter is in .*, but its \.git could not be removed .*delete it by hand") as e:
         cmd_nvim.cmd_bootstrap(nv)
     assert e.value.code == 3
+
+
+def _fake_clone(nv: cmd_nvim.Nvim, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`nvim bootstrap` with git found and the starter's clone faked (a config with a .git)."""
+    monkeypatch.setattr(cmd_nvim, "which", lambda name: "/usr/bin/git")
+
+    def clone(argv: list[object], **_: object) -> subprocess.CompletedProcess[str]:
+        (nv.config / ".git").mkdir(parents=True)
+        (nv.config / "init.lua").write_text('require("config.lazy")\n', encoding="utf-8")
+        return subprocess.CompletedProcess([str(a) for a in argv], 0, "", "")
+
+    monkeypatch.setattr(cmd_nvim.proc, "run", clone)
+
+
+def test_bootstrap_names_the_next_steps_on_lines_of_their_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """cmd and Windows PowerShell 5.1 have no `&&`: the hint `./pyt nvim trust && ./pyt nvim sync`
+    could not be pasted there (A9-05). One command per line, as `new` prints its next steps."""
+    nv = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    _fake_clone(nv, monkeypatch)
+    assert cmd_nvim.cmd_bootstrap(nv) == 0
+    lines = capsys.readouterr().err.splitlines()
+    assert not [ln for ln in lines if "&&" in ln], lines
+    assert [ln.strip() for ln in lines if "./pyt nvim" in ln] == ["./pyt nvim trust", "./pyt nvim sync"], lines
+    assert not (nv.config / ".git").exists()
+
+
+def test_q_keeps_what_the_nvim_commands_did(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """-q hides progress, never what was asked for (5.3): `-q nvim extras` rewrote the user's
+    lazyvim.json and made a backup without a word, and trust, sync and bootstrap said nothing of
+    what they did (A9-04)."""
+    monkeypatch.setattr(cmd_nvim.ui, "QUIET", True)
+    nv = _trusted_nvim(tmp_path / "home")
+    nv.config.mkdir(parents=True)
+    nv.lazyvim_json.write_text(FRESH_LAZYVIM_JSON, encoding="utf-8", newline="\n")
+    assert cmd_nvim.cmd_extras(nv) == 0
+    err = capsys.readouterr().err
+    backup = next(nv.config.glob("lazyvim.json.*.bak"))
+    assert f"enabled in {nv.lazyvim_json}: lang.python" in err and f"backup: {backup}" in err, err
+    assert cmd_nvim.cmd_extras(nv) == 0 and "every recommended extra is already enabled" in capsys.readouterr().err
+
+    nv.trust_db.unlink()
+
+    def trust(exe: str, file: Path, **_: object) -> dict[str, object]:  # what vim.secure.trust writes
+        nv.trust_db.write_text(f"{hashlib.sha256(file.read_bytes()).hexdigest()} {os.path.realpath(file)}\n", encoding="utf-8")
+        return {"ok": True}
+
+    monkeypatch.setattr(cmd_nvim, "trust_file", trust)
+    assert cmd_nvim.cmd_trust(nv) == 0
+    err = capsys.readouterr().err
+    digest = hashlib.sha256(cmd_nvim.LAZY_LUA.read_bytes()).hexdigest()
+    assert f"trusted {os.path.realpath(cmd_nvim.LAZY_LUA)}" in err and f"sha256 {digest}" in err, err
+    assert cmd_nvim.cmd_trust(nv) == 0 and "already trusted: " in capsys.readouterr().err
+
+    _record_runs(monkeypatch)
+    assert cmd_nvim.cmd_sync(nv) == 0
+    assert "plugins installed" in capsys.readouterr().err
+
+    fresh = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    _fake_clone(fresh, monkeypatch)
+    assert cmd_nvim.cmd_bootstrap(fresh) == 0
+    err = capsys.readouterr().err
+    assert f"LazyVim starter installed in {fresh.config}" in err and "./pyt nvim trust" in err, err
+    assert cmd_nvim.cmd_bootstrap(fresh) == 0 and "already exists: nothing done" in capsys.readouterr().err
 
 
 def test_local_spec_off(tmp_path: Path) -> None:
@@ -347,6 +437,26 @@ def test_remove_tree_read_only(tmp_path: Path) -> None:
     cmd_nvim.remove_tree(tmp_path / "repo")  # missing: no error
 
 
+def test_remove_tree_removes_a_link_as_a_link(tmp_path: Path) -> None:
+    """A subfolder of selftest --nvim's --dir that is a link (moved to another disk): rmtree refused
+    it, the retry chmodded the folder it names to 0o600 through it and returned, the link left
+    (A10-07). A link goes as a link; the folder it names keeps its mode and files."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "f").write_text("kept\n", encoding="utf-8")
+    mode = stat.S_IMODE(real.stat().st_mode)
+    link, dangling = tmp_path / "link", tmp_path / "dangling"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+        dangling.symlink_to(tmp_path / "gone", target_is_directory=True)
+    except OSError:
+        pytest.skip("this user may not make symbolic links (Windows without Developer Mode)")
+    cmd_nvim.remove_tree(link)
+    cmd_nvim.remove_tree(dangling)
+    assert not os.path.lexists(link) and not os.path.lexists(dangling)
+    assert (real / "f").read_text(encoding="utf-8") == "kept\n" and stat.S_IMODE(real.stat().st_mode) == mode
+
+
 # --- selftest --nvim harness ------------------------------------------------------------------------
 
 
@@ -371,6 +481,37 @@ def test_parse_smoke() -> None:
     assert s.other == ["random noise"]
     assert (s.total, s.expected, s.complete) == (4, 4, True)
     assert nvimtest.parse_smoke("").total == 0
+
+
+def test_smoke_hands_every_path_to_an_ex_command_escaped() -> None:
+    """`:edit`, `:cd` and `:bwipeout` expand `%`, `#` and `$NAME` in their argument, and glob()
+    reads the root's own path as a pattern: under a --dir (or a TEMP) holding `%` or `#`, where
+    the plugin itself works, five smoke checks failed with E499 (A9-05). Every path smoke.lua hands
+    to an Ex command goes through vim.fn.fnameescape, and tests/ is listed, never globbed."""
+    text = (project.ROOT / nvimtest.SMOKE).read_text(encoding="utf-8")
+    ex = r"(?:edit|e|cd|lcd|tcd|split|vsplit|tabedit|badd|bwipeout|bdelete|write|w|source|luafile)"
+    calls = re.findall(rf"vim\.cmd\.{ex}\((.*)\)\s*$", text, re.MULTILINE)
+    concats = re.findall(rf'"{ex}!? " \.\. (.*)', text)
+    assert len(calls) >= 8 and concats, (calls, concats)  # six :edit, two :cd, one :bwipeout
+    for arg in calls + concats:
+        assert arg.startswith("vim.fn.fnameescape("), arg
+    assert "vim.fn.glob(" not in text
+
+
+def test_smoke_names_the_neotest_file_with_neotests_separator() -> None:
+    """neotest keys a file position with its own separator ("\\" on Windows: `lib.files.find`
+    joins with `lib.files.sep`) and finds a buffer's positions by the buffer's name, which keeps
+    the "/" of the path typed. glob() gave the native path; the file listed from `root` (which is
+    normalized) was opened as `<root>/tests/x.py`, had no positions on Windows, and the neotest
+    check timed out in every preset (C3-01, the first CI run of the round-2 fixes)."""
+    text = (project.ROOT / nvimtest.SMOKE).read_text(encoding="utf-8")
+    block = text[text.index('check("neotest:') :]
+    block = block[: block.index("\nend)")]
+    assert 'local sep = require("neotest.lib").files.sep' in block
+    file = re.search(r"^\s*local file = (.*)$", block, re.MULTILINE)
+    assert file and file.group(1).endswith(':gsub("/", sep)'), file
+    opened = block.index("vim.cmd.edit(vim.fn.fnameescape(file))")
+    assert file.start() < opened < block.index("nt.run.run(file)")
 
 
 def test_parse_smoke_requires_done() -> None:
@@ -442,6 +583,103 @@ def test_env_isolation(tmp_path: Path) -> None:
     assert len({env[k] for k in nvimtest.XDG_HOMES}) == 4
 
 
+def test_the_nvim_harness_never_hands_its_projects_the_users_lock_mode_nor_pytest_options(tmp_path: Path) -> None:
+    """The inner ./pyt calls of selftest --nvim make their projects anew: under the user's
+    UV_LOCKED or UV_FROZEN its `./pyt new` refused to lock, and the smoke's tests (neotest, `pyt:
+    test`) got a PYTEST_ADDOPTS meant for the user's own app (A10-03)."""
+    user = {"UV_LOCKED": "1", "UV_FROZEN": "1", "PYTEST_ADDOPTS": "-n auto", "PYTEST_PLUGINS": "xdist", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "HOME": "/home/me"}
+    assert nvimtest.runner_env(user) == {"HOME": "/home/me"}
+    env = nvimtest.nvim_env(nvimtest.Layout(tmp_path / "w"), user)
+    assert not {k for k in user if k != "HOME"} & set(env), env
+
+
+def test_the_isolated_neovim_uses_its_own_runtime(tmp_path: Path) -> None:
+    """Neovim exports VIMRUNTIME to every job and terminal: selftest --nvim started from a
+    Neovim of another version (its terminal, :Pyt, testing the 0.11.2 floor from a 0.12 editor)
+    ran the isolated Neovim on that version's runtime, and its ftplugins and vim.treesitter
+    failed (A10-04). The runtime goes with the rest of the calling Neovim's variables."""
+    user = {"VIMRUNTIME": "/opt/nvim-0.12/share/nvim/runtime", "VIM": "/opt/nvim-0.12/share/nvim", "NVIM": "/run/nvim.sock", "HOME": "/home/me"}
+    env = nvimtest.nvim_env(nvimtest.Layout(tmp_path / "w"), user)
+    assert not {"VIMRUNTIME", "VIM", "NVIM"} & set(env) and env["HOME"] == "/home/me", env
+
+
+def test_nvim_git_config_includes_the_users_whole_global_config(tmp_path: Path) -> None:
+    """nvim_env moves XDG_CONFIG_HOME, so Neovim's git (lazy.nvim clones the plugins with the
+    user's config: a proxy, url.*.insteadOf) would miss the user's $XDG_CONFIG_HOME/git/config.
+    user_git_config points GIT_CONFIG_GLOBAL at a file that includes both that and ~/.gitconfig."""
+    home, xdg, base = tmp_path / "home", tmp_path / "xdg", tmp_path / "base"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[user]\n\tname = Me\n", encoding="utf-8")
+    (xdg / "git").mkdir(parents=True)
+    (xdg / "git" / "config").write_text("[http]\n\tproxy = http://p:8080\n", encoding="utf-8")
+    base.mkdir()
+    path = nvimtest.user_git_config(base, {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)})
+    assert path is not None and Path(path).parent == base
+    text = Path(path).read_text(encoding="utf-8")
+    assert (home / ".gitconfig").as_posix() in text and (xdg / "git" / "config").as_posix() in text
+    if shutil.which("git"):  # a real git (as a clone reads config: includes on, no --global) sees both
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": path, "GIT_CONFIG_NOSYSTEM": "1"}
+        got = subprocess.run(["git", "config", "--get", "http.proxy"], env=env, capture_output=True, text=True)
+        assert got.stdout.strip() == "http://p:8080", got.stderr
+        got = subprocess.run(["git", "config", "--get", "user.name"], env=env, capture_output=True, text=True)
+        assert got.stdout.strip() == "Me", got.stderr
+    # nothing to include -> None: git keeps its defaults (~/.gitconfig via HOME is still read)
+    assert nvimtest.user_git_config(base, {"HOME": str(tmp_path / "empty")}) is None
+
+
+def test_nvim_git_config_keeps_gits_own_order_of_the_two_global_files(tmp_path: Path) -> None:
+    """git reads $XDG_CONFIG_HOME/git/config first and ~/.gitconfig after it, and the last value
+    it reads wins. The file that stands in for both included them the other way round: for a key
+    set in both (a proxy, sslCAInfo) Neovim's git took the XDG file's value, where the user's git
+    takes ~/.gitconfig's."""
+    git = shutil.which("git")
+    if not git:
+        pytest.skip("git not found")
+    home, xdg, base = tmp_path / "home", tmp_path / "xdg", tmp_path / "base"
+    (xdg / "git").mkdir(parents=True)
+    home.mkdir()
+    base.mkdir()
+    (home / ".gitconfig").write_text("[http]\n\tproxy = http://from-home-gitconfig:1\n", encoding="utf-8")
+    (xdg / "git" / "config").write_text("[http]\n\tproxy = http://from-xdg-config:2\n", encoding="utf-8")
+    user = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    user.update(HOME=str(home), XDG_CONFIG_HOME=str(xdg), GIT_CONFIG_NOSYSTEM="1")
+
+    def proxy(env: dict[str, str]) -> str:
+        got = subprocess.run([git, "config", "--get", "http.proxy"], cwd=base, env=env, capture_output=True, text=True, check=False)
+        return got.stdout.strip()
+
+    assert proxy(user) == "http://from-home-gitconfig:1"  # the user's own git
+    path = nvimtest.user_git_config(base, {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)})
+    assert path is not None
+    assert proxy({**user, "GIT_CONFIG_GLOBAL": path}) == "http://from-home-gitconfig:1", Path(path).read_text(encoding="utf-8")
+
+
+def test_nvim_git_config_includes_a_home_whose_name_git_would_read_as_syntax(tmp_path: Path) -> None:
+    """The include path went into the file raw: git read a `#` or `;` in it as a comment (the
+    user's insteadOf, proxy or sslCAInfo dropped without a word: lazy.nvim's clones then failed
+    behind a mirror or a custom CA) and a `\\` as an escape (every git call failed) (A10-01)."""
+    git = shutil.which("git")
+    if not git:
+        pytest.skip("git not found")
+    names = ["user#1", "user;1"]
+    if sys.platform != "win32":  # characters a Windows file name cannot hold
+        names += ["back\\slash", 'q"uote', "tab\tx", "nl\nx"]
+    for i, name in enumerate(names):
+        home, xdg, base = tmp_path / f"h{i}" / name, tmp_path / f"x{i}" / name, tmp_path / f"b{i}"
+        (xdg / "git").mkdir(parents=True)
+        home.mkdir(parents=True)
+        base.mkdir()
+        (home / ".gitconfig").write_text('[url "https://mirror.example/"]\n\tinsteadOf = https://github.com/\n', encoding="utf-8")
+        (xdg / "git" / "config").write_text("[http]\n\tproxy = http://p:8080\n", encoding="utf-8")
+        path = nvimtest.user_git_config(base, {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)})
+        assert path is not None, name
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": path, "GIT_CONFIG_NOSYSTEM": "1"}
+        for key, value in (("url.https://mirror.example/.insteadOf", "https://github.com/"), ("http.proxy", "http://p:8080")):
+            got = subprocess.run([git, "config", "--get", key], cwd=base, env=env, capture_output=True, text=True, check=False)
+            assert (got.returncode, got.stdout.strip()) == (0, value), (name, key, got.stderr)
+    assert nvimtest.git_config_value('a#b;c\\d"e') == '"a#b;c\\\\d\\"e"'
+
+
 def test_default_dir_is_short() -> None:
     """Right in the temp folder, whatever that is (selftest --mutation's workers move it deeper:
     below macOS's own it passed 80 characters), and short on Windows (MAX_PATH)."""
@@ -462,6 +700,31 @@ def test_prepare_dir_refuses_foreign_dirs(tmp_path: Path) -> None:
     nvimtest._prepare_dir(fresh)
     nvimtest._prepare_dir(fresh)  # reusable: it carries the marker
     assert (fresh.base / nvimtest.DIR_MARKER).is_file()
+
+
+@pytest.mark.parametrize("char", sorted(cmd_nvim.RTP_UNSAFE_WINDOWS if sys.platform == "win32" else cmd_nvim.RTP_UNSAFE))
+def test_prepare_dir_refuses_a_dir_neovim_cannot_put_on_its_runtimepath(char: str, tmp_path: Path) -> None:
+    """The projects are made below --dir, and spec.lua switches the ./pyt integration off where
+    Neovim cannot put the plugin on its runtimepath (`nvim trust` refuses such a project): after
+    minutes of installs every smoke check failed, blaming .lazy.lua's trust. Refused first, with
+    the character, before anything is made."""
+    base = tmp_path / f"d{char}x"
+    with pytest.raises(PytError, match=re.escape(f"holds `{char}`, which Neovim cannot put on its 'runtimepath'")) as e:
+        nvimtest._prepare_dir(nvimtest.Layout(base))
+    assert e.value.code == 2 and "\n" not in str(e.value) and not base.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX: Neovim's cwd is the physical folder (symbolic links need privileges on Windows)")
+def test_prepare_dir_checks_the_folder_a_linked_dir_names(tmp_path: Path) -> None:
+    """Neovim runs in the projects' physical folder (getcwd), where spec.lua reads the path: a
+    --dir that is a link to a folder named with `[` is refused like the folder itself."""
+    target = tmp_path / "x[1]"
+    target.mkdir(mode=0o700)
+    link = tmp_path / "clean"
+    link.symlink_to(target)
+    with pytest.raises(PytError, match=re.escape("holds `[`")):
+        nvimtest._prepare_dir(nvimtest.Layout(link))
+    assert not any(target.iterdir())
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes (Windows %TEMP% is per user)")
@@ -537,26 +800,43 @@ def test_real_nvim_query_and_trust(tmp_path: Path) -> None:
     assert not (file.parent / "nvim.log").exists() and not Path("nvim.log").exists()
 
 
-# What older Neovims answer, on the Neovim at hand: before 0.10 vim.version() is a plain table
-# (tostring gives "table: 0x..."), before 0.8 stdpath('state') is an error (E6100).
+# What older Neovims answer, on the Neovim at hand: api_info() gives their version (before 0.10
+# vim.version() is a plain table, tostring gives "table: 0x..."), before 0.8 stdpath('state') is
+# an error (E6100), before 0.6 there is no vim.json (0.5.1: the query died on it), before 0.5 no
+# vim.fn and no vim.version() (0.4.4 of Debian 11). The fakes wrap nvim_call_function, then hide
+# what the old Neovim lacks while the query runs, and put it back for Neovim's own exit.
+_FAKE_CALL = (
+    "local call = vim.api.nvim_call_function; PT_SAVED = { fn = vim.fn, version = vim.version, json = vim.json }; "
+    "vim.api.nvim_call_function = function(name, args) "
+    "if name == 'api_info' then local info = call(name, args); info.version = PT_OLD; return info end; "
+    "if name == 'stdpath' and args[1] == 'state' and PT_NO_STATE then error('E6100: state is not a valid stdpath') end; "
+    "return call(name, args) end"
+)
 OLD_API = {
-    "0.9.5": "vim.version = function() return { major = 0, minor = 9, patch = 5, api_level = 11, api_prerelease = false } end",
-    "0.7.2": "vim.version = function() return { major = 0, minor = 7, patch = 2, api_level = 9, api_prerelease = false } end; "
-    "local sp = vim.fn.stdpath; vim.fn.stdpath = function(what) if what == 'state' then error('E6100: state is not a valid stdpath') end return sp(what) end",
+    "0.9.5": "PT_OLD = { major = 0, minor = 9, patch = 5, api_level = 11, api_prerelease = false }; " + _FAKE_CALL,
+    "0.7.2": "PT_OLD = { major = 0, minor = 7, patch = 2, api_level = 9, api_prerelease = false }; PT_NO_STATE = true; " + _FAKE_CALL,
+    "0.5.1": "PT_OLD = { major = 0, minor = 5, patch = 1, api_level = 7, api_prerelease = false }; PT_NO_STATE = true; "
+    + _FAKE_CALL
+    + "; vim.json = nil",
+    "0.4.4": "PT_OLD = { major = 0, minor = 4, patch = 4, api_level = 6, api_prerelease = false }; PT_NO_STATE = true; "
+    + _FAKE_CALL
+    + "; vim.json = nil; vim.fn = nil; vim.version = nil",
 }
+_PUT_BACK = "; vim.fn, vim.version, vim.json = PT_SAVED.fn, PT_SAVED.version, PT_SAVED.json"
 
 
 @pytest.mark.skipif(shutil.which("nvim") is None, reason="nvim not in PATH")
 @pytest.mark.parametrize("old", sorted(OLD_API))
 def test_query_reports_an_old_neovim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str) -> None:
-    """An old distro Neovim on PATH (Ubuntu 24.04: 0.9.5, Debian 12: 0.7.2) must be reported as too
-    old by nvim doctor and skipped by selftest --nvim, not break the query (exit 3)."""
-    monkeypatch.setattr(cmd_nvim, "QUERY_LUA", "lua " + OLD_API[old] + "; " + cmd_nvim.QUERY_LUA.removeprefix("lua "))
+    """An old distro Neovim on PATH (Ubuntu 24.04: 0.9.5, Debian 12: 0.7.2, Debian 11: 0.4.4) must
+    be reported as too old by nvim doctor and skipped by selftest --nvim, not break the query (exit
+    3): on 0.5.1 it died on vim.json, which came with 0.6, and printed the raw Lua error (A9-02)."""
+    monkeypatch.setattr(cmd_nvim, "QUERY_LUA", "lua " + OLD_API[old] + "; " + cmd_nvim.QUERY_LUA.removeprefix("lua ") + _PUT_BACK)
     layout = nvimtest.Layout(tmp_path / "w")
     nv = cmd_nvim.query(shutil.which("nvim"), env=nvimtest.nvim_env(layout, dict(os.environ)))
     assert nv is not None and nv.version_text == old and nv.version < cmd_nvim.MIN_LAZYVIM
     nvimtest._check_isolated(nv, layout)
-    if old == "0.7.2":
+    if old != "0.9.5":
         assert nv.state == nv.data, "no state dir before 0.8: the data dir held what it holds now"
 
 
@@ -576,7 +856,9 @@ def test_an_nvim_that_cannot_run_is_a_clear_error(tmp_path: Path, monkeypatch: p
 
 
 def test_query_lua_needs_no_new_api() -> None:
-    assert "tostring(vim.version())" not in cmd_nvim.QUERY_LUA and "pcall(vim.fn.stdpath, 'state')" in cmd_nvim.QUERY_LUA
+    for newer in ("vim.version", "vim.fn", "vim.json", "vim.v."):  # 0.5, 0.5, 0.6, 0.5
+        assert newer not in cmd_nvim.QUERY_LUA, newer
+    assert "pcall(f, 'stdpath', {'state'})" in cmd_nvim.QUERY_LUA
     assert '"' not in cmd_nvim.QUERY_LUA, "the -c snippet crosses the Windows command line"
 
 
@@ -682,11 +964,38 @@ def test_nvim_sync_installs_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert len(runs) == 1
     argv = [str(a) for a in runs[0]["argv"]]  # type: ignore[attr-defined]
     assert "+Lazy! install" in argv and not [a for a in argv if any(w in a for w in ("sync", "update", "clean", "restore"))]
-    assert argv.index("+Lazy! install") < argv.index("+lua dofile(vim.env.PT_NVIM_CHECK)") < argv.index("+qa")
+    assert argv.index("+Lazy! install") < argv.index("+lua dofile(vim.env.PT_NVIM_CHECK)") < argv.index("+qa!")
+    assert argv.index("--cmd") < argv.index("+Lazy! install") and runs[0]["timeout"] == cmd_nvim.SYNC_TIMEOUT
     assert not [a for a in argv if '"' in a], "the arguments cross the Windows command line"
     assert runs[0]["cwd"] == cmd_nvim.ROOT
     env = runs[0]["env"]
     assert isinstance(env, dict) and env.get("NVIM_LOG_FILE"), "without NVIM_LOG_FILE Neovim may drop nvim.log in the project"
+
+
+@pytest.mark.parametrize("report", [ALL_INSTALLED, '{"lazy": true, "missing": ["neotest"], "failed": []}'])
+def test_nvim_sync_prints_its_result_on_a_line_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], report: str
+) -> None:
+    """Headless Neovim ends its last message without a line break, and the result of nvim sync
+    (its ok line, or the error cli.main prints) was glued to it: "...with `mason.nvim`.ok plugins
+    installed" (A9-06). The runner starts a new line once Neovim is done, whatever it says next."""
+    nv = _trusted_nvim(tmp_path)
+    _record_runs(monkeypatch, report)
+    recorded = cmd_nvim.subprocess.run
+
+    def run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        sys.stderr.write("Failed to install `tree-sitter-cli` with `mason.nvim`.")  # as Neovim ends
+        return recorded(argv, **kw)
+
+    monkeypatch.setattr(cmd_nvim.subprocess, "run", run)
+    try:
+        cmd_nvim.cmd_sync(nv)
+    except PytError:
+        pass  # cli.main prints it next
+    err = capsys.readouterr().err
+    assert err.endswith("Failed to install `tree-sitter-cli` with `mason.nvim`.\n") or (
+        "Failed to install `tree-sitter-cli` with `mason.nvim`.\nok plugins installed" in err
+    ), err
 
 
 @pytest.mark.parametrize(
@@ -763,6 +1072,72 @@ def test_real_nvim_sync_checks_the_plugins(tmp_path: Path, monkeypatch: pytest.M
         assert e.value.code == 1 and "could not install: broken" in str(e.value) and "good" not in str(e.value)
     else:
         assert e.value.code == 3 and "lazy.nvim did not start" in str(e.value)
+
+
+# The LazyVim starter's bootstrap when its clone of lazy.nvim fails (offline, a proxy): it waits
+# for a key, which no one can press in a headless run (stdin is /dev/null).
+STARTER_CLONE_FAILED = r"""
+vim.api.nvim_echo({ { "Failed to clone lazy.nvim:\n", "ErrorMsg" }, { "fatal: unable to access" }, { "\nPress any key to exit..." } }, true, {})
+vim.fn.getchar()
+os.exit(1)
+"""
+
+
+def _real_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, init_lua: str, *, cap: float = 30) -> cmd_nvim.Nvim:
+    """A real Neovim whose config is `init_lua` (isolated XDG dirs), .lazy.lua taken as trusted.
+    Every subprocess.run of cmd_nvim is capped at `cap` seconds: a sync that hangs fails the test
+    (subprocess.TimeoutExpired, which is no PytError) instead of hanging it."""
+    exe = shutil.which("nvim")
+    if exe is None:
+        pytest.skip("nvim not in PATH")
+    for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.setenv(var, str(tmp_path / var.lower()))
+    monkeypatch.delenv("NVIM_APPNAME", raising=False)
+    monkeypatch.setenv("PT_WITH_LAZY", "1")
+    init = tmp_path / "xdg_config_home" / "nvim" / "init.lua"
+    init.parent.mkdir(parents=True)
+    init.write_text(init_lua, encoding="utf-8")
+    nv = cmd_nvim.Nvim(exe, (0, 12, 5), init.parent, tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    (nv.data / "lazy" / "LazyVim").mkdir(parents=True)
+    monkeypatch.setattr(cmd_nvim, "trust_status", lambda db, f: cmd_nvim.Trust("trusted", str(f), "x", "x"))
+    real_run = subprocess.run
+
+    def capped(*args: Any, **kw: Any) -> subprocess.CompletedProcess[Any]:
+        kw["timeout"] = min(float(kw.get("timeout") or cap), cap)
+        return real_run(*args, **kw)
+
+    monkeypatch.setattr(cmd_nvim.subprocess, "run", capped)
+    return nv
+
+
+def test_nvim_sync_never_waits_at_the_starters_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Offline (or behind a proxy) with lazy.nvim not installed yet, the LazyVim starter's
+    bootstrap prints "Press any key to exit..." and calls getchar(), which headless Neovim waits at
+    for ever: `./pyt nvim sync` never returned (A9-03). The prompt answers at once, as Esc would,
+    the starter exits 1, and sync says so."""
+    nv = _real_sync(tmp_path, monkeypatch, STARTER_CLONE_FAILED)
+    started = time.monotonic()
+    with pytest.raises(PytError, match="exit code 1") as e:
+        cmd_nvim.cmd_sync(nv)
+    assert e.value.code == 1 and time.monotonic() - started < 25
+    assert "no network, a proxy" in str(e.value) and "lazy.nvim" in str(e.value)
+
+
+def test_nvim_sync_quits_whatever_the_config_left_modified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A config that leaves a modified buffer made the closing `:qa` fail (E37, E162), and the
+    headless Neovim kept running: `:qa!`."""
+    nv = _real_sync(tmp_path, monkeypatch, FAKE_LAZY.replace("PT_BROKEN = { _ = { installed = false } },", "") + 'vim.api.nvim_buf_set_lines(0, 0, -1, false, { "x" })\n')
+    assert cmd_nvim.cmd_sync(nv) == 0
+
+
+def test_nvim_sync_stops_a_neovim_that_never_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the answered prompts do not cover (a Vimscript getchar(), input()) ends at
+    SYNC_TIMEOUT: Neovim is stopped and the error names the cause."""
+    nv = _real_sync(tmp_path, monkeypatch, 'vim.cmd("call getchar()")\n')
+    monkeypatch.setattr(cmd_nvim, "SYNC_TIMEOUT", 3.0, raising=False)
+    with pytest.raises(PytError, match="did not finish") as e:
+        cmd_nvim.cmd_sync(nv)
+    assert e.value.code == 1 and "prompt" in str(e.value)
 
 
 @pytest.mark.parametrize("state", ["untrusted", "changed", "denied"])
@@ -1017,14 +1392,15 @@ def test_prepare_base_is_rebuilt_when_neovim_or_the_pins_change(tmp_path: Path, 
 
 
 def test_the_shipped_pins_are_complete() -> None:
-    """The lock pins LazyVim, lazy.nvim, every plugin .lazy.lua configures and the ones its extras
+    """The lock pins LazyVim, lazy.nvim, every plugin spec.lua configures and the ones its extras
     bring (neotest-python): an unpinned one would be installed at its newest commit."""
     assert re.fullmatch(r"[0-9a-f]{40}", cmd_nvim.STARTER_REV)
     if not nvimtest.LOCK.is_file():
         pytest.skip("no pinned lazy-lock.json (a run without it takes the latest of everything)")
     lock = json.loads(nvimtest.LOCK.read_text(encoding="utf-8"))
     assert isinstance(lock, dict)
-    configured = re.findall(r'\{ "[\w.-]+/([\w.-]+)", optional = true', (cmd_nvim.ROOT / ".pytemplate" / "templates" / "nvim" / "lazy.lua").read_text(encoding="utf-8"))
+    # the plugin specs live in spec.lua now (.lazy.lua is a thin loader that dofile's it)
+    configured = re.findall(r'\{ "[\w.-]+/([\w.-]+)", optional = true', (cmd_nvim.ROOT / ".pytemplate" / "nvim" / "spec.lua").read_text(encoding="utf-8"))
     assert len(configured) >= 8, configured
     for name in ("LazyVim", "lazy.nvim", "neotest-python", *configured):
         entry = lock.get(name)
@@ -1200,3 +1576,24 @@ def test_c_compiler_skips_the_macos_shims_without_developer_tools(monkeypatch: p
     monkeypatch.setattr(cmd_nvim, "IS_MACOS", False)  # Linux: /usr/bin is a real compiler
     monkeypatch.setattr(cmd_env, "_xcode_problem", lambda: "never asked")
     assert cmd_nvim.c_compiler() == "/usr/bin/gcc"
+
+
+def test_nvim_doctor_flags_the_macos_git_and_python_stubs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """/usr/bin/git and /usr/bin/python3 are xcrun stubs that only open the install dialog while
+    cmd_env._xcode_problem finds no developer tools: they count as missing (xcode-select --install),
+    as c_compiler treats /usr/bin/cc; a real /usr/bin curl and tar stay ok, and with the tools
+    installed git is ok again."""
+    from runner import cmd_env
+
+    monkeypatch.setattr(cmd_nvim, "IS_WINDOWS", False)
+    monkeypatch.setattr(cmd_nvim, "IS_MACOS", True)
+    monkeypatch.setattr(cmd_env, "_xcode_problem", lambda: "no developer tools (xcode-select -p fails)")
+    code, out = _doctor(tmp_path, monkeypatch, capsys, cc=None)
+    assert code == 1, out
+    assert "[XX] git is the /usr/bin stub" in out and "xcode-select --install" in out, out
+    # cmd_nvim.TOOLS is made at import: on a Windows host its Python entry is "python"
+    assert re.search(r"\[(XX|--)\] python3? is the /usr/bin stub", out), out
+    assert "[ok] curl: /usr/bin/curl" in out and "[ok] tar: /usr/bin/tar" in out, out
+    monkeypatch.setattr(cmd_env, "_xcode_problem", lambda: None)  # developer tools installed
+    _, out = _doctor(tmp_path / "ok", monkeypatch, capsys)
+    assert "[ok] git: /usr/bin/git" in out, out

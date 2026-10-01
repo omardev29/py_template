@@ -18,6 +18,8 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -26,7 +28,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_install, presets, proc  # noqa: E402
+from runner import cli, cmd_install, config, presets, proc  # noqa: E402
 from runner.project import IS_WINDOWS, ROOT  # noqa: E402
 from runner.ui import PytError  # noqa: E402
 
@@ -100,6 +102,22 @@ def _init_repo(root: Path) -> None:
     git(root, "commit", "-q", "-m", "template")
 
 
+def _drop_tasks_named_like_builtins(toml: Path) -> None:
+    """A project's [tasks] entry may have the name of a builtin added after the contract
+    (install, uninstall: CLAUDE.md 5.2), and ./pyt install runs that task there. The template's
+    own pytemplate.toml has none: a clone made from a project's files leaves them out, or its
+    `install` ran the project's task (about 20 times, with whatever that task does)."""
+    text = toml.read_bytes().decode("utf-8-sig")
+    statements = config.scan(text)
+    assert statements is not None, f"{toml} is not valid TOML"
+    kept, start = [], 0
+    for s in statements:  # a statement's text: from the end of the one before to its own end
+        if not (len(s.path) > 1 and s.path[0] == "tasks" and s.path[1] in cli.COMMANDS):
+            kept.append(text[start : s.end])
+        start = s.end
+    toml.write_bytes(("".join(kept) + text[start:]).encode("utf-8"))
+
+
 @pytest.fixture(scope="module")
 def template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A clone of the template: what copy_template copies (the tracked files, in any project
@@ -110,6 +128,7 @@ def template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     dest = tmp_path_factory.mktemp("tpl") / "template"
     dest.mkdir()
     presets.copy_template(dest)
+    _drop_tasks_named_like_builtins(dest / "pytemplate.toml")
     (dest / ".pytemplate" / "template-repo").write_text("", encoding="utf-8")
     (dest / "README.md").write_text("# py_template\n\nThe manual.\n", encoding="utf-8")
     (dest / "LICENSE").write_text("MIT License\n", encoding="utf-8")
@@ -167,6 +186,13 @@ def _tracked(root: Path) -> set[str]:
     return {p for p in git(root, "-c", "core.quotePath=false", "ls-files").splitlines() if p}
 
 
+def _free_name(clone: Path, stem: str, suffix: str = "") -> str:
+    """A name the clone holds nothing at: the clone is the project the suite runs in, its files
+    included. Fixed names failed ./pyt selftest in a project that has them: docs/ (mkdir said it
+    exists) and a tracked notes.txt (written over, it was no untracked file)."""
+    return next(name for i in range(1000) if not os.path.lexists(clone / (name := f"{stem}{i or ''}{suffix}")))
+
+
 def _record(snapshot: Path) -> dict[str, Any]:
     data: dict[str, Any] = json.loads((snapshot / cmd_install.RECORD).read_text(encoding="utf-8"))
     return data
@@ -187,10 +213,11 @@ def _leftovers(box: Box) -> list[str]:
 @needs_git
 @needs_uv
 def test_install_copies_the_tracked_template_and_writes_the_launchers(clone: Path, box: Box) -> None:
-    (clone / "notes.txt").write_text("untracked\n", encoding="utf-8")
+    notes = _free_name(clone, "notes", ".txt")
+    (clone / notes).write_text("untracked\n", encoding="utf-8")
     r = pyt(clone, box, "install")
     assert r.returncode == 0, r.stderr
-    assert "pyt is installed" in r.stderr and "not copied (not tracked by git): notes.txt" in r.stderr, r.stderr
+    assert "pyt is installed" in r.stderr and f"not copied (not tracked by git): {notes}" in r.stderr, r.stderr
     snapshot = box.snapshot
     if not IS_WINDOWS:
         assert snapshot == box.data / "pytemplate" / "template"  # an absolute XDG_DATA_HOME
@@ -222,35 +249,37 @@ def test_install_copies_the_tracked_template_and_writes_the_launchers(clone: Pat
 def test_install_keeps_tracked_links_as_links(clone: Path, box: Box) -> None:
     """A symbolic link git tracks is copied as the link (its target text), as `new` copies it:
     never the file it points to, and a dangling one too."""
-    (clone / "docs").mkdir()
-    (clone / "docs" / "manual.md").symlink_to(Path("..") / "README.md")
-    (clone / "docs" / "gone.md").symlink_to("missing.md")
-    git(clone, "add", "docs")
+    docs = _free_name(clone, "docs")
+    (clone / docs).mkdir()
+    (clone / docs / "manual.md").symlink_to(Path("..") / "README.md")
+    (clone / docs / "gone.md").symlink_to("missing.md")
+    git(clone, "add", docs)
     git(clone, "commit", "-q", "-m", "links")
     assert pyt(clone, box, "install").returncode == 0
     for name, target in (("manual.md", "../README.md"), ("gone.md", "missing.md")):
-        link = box.snapshot / "docs" / name
+        link = box.snapshot / docs / name
         assert link.is_symlink() and os.readlink(link) == target, name
 
 
 @needs_git
 @needs_uv
 def test_install_again_swaps_the_whole_copy(clone: Path, box: Box) -> None:
-    (clone / "extra.txt").write_text("one\n", encoding="utf-8")
-    git(clone, "add", "extra.txt")
+    extra, stray = _free_name(clone, "extra", ".txt"), _free_name(clone, "stray", ".txt")
+    (clone / extra).write_text("one\n", encoding="utf-8")
+    git(clone, "add", extra)
     git(clone, "commit", "-q", "-m", "extra")
     assert pyt(clone, box, "install").returncode == 0
     first = _record(box.snapshot)
-    assert (box.snapshot / "extra.txt").is_file()
-    (box.snapshot / "stray.txt").write_text("written by hand\n", encoding="utf-8")
-    git(clone, "rm", "-q", "extra.txt")
+    assert (box.snapshot / extra).is_file()
+    (box.snapshot / stray).write_text("written by hand\n", encoding="utf-8")
+    git(clone, "rm", "-q", extra)
     git(clone, "commit", "-q", "-m", "no extra")
     (clone / "README.md").write_bytes(b"# py_template\n\nChanged, not committed.\n")
     r = pyt(clone, box, "install")
     assert r.returncode == 0, r.stderr
     assert f"it replaces the one of commit {first['commit'][:7]}" in r.stderr, r.stderr
     got = _files(box.snapshot)
-    assert "extra.txt" not in got and "stray.txt" not in got  # the old copy went whole
+    assert extra not in got and stray not in got  # the old copy went whole
     assert got["README.md"] == b"# py_template\n\nChanged, not committed.\n"
     record = _record(box.snapshot)
     assert record["commit"] == git(clone, "rev-parse", "HEAD").strip() != first["commit"]
@@ -387,6 +416,56 @@ class Planner:
         return str(e.value)
 
 
+def test_a_clone_git_refuses_to_read_is_named_with_the_way_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A clone another user owns (a shared machine, a root-owned checkout): git refuses it
+    (dubious ownership), and install warned that "the copy includes files git does not track"
+    (it copies nothing), then said "here it cannot tell which (every file, ignored ones
+    included: not a git work tree): use a git clone" of a git clone. Now one refusal says that
+    git refuses the repository, with git's own command to let it read the folder."""
+    tracked, files = presets._tracked_template, presets._git_files
+    p = Planner(tmp_path, monkeypatch)
+    monkeypatch.setattr(presets, "_tracked_template", tracked)
+    monkeypatch.setattr(presets, "_git_files", files)
+    monkeypatch.setattr(shutil, "which", lambda name: "git")
+    stderr = (
+        "fatal: detected dubious ownership in repository at '/x/clone'\n"
+        "To add an exception for this directory, call:\n\n\tgit config --global --add safe.directory /x/clone\n"
+    )
+    monkeypatch.setattr(proc, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 128, "", stderr))
+    message = p.refusal()
+    assert "git refuses to list them here (fatal: detected dubious ownership in repository at '/x/clone')" in message
+    assert message.endswith("let git read it: git config --global --add safe.directory /x/clone"), message
+    assert "not a git work tree" not in message and "use a git clone" not in message
+    assert "the copy includes" not in capsys.readouterr().err  # install copies nothing
+
+
+@pytest.mark.parametrize("clone", [True, False], ids=["a clone", "no repository"])
+def test_a_clone_with_no_git_on_path_is_told_to_put_git_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clone: bool) -> None:
+    """A git clone typed in where git is not on PATH (a git GUI's own git: GitHub Desktop, Fork):
+    install said "here it cannot tell which (every file, ignored ones included: git not found):
+    use a git clone", to someone in a git clone. It says that git is not on PATH; a folder that
+    is no repository still hears to use a git clone."""
+    tracked, files = presets._tracked_template, presets._git_files
+    p = Planner(tmp_path, monkeypatch)
+    monkeypatch.setattr(presets, "_tracked_template", tracked)
+    monkeypatch.setattr(presets, "_git_files", files)
+    real_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: None if name == "git" else real_which(name, *args, **kwargs))
+    root = tmp_path / "clone"
+    root.mkdir()
+    if clone:
+        (root / ".git").mkdir()
+    elif any((d / ".git").exists() for d in root.parents):
+        pytest.skip("a folder above tmp_path holds a .git")
+    monkeypatch.setattr(cmd_install, "ROOT", root)
+    message = p.refusal()
+    if clone:
+        assert f"git is not on PATH, and {root} is a git clone: install git, or put the git you have on PATH" in message, message
+        assert "use a git clone" not in message
+    else:
+        assert "use a git clone" in message and "not on PATH" not in message, message
+
+
 def test_every_refusal_comes_in_one_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A data folder install did not make and a file of the bin folder it did not write: the
     first run named one, and the next run the other."""
@@ -397,6 +476,114 @@ def test_every_refusal_comes_in_one_message(tmp_path: Path, monkeypatch: pytest.
     assert "pyt install writes nothing, for 2 reasons:" in message, message
     assert f"{p.snapshot}: it holds no {cmd_install.RECORD} (pyt install did not make it)" in message
     assert "never overwrites a file it did not write" in message and "pyt: not a pytemplate launcher" in message
+
+
+@pytest.mark.parametrize("which", ["bin", "data"], ids=["uv's tool bin folder", "the data folder"])
+def test_a_folder_install_may_not_write_is_refused_before_the_first_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str) -> None:
+    """uv's tool bin folder (or the data folder) this user may not write: another user's, a
+    read-only one, /usr/local/bin through UV_TOOL_BIN_DIR. install wrote the whole new copy of
+    the template, failed on its first staged launcher and named that temporary file, which does
+    not exist (`<bin>/.pyt-install-p81hkalh: Permission denied`). It is refused with the other
+    refusals, before any write, naming the folder and the way out. The folder is refused as the
+    kernel answers for a user who may not write it (os.access; root may write almost anywhere,
+    and this test runs as root in the CI image's container too)."""
+    p = Planner(tmp_path, monkeypatch)
+    locked = p.bin if which == "bin" else tmp_path  # the data folder is made in tmp_path
+    real = os.access
+
+    def access(path: Any, mode: int, *args: Any, **kwargs: Any) -> bool:
+        if mode & os.W_OK and Path(path) == locked:
+            return False
+        return real(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "access", access)
+    message = p.refusal()
+    if which == "bin":
+        assert f"pyt install cannot write into uv's tool bin folder {p.bin} (this user may not write in it)" in message, message
+        assert "set UV_TOOL_BIN_DIR to a folder of yours" in message
+    else:
+        where = p.snapshot.parent
+        assert f"pyt install cannot write the installed template into {where} (this user may not create it in {tmp_path})" in message, message
+        assert f"set another data folder ({cmd_install.data_home_names()})" in message
+
+
+def _pathlib_before_3_14(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path.exists, is_file and is_dir as Python 3.11-3.13 have them, on any Python: they swallow
+    only ENOENT, ENOTDIR, EBADF and ELOOP, so the PermissionError of a path inside a folder this
+    user may not enter comes through (3.14 asks os.path, which says False)."""
+
+    def check(test: Callable[[int], bool]) -> Callable[..., bool]:
+        def method(self: Path, *, follow_symlinks: bool = True) -> bool:
+            try:
+                mode = self.stat(follow_symlinks=follow_symlinks).st_mode
+            except OSError as e:
+                if e.errno not in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
+                    raise
+                return False
+            except ValueError:
+                return False
+            return test(mode)
+
+        return method
+
+    monkeypatch.setattr(Path, "exists", check(lambda mode: True))
+    monkeypatch.setattr(Path, "is_file", check(stat.S_ISREG))
+    monkeypatch.setattr(Path, "is_dir", check(stat.S_ISDIR))
+
+
+def _no_entry(monkeypatch: pytest.MonkeyPatch, folder: Path) -> None:
+    """`folder` as this user sees one they may not enter (another user's ~/bin, /root/.local/bin
+    in a container that switched USER): what is below it cannot be stat'ed, and it cannot be
+    written. Simulated: the tests also run as root, who enters every folder."""
+    real_stat, real_access, blocked = os.stat, os.access, os.path.abspath(folder)
+
+    def no_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        here = "" if isinstance(path, int) else os.path.abspath(os.fsdecode(path))
+        if here.startswith(blocked + os.sep):
+            raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(path))
+        return real_stat(path, *args, **kwargs)
+
+    def no_access(path: Any, mode: int, *args: Any, **kwargs: Any) -> bool:
+        here = "" if isinstance(path, int) else os.path.abspath(os.fsdecode(path))
+        if here == blocked or here.startswith(blocked + os.sep):
+            return False
+        return real_access(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", no_stat)
+    monkeypatch.setattr(os, "access", no_access)
+
+
+@pytest.mark.parametrize("how", ["simulated", "for real"])
+def test_a_folder_this_user_may_not_enter_is_no_traceback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """A PATH folder this user may not enter (another user's ~/bin, /root/.local/bin in a
+    container that switched USER), and uv's tool bin folder below one: Python 3.11-3.13's pathlib
+    raised PermissionError there, so `pyt install` ended in an internal-error traceback (exit 1)
+    once its work was done (first_pyt, for its notes), and so did `--dry-run install`; doctor's
+    "pyt install" step was one "could not check" line, and make_plan gave a traceback instead
+    of its refusal. Such a folder holds no pyt, as for the shell, and the bin folder is refused.
+    "simulated": os.stat and os.access refuse it, with 3.11's pathlib on any Python; "for real": a
+    folder of mode 0 (POSIX, not root), which fails on the base only on 3.11-3.13 (python-floor)."""
+    p = Planner(tmp_path, monkeypatch)
+    locked, other = tmp_path / "locked", tmp_path / "other"
+    locked.mkdir()
+    other.mkdir()
+    found = other / ("pyt.cmd" if IS_WINDOWS else "pyt")
+    found.write_bytes(b"#!/bin/sh\n")
+    found.chmod(0o755)
+    monkeypatch.setattr(cmd_install, "bin_dir", lambda: locked / "bin")
+    if how == "simulated":
+        _pathlib_before_3_14(monkeypatch)
+        _no_entry(monkeypatch, locked)
+    elif IS_WINDOWS or os.geteuid() == 0:
+        pytest.skip("a mode that keeps this user out: POSIX, not root (root enters every folder)")
+    else:
+        locked.chmod(0)
+    try:
+        assert cmd_install.first_pyt(os.pathsep.join([str(locked), str(other)])) == found
+        message = p.refusal()
+    finally:
+        locked.chmod(0o755)
+    assert f"pyt install cannot write into uv's tool bin folder {locked / 'bin'} (this user may not create it in {locked})" in message, message
 
 
 def test_a_linked_data_folder_is_refused_as_a_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -572,16 +759,50 @@ def test_leftovers_of_an_interrupted_install_are_cleaned_up(template: Path, box:
 NO_CFG: Any = None  # install and uninstall read nothing of the Config
 
 
-class Installed:
-    """An installed template (its record naming the bin folder) and a launcher in tmp_path, for
-    uninstall in process; `stuck` names a file of it that cannot be deleted while it is True."""
+def test_dry_runs_name_the_leftovers_the_real_runs_remove(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`--dry-run uninstall` said "pyt is not installed: nothing to remove" where the real run then
+    removed what an unfinished install left (and said "pyt is uninstalled"), and `--dry-run
+    install` never named the leftovers install deletes first: each dry run names them now."""
+    p = Planner(tmp_path, monkeypatch)
+    old, new = p.snapshot.parent / (cmd_install.OLD + "deadbeef"), p.snapshot.parent / (cmd_install.NEW + "cafe")
+    (old / "sub").mkdir(parents=True)
+    new.mkdir()
+    staged = p.bin / ".pyt-install-abc"
+    staged.write_bytes(NEW_LAUNCHER)
+    (p.bin / ".pyt-install-xyz").write_bytes(b"not a launcher\n")  # only looks like one: never removed
+    before = _files(tmp_path)
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert cmd_install.cmd_install(NO_CFG, []) == 0
+    err = capsys.readouterr().err
+    for path in (old, new, staged):
+        assert f"would remove {path} (left by an unfinished install or uninstall)" in err, err
+    assert ".pyt-install-xyz" not in err
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    err = capsys.readouterr().err
+    for path in (old, new, staged):
+        assert f"would remove {path} (left by an unfinished install or uninstall)" in err, err
+    assert "nothing to remove" not in err and ".pyt-install-xyz" not in err
+    assert _files(tmp_path) == before and old.is_dir() and new.is_dir()
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    err = capsys.readouterr().err
+    assert f"removed {old} (left by an unfinished install or uninstall)" in err, err
+    assert "pyt is not installed: removed what an unfinished install or uninstall left" in err and "pyt is uninstalled" not in err
+    assert not p.snapshot.parent.exists() and [f.name for f in p.bin.iterdir()] == [".pyt-install-xyz"]
 
-    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+
+class Installed:
+    """An installed template (its record naming the bin folder; its runner: the ENTRY, a module
+    and pytemplate.toml) and a launcher in tmp_path, for uninstall in process; a file named
+    in-use.txt cannot be deleted while `stuck` is True (the one at the top, or `in_use`)."""
+
+    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch, in_use: str = "in-use.txt") -> None:
         self.snapshot = tmp / "data" / "pytemplate" / "template"
         self.bin = tmp / "bin"
-        (self.snapshot / ".pytemplate").mkdir(parents=True)
+        (self.snapshot / ".pytemplate" / "runner").mkdir(parents=True)
         (self.snapshot / "src").mkdir()
-        for rel in (".pytemplate/pyt.py", "src/a.py", "in-use.txt", "z.txt"):
+        for rel in (cmd_install.ENTRY, ".pytemplate/runner/cli.py", "pytemplate.toml", "src/a.py", in_use, "z.txt"):
+            (self.snapshot / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.snapshot / rel).write_bytes(b"x\n")
         (self.snapshot / cmd_install.RECORD).write_text(json.dumps({"schema": 1, "bin": str(self.bin)}), encoding="utf-8")
         self.bin.mkdir()
@@ -621,7 +842,8 @@ def test_a_failed_uninstall_can_be_finished(tmp_path: Path, monkeypatch: pytest.
         monkeypatch.setattr(cmd_install, "_rename", rename)
     with pytest.raises(PytError, match="could not remove") as e:
         cmd_install.cmd_uninstall(NO_CFG, [])
-    assert e.value.code == 1 and "run pyt uninstall again" in str(e.value)
+    # The launcher is gone: `pyt uninstall` would find no pyt to run
+    assert e.value.code == 1 and "then run ./pyt uninstall in a project or in a clone of the template" in str(e.value)
     assert not (inst.bin / "pyt").exists()
     if movable:
         left = list(inst.snapshot.parent.iterdir())
@@ -630,8 +852,46 @@ def test_a_failed_uninstall_can_be_finished(tmp_path: Path, monkeypatch: pytest.
         assert not inst.snapshot.exists()  # install is free to write a new one there
     else:
         assert cmd_install.read_record(inst.snapshot) is not None and cmd_install.not_an_install(inst.snapshot) == ""
-        assert sorted(p.relative_to(inst.snapshot).as_posix() for p in inst.snapshot.rglob("*")) == [".pytemplate", cmd_install.RECORD, "in-use.txt"]
+        runner = [".pytemplate", cmd_install.RECORD, cmd_install.ENTRY, ".pytemplate/runner", ".pytemplate/runner/cli.py", "pytemplate.toml"]
+        assert sorted(p.relative_to(inst.snapshot).as_posix() for p in inst.snapshot.rglob("*")) == sorted([*runner, "in-use.txt"])
     inst.stuck = False  # the program that held the file has ended
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert not inst.snapshot.parent.exists()
+
+
+def test_a_folder_that_cannot_go_keeps_the_record_of_the_installed_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows: `pyt uninstall` typed in the installed template's own folder, the runner's current
+    folder, which can neither move nor be deleted while every file in it can. The rounds deleted
+    all but the record, then rmtree took the record and failed on the folder itself: an empty
+    folder was left, which the next uninstall called the user's own ("nothing to remove") and
+    install refused. The record goes back where the folder stays, and the next uninstall
+    finishes. Simulated: the rename and the rmdir of that folder fail, nothing else."""
+    inst = Installed(tmp_path, monkeypatch)
+    inst.stuck = False
+    held = [True]
+    real_rename, real_rmdir = cmd_install._rename, os.rmdir
+
+    def rename(src: Path, dst: Path) -> None:
+        if held[0] and src == inst.snapshot:
+            raise PermissionError(errno.EACCES, "Permission denied", str(src))
+        real_rename(src, dst)
+
+    def rmdir(path: Any, *args: Any, **kwargs: Any) -> None:
+        # rmtree removes the top folder by its full path (dir_fd None), the others by name
+        if held[0] and kwargs.get("dir_fd") is None and os.path.abspath(os.fsdecode(path)) == str(inst.snapshot):
+            raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(path))
+        real_rmdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(cmd_install, "_rename", rename)
+    monkeypatch.setattr(os, "rmdir", rmdir)
+    with pytest.raises(PytError, match="could not remove") as e:
+        cmd_install.cmd_uninstall(NO_CFG, [])
+    assert f"{inst.snapshot}: in use or not writable" in str(e.value)
+    assert str(e.value).endswith("then run ./pyt uninstall in a project or in a clone of the template")
+    left = sorted(p.relative_to(inst.snapshot).as_posix() for p in inst.snapshot.rglob("*"))
+    assert left == [".pytemplate", cmd_install.RECORD]
+    assert cmd_install.not_an_install(inst.snapshot) == ""  # still pyt install's: install may replace it
+    held[0] = False  # the terminal left the folder
     assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
     assert not inst.snapshot.parent.exists()
 
@@ -701,8 +961,9 @@ def test_the_installed_template_knows_how_old_it_is(clone: Path, box: Box) -> No
         return str(r.stdout.strip())
 
     assert age() == "''"
-    (clone / "extra.txt").write_text("x\n", encoding="utf-8")
-    git(clone, "add", "extra.txt")
+    extra = _free_name(clone, "extra", ".txt")
+    (clone / extra).write_text("x\n", encoding="utf-8")
+    git(clone, "add", extra)
     git(clone, "commit", "-q", "-m", "newer")
     assert "is older than this clone" in age()
 
@@ -864,6 +1125,30 @@ def test_a_failed_install_changes_nothing(tmp_path: Path, monkeypatch: pytest.Mo
     assert swap.state() == swap.before
 
 
+def test_the_installed_template_names_local_sources_outside_the_clone_from_its_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clone that takes a library and a wheelhouse from folders next to it (`../mylib`,
+    `find-links = ["../wheels"]`): the installed template, in the data folder, names them from
+    there, as `new` names them from a new project (presets.rebase_local_sources). Copied as
+    they were, they named folders of the data folder, and `pyt new` from the installed template
+    stopped in __init's `uv add` and removed the project."""
+    swap = Swap(tmp_path, monkeypatch, fresh=True)
+    (swap.source / "pyproject.toml").write_bytes(b'[tool.uv]\nfind-links = ["../wheels"]\n\n[tool.uv.sources]\nmylib = { path = "../mylib" }\n')
+    (swap.source / "uv.lock").write_bytes(b'version = 1\n\n[[package]]\nname = "mylib"\nversion = "0.1.0"\nsource = { directory = "../mylib" }\n')
+    plan = swap.plan()
+    plan.files += ["pyproject.toml", "uv.lock"]
+    cmd_install.install(plan)
+    pyproject = tomllib.loads((swap.snapshot / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((swap.snapshot / "uv.lock").read_text(encoding="utf-8"))
+    names = {
+        "../wheels": pyproject["tool"]["uv"]["find-links"][0],
+        "../mylib": pyproject["tool"]["uv"]["sources"]["mylib"]["path"],
+    }
+    assert lock["package"][0]["source"]["directory"] == names["../mylib"]
+    for original, there in names.items():
+        assert there != original and os.path.normpath(swap.snapshot / there) == os.path.normpath(swap.source / original), there
+    assert (swap.source / "pyproject.toml").read_bytes().count(b'"../mylib"') == 1  # the clone itself stays
+
+
 def test_an_interrupt_right_after_the_swap_is_undone_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ctrl+C between the rename of the new copy into place and the line that notes it: the
     undo sees that the new copy's own folder has gone and puts the old copy back."""
@@ -900,12 +1185,198 @@ def test_an_interrupt_right_after_a_launcher_is_replaced_is_undone_too(tmp_path:
     assert interrupted and swap.state() == swap.before
 
 
+@pytest.mark.usefixtures("default_signals")
+def test_a_second_ctrl_c_waits_for_the_undo_of_the_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A Ctrl+C as the new copy moves in is undone; a second one during that undo (SIGINT keeps
+    Python's own handler) raised KeyboardInterrupt inside it: the old copy stayed aside, the new one
+    was left next to it, and "nothing was changed" never came. The undo goes on to its end first."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    real = cmd_install._rename
+    calls: list[int] = []
+
+    def rename(src: Path, dst: Path) -> None:
+        calls.append(1)
+        if len(calls) == 2:  # the new copy moves in: the first Ctrl+C
+            raise KeyboardInterrupt
+        if len(calls) == 3:  # the undo moves the old copy back: a second one
+            signal.raise_signal(signal.SIGINT)
+        real(src, dst)
+
+    monkeypatch.setattr(cmd_install, "_rename", rename)
+    with pytest.raises(KeyboardInterrupt):
+        cmd_install.install(swap.plan())
+    assert len(calls) == 3 and swap.state() == swap.before
+    assert "nothing was changed" in capsys.readouterr().err
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler  # given back once the undo is done
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM and SIGHUP are POSIX signals")
+@pytest.mark.parametrize("second", ["sigterm", "sighup"])
+@pytest.mark.parametrize("first", ["ctrl+c", "a rename that fails"])
+@pytest.mark.usefixtures("default_signals")
+def test_a_termination_signal_waits_for_the_undo_of_the_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], first: str, second: str
+) -> None:
+    """A SIGTERM or SIGHUP during the undo of a Ctrl+C or a failed step (a closed terminal,
+    timeout, docker stop) raised proc.Interrupted inside the undo: the old copy stayed aside, and
+    "nothing was changed" never came. The undo goes on to its end first, and the signals get
+    their handlers back."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    real = cmd_install._rename
+    calls: list[int] = []
+    stop = signal.SIGTERM if second == "sigterm" else signal.SIGHUP
+
+    def rename(src: Path, dst: Path) -> None:
+        calls.append(1)
+        if len(calls) == 2:  # the new copy moves in: it fails, or a Ctrl+C
+            if first == "ctrl+c":
+                raise KeyboardInterrupt
+            raise OSError(errno.EACCES, "Permission denied", str(dst))
+        if len(calls) == 3:  # the undo moves the old copy back: a signal comes
+            signal.raise_signal(stop)
+        real(src, dst)
+
+    monkeypatch.setattr(cmd_install, "_rename", rename)
+    with pytest.raises((KeyboardInterrupt, PytError)) as e:  # proc.Interrupted escaped the undo
+        cmd_install.install(swap.plan())
+    assert isinstance(e.value, KeyboardInterrupt if first == "ctrl+c" else PytError), repr(e.value)
+    assert len(calls) == 3 and swap.state() == swap.before
+    told = capsys.readouterr().err if first == "ctrl+c" else str(e.value)
+    assert "nothing was changed" in told, told
+    for signum in (signal.SIGTERM, signal.SIGHUP):  # given back once the undo is done
+        assert signal.getsignal(signum) is signal.SIG_DFL
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
 def test_a_complete_install_replaces_everything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     swap = Swap(tmp_path, monkeypatch, fresh=False)
     cmd_install.install(swap.plan())
     assert _files(swap.snapshot) == {"a.txt": b"new a\n", "sub/b.txt": b"new b\n", cmd_install.RECORD: b'{\n  "schema": 1,\n  "commit": "new"\n}\n'}
     assert _files(swap.bin) == {"pyt": NEW_LAUNCHER, "pyt.cmd": NEW_LAUNCHER}
     assert sorted(p.name for p in swap.snapshot.parent.iterdir()) == ["template"]
+
+
+NEW_COPY = {"a.txt": b"new a\n", "sub/b.txt": b"new b\n", cmd_install.RECORD: b'{\n  "schema": 1,\n  "commit": "new"\n}\n'}
+
+
+def _during_the_copy(monkeypatch: pytest.MonkeyPatch, step: Callable[[], None]) -> None:
+    """`step` runs once the first file of the new copy is written (in the first copy only: a
+    second install that `step` starts copies as usual), then the copy goes on."""
+    real = cmd_install._copy_files
+    ran: list[bool] = []
+
+    def copy(files: Any, dest: Path) -> None:
+        files = list(files)
+        real(files[:1], dest)
+        if not ran:
+            ran.append(True)
+            step()
+        real(files[1:], dest)
+
+    monkeypatch.setattr(cmd_install, "_copy_files", copy)
+
+
+@pytest.mark.parametrize("second", ["install", "uninstall"])
+def test_a_second_install_or_uninstall_waits_for_none_and_changes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second: str) -> None:
+    """Two runs at once (two terminals, a script and a hand): each deletes what an unfinished run
+    left next to the installed template, and the second deleted the copy the first was writing.
+    The first then swapped in an installed template without the files it had copied, and said
+    it was installed (or its undo deleted the installed template, saying nothing was changed).
+    One run at a time: the second is refused before it changes anything, and the first ends whole."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    monkeypatch.setattr(cmd_install, "snapshot_dir", lambda environ=None, windows=IS_WINDOWS: swap.snapshot)
+    monkeypatch.setattr(cmd_install, "bin_dir", lambda: swap.bin)
+    monkeypatch.delenv(cmd_install.LAUNCHER_FILE, raising=False)
+    refused: list[str] = []
+
+    def run_the_second() -> None:
+        with pytest.raises(PytError, match=rf"pyt {second}: another pyt install or uninstall is running \(") as e:
+            if second == "install":
+                cmd_install.install(swap.plan())
+            else:
+                cmd_install.cmd_uninstall(NO_CFG, [])
+        refused.append(str(e.value))
+
+    _during_the_copy(monkeypatch, run_the_second)
+    cmd_install.install(swap.plan())
+    assert refused and str(swap.snapshot.parent / cmd_install.LOCK_FILE) in refused[0], refused
+    assert _files(swap.snapshot) == NEW_COPY  # whole: every file of the new copy
+    assert _files(swap.bin) == {"pyt": NEW_LAUNCHER, "pyt.cmd": NEW_LAUNCHER}
+    assert sorted(p.name for p in swap.snapshot.parent.iterdir()) == ["template"]  # no lock file left
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0  # the lock went with the run that held it
+    assert not swap.snapshot.parent.exists()
+
+
+@pytest.mark.parametrize("then", ["the copy goes on", "a copy fails"])
+def test_an_install_whose_new_copy_another_run_deleted_changes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, then: str) -> None:
+    """A run of a pyt older than the lock (an installed template's own runner) deletes the new
+    copy as a leftover while install writes it: the copy made the folder again and swapped in an
+    installed template without the files written before (exit 0), or, when a copy failed, the
+    undo took the folder's absence for the swap and deleted the installed template that was
+    there, saying "nothing was changed". The copy now stops, and the old installed template stays."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+
+    def an_older_pyt() -> None:
+        cmd_install.remove_leftovers(swap.snapshot, [swap.bin])  # what such a run does first: no lock
+        if then == "a copy fails":
+            raise OSError(errno.EIO, "Input/output error", str(swap.snapshot.parent / "x"))
+
+    _during_the_copy(monkeypatch, an_older_pyt)
+    with pytest.raises(PytError, match="nothing was changed") as e:
+        cmd_install.install(swap.plan())
+    assert "could not put back" not in str(e.value)
+    assert swap.state() == swap.before  # the old installed template and launchers, whole
+
+
+def test_a_lock_file_a_killed_run_left_holds_nothing_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lock is the OS's, on the open file (dropped when the process ends, however it ends):
+    the file a killed run left blocks no later run, which deletes it as it ends."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    (swap.snapshot.parent / cmd_install.LOCK_FILE).write_bytes(b"")
+    cmd_install.install(swap.plan())
+    assert _files(swap.snapshot) == NEW_COPY
+    assert sorted(p.name for p in swap.snapshot.parent.iterdir()) == ["template"]
+
+
+def _refuse_every_lock(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """The lock call fails with `code`: flock on POSIX, msvcrt.locking on Windows."""
+
+    def refuse(*_args: object) -> None:
+        raise OSError(code, os.strerror(code))
+
+    if sys.platform == "win32":
+        import msvcrt
+
+        monkeypatch.setattr(msvcrt, "locking", refuse)
+    else:
+        import fcntl
+
+        monkeypatch.setattr(fcntl, "flock", refuse)
+
+
+@pytest.mark.parametrize("code", [errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL])
+def test_install_and_uninstall_run_on_a_file_system_that_takes_no_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """A data folder on a file system without locks (a cluster's Lustre without flock, some FUSE
+    and network mounts) fails the lock call with ENOLCK, EOPNOTSUPP or ENOSYS (EINVAL, as the C
+    runtime maps an unsupported lock on Windows): every install and uninstall said "another pyt
+    install or uninstall is running" where none was, for good, as the harnesses did before
+    (project.lock_refusal). Nothing can be guarded there: both run without the lock and leave no
+    lock file. A lock another run holds is still refused."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    monkeypatch.setattr(cmd_install, "snapshot_dir", lambda environ=None, windows=IS_WINDOWS: swap.snapshot)
+    monkeypatch.setattr(cmd_install, "bin_dir", lambda: swap.bin)
+    monkeypatch.delenv(cmd_install.LAUNCHER_FILE, raising=False)
+    _refuse_every_lock(monkeypatch, code)
+    cmd_install.install(swap.plan())
+    assert _files(swap.snapshot) == NEW_COPY
+    assert sorted(p.name for p in swap.snapshot.parent.iterdir()) == ["template"]  # no lock file left
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert not swap.snapshot.parent.exists()
+    for held in (errno.EWOULDBLOCK, errno.EACCES):  # flock's answer, msvcrt.locking's
+        _refuse_every_lock(monkeypatch, held)
+        with pytest.raises(PytError, match=r"pyt install: another pyt install or uninstall is running \("):
+            cmd_install.install(swap.plan())
+        assert not swap.snapshot.exists()  # refused before it copied anything
 
 
 @posix_only
@@ -981,6 +1452,42 @@ def test_a_launcher_that_cannot_be_replaced_is_named_and_nothing_leaks(tmp_path:
     assert f"pyt install failed: {target}: Operation not permitted" in message, message
     assert "nothing was changed" in message and "could not put back" not in message and ".pyt-install-" not in message, message
     assert swap.state() == swap.before  # the first launcher put back, no staged file left
+
+
+@pytest.mark.parametrize("which", ["bin", "data"], ids=["uv's tool bin folder", "the data folder"])
+def test_a_folder_that_refuses_the_new_files_is_named_not_their_temporary_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str) -> None:
+    """A folder that refuses the files install makes there although os.access says yes (Windows
+    answers yes for every folder; sysfs and a root-squashed share refuse root): the error named
+    the temporary name it tried, `<bin>/.pyt-install-p81hkalh` (mkstemp's own error, as it
+    raises it) or `.template-new-...`, which never existed. It names the folder, with the way
+    out, and changes nothing."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    if which == "bin":
+        folder, fix = swap.bin, "set UV_TOOL_BIN_DIR to a folder of yours"
+        real_mkstemp = tempfile.mkstemp
+
+        def mkstemp(*args: Any, **kwargs: Any) -> tuple[int, str]:
+            if kwargs.get("dir") is not None and Path(kwargs["dir"]) == folder:
+                raise PermissionError(errno.EACCES, "Permission denied", os.path.join(kwargs["dir"], f"{kwargs.get('prefix', 'tmp')}p81hkalh"))
+            return real_mkstemp(*args, **kwargs)
+
+        monkeypatch.setattr(tempfile, "mkstemp", mkstemp)
+    else:
+        folder, fix = swap.snapshot.parent, f"set another data folder ({cmd_install.data_home_names()})"
+        real_mkdir = os.mkdir
+
+        def mkdir(path: Any, *args: Any, **kwargs: Any) -> None:
+            if Path(path).parent == folder and Path(path).name.startswith(cmd_install.NEW):
+                raise PermissionError(errno.EACCES, "Permission denied", os.fspath(path))
+            real_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "mkdir", mkdir)
+    with pytest.raises(PytError) as e:
+        cmd_install.install(swap.plan())
+    message = str(e.value)
+    assert e.value.code == 1 and f"pyt install cannot write into {folder}: Permission denied: {fix}" in message, message
+    assert "nothing was changed" in message and ".pyt-install-" not in message and cmd_install.NEW not in message, message
+    assert swap.state() == swap.before
 
 
 # --- where things go --------------------------------------------------------------------------------
@@ -1116,16 +1623,187 @@ def test_uninstall_leaves_a_self_deleting_stand_in_for_the_pyt_cmd_cmd_runs(clon
     assert pyt(clone, box, "uninstall").returncode == 0 and not target.exists()
 
 
+@pytest.mark.parametrize("dry", [False, True], ids=["run", "dry run"])
+def test_uninstall_refuses_to_delete_the_installed_pyt_cmd_cmd_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry: bool) -> None:
+    """cmd ran the installed template's own pyt.cmd (%LOCALAPPDATA%\\pytemplate\\template\\pyt.cmd
+    uninstall, or `pyt uninstall` typed in that folder: cmd runs the current folder's pyt.cmd
+    first): uninstall deleted it with the installed template, and once uv returned cmd said "The
+    batch file cannot be found." and exit 1 after a successful uninstall. It refuses before
+    removing anything, naming the launcher that works."""
+    inst = Installed(tmp_path, monkeypatch)
+    inst.stuck = False
+    inner = inst.snapshot / "pyt.cmd"
+    _run_by_cmd(monkeypatch, inner)
+    before = _files(tmp_path)
+    monkeypatch.setattr(proc, "DRY_RUN", dry)
+    with pytest.raises(PytError, match="the installed template's own pyt.cmd") as e:
+        cmd_install.cmd_uninstall(NO_CFG, [])
+    assert e.value.code == 2 and f"cmd runs {inner}" in str(e.value) and "run pyt uninstall from another folder" in str(e.value)
+    assert _files(tmp_path) == before
+    monkeypatch.setenv(cmd_install.LAUNCHER_FILE, str(inst.bin / "pyt.cmd"))  # the bin folder's: handled by _retire
+    (inst.bin / "pyt.cmd").write_bytes(EARLIER_CMD)
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+
+
 def test_the_pyt_cmd_cmd_runs_goes_only_once_the_rest_is_gone(tmp_path: Path) -> None:
+    """After a failure the pyt.cmd cmd runs stays whole only while `pyt uninstall` can run again
+    from it (retry); otherwise it goes as after a success."""
     target = tmp_path / "pyt.cmd"
     target.write_bytes(EARLIER_CMD)
     removed: list[str] = []
     left: list[str] = []
-    cmd_install._retire(target, removed, left, ["somewhere: in use or not writable"])
+    assert cmd_install._retire(target, removed, left, ["somewhere: in use or not writable"], retry=True)
     assert target.read_bytes() == EARLIER_CMD and not removed and "cmd runs it" in left[0]
+    assert not cmd_install._retire(target, removed, left, ["somewhere: in use or not writable"], retry=False)
+    assert target.read_bytes() == cmd_install.self_deleting(EARLIER_CMD) and "it deletes itself" in removed[0]
     target.write_bytes(b"@echo off\r\nrem pytemplate-launcher: no uv line\r\n")
-    cmd_install._retire(target, removed, left, [])
-    assert not target.exists() and "may say it cannot find the batch file" in removed[0]
+    assert not cmd_install._retire(target, removed, left, [])
+    assert not target.exists() and "may say it cannot find the batch file" in removed[1]
+
+
+def test_run_by_cmd_tells_the_names_of_a_hard_link_apart(tmp_path: Path) -> None:
+    """Two names of one file (a hard link): cmd reads on in the name it was given, so only that
+    name is the file cmd runs; os.path.samefile said yes for both."""
+    project, linked = tmp_path / "proj" / "pyt.cmd", tmp_path / "bin" / "pyt.cmd"
+    for folder in (project.parent, linked.parent):
+        folder.mkdir()
+    project.write_bytes(EARLIER_CMD)
+    try:
+        os.link(project, linked)
+    except OSError as e:
+        pytest.skip(f"cannot make a hard link here: {e}")
+    via = {"PYTEMPLATE_LAUNCHER": "cmd"}
+    assert cmd_install.run_by_cmd(linked, {**via, cmd_install.LAUNCHER_FILE: str(linked)})
+    assert cmd_install.run_by_cmd(project, {**via, cmd_install.LAUNCHER_FILE: str(project)})
+    assert not cmd_install.run_by_cmd(linked, {**via, cmd_install.LAUNCHER_FILE: str(project)})
+    assert not cmd_install.run_by_cmd(project, {**via, cmd_install.LAUNCHER_FILE: str(linked)})
+
+
+@pytest.mark.parametrize("runs", ["project", "bin"], ids=["cmd runs the project's name", "cmd runs the bin folder's name"])
+def test_uninstall_never_writes_through_a_hard_link_of_the_pyt_cmd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runs: str) -> None:
+    """The pyt.cmd of uv's tool bin folder was a hard link of a project's pyt.cmd (made by hand to
+    put pyt on PATH): uninstall took it for the file cmd runs when cmd ran the project's own name,
+    and wrote the self-deleting stand-in into their one inode: the project's tracked pyt.cmd held
+    it, and cmd then deleted it (del "%~f0"). The bin folder's name goes, or, when cmd runs that
+    very name, a new file takes it: the project's pyt.cmd keeps its bytes either way."""
+    inst = Installed(tmp_path, monkeypatch)
+    inst.stuck = False
+    project = tmp_path / "proj" / "pyt.cmd"
+    (project.parent / ".pytemplate").mkdir(parents=True)
+    project.write_bytes(EARLIER_CMD)
+    linked = inst.bin / "pyt.cmd"
+    try:
+        os.link(project, linked)
+    except OSError as e:
+        pytest.skip(f"cannot make a hard link here: {e}")
+    _run_by_cmd(monkeypatch, project if runs == "project" else linked)
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert project.read_bytes() == EARLIER_CMD and os.stat(project).st_nlink == 1
+    if runs == "project":
+        assert not linked.exists()
+    else:  # cmd reads on in the stand-in, a file of its own
+        assert linked.read_bytes() == cmd_install.self_deleting(EARLIER_CMD) and not os.path.samefile(linked, project)
+    assert [p.name for p in inst.bin.iterdir() if cmd_install.STAGED.match(p.name)] == []
+
+
+def _run_by_cmd(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    """This run, as pyt.cmd hands it over when cmd runs it (run_by_cmd)."""
+    path.write_bytes(EARLIER_CMD)
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "cmd")
+    monkeypatch.setenv(cmd_install.LAUNCHER_FILE, str(path))
+
+
+@pytest.mark.parametrize(
+    ("stuck", "movable", "again"),
+    [("in-use.txt", False, True), ("in-use.txt", True, False), (".pytemplate/tools/in-use.txt", False, False)],
+    ids=["a file of the template, in place", "a file of the copy moved aside", "a file of its runner, in place"],
+)
+def test_the_pyt_cmd_kept_for_a_retry_can_run_uninstall_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stuck: str, movable: bool, again: bool) -> None:
+    """A failed uninstall kept the pyt.cmd cmd runs "so that pyt uninstall can run again from it",
+    after it had deleted the installed template's runner (moved aside, or every file but the
+    record in place): typed again, that pyt.cmd found no .pytemplate/pyt.py and said "install
+    it". Now the runner goes last in place, after everything else, and the pyt.cmd stays only
+    while the runner is whole (Windows' usual failure: a terminal's folder inside the template,
+    which cannot move then); otherwise it goes too, and the error names ./pyt uninstall in a
+    project or in a clone, which finishes the job."""
+    inst = Installed(tmp_path, monkeypatch, in_use=stuck)
+    running = inst.bin / "pyt.cmd"
+    _run_by_cmd(monkeypatch, running)
+    if not movable:
+        real = cmd_install._rename
+
+        def rename(src: Path, dst: Path) -> None:
+            if src == inst.snapshot:
+                raise PermissionError(errno.EACCES, "Permission denied", str(src))
+            real(src, dst)
+
+        monkeypatch.setattr(cmd_install, "_rename", rename)
+    with pytest.raises(PytError, match="could not remove") as e:
+        cmd_install.cmd_uninstall(NO_CFG, [])
+    assert not (inst.bin / "pyt").exists()
+    if again:
+        # What pyt.cmd runs is there: the ENTRY it looks for, the runner, the configuration
+        for rel in (cmd_install.ENTRY, ".pytemplate/runner/cli.py", "pytemplate.toml", cmd_install.RECORD):
+            assert (inst.snapshot / rel).is_file(), rel
+        assert running.read_bytes() == EARLIER_CMD and str(e.value).endswith("then run pyt uninstall again"), str(e.value)
+    else:
+        assert not (inst.snapshot / cmd_install.ENTRY).exists()
+        assert running.read_bytes() == cmd_install.self_deleting(EARLIER_CMD)
+        assert str(e.value).endswith("then run ./pyt uninstall in a project or in a clone of the template"), str(e.value)
+    inst.stuck = False  # the program that held the file has ended
+    if not again:  # from a project, whose launcher is not the pyt.cmd uninstall left
+        monkeypatch.delenv("PYTEMPLATE_LAUNCHER")
+        monkeypatch.delenv(cmd_install.LAUNCHER_FILE)
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert not inst.snapshot.parent.exists()
+    if again:  # from the pyt.cmd it kept, which then goes as that run ends
+        assert list(inst.bin.iterdir()) == [running] and running.read_bytes() == cmd_install.self_deleting(EARLIER_CMD)
+    else:  # its self-deleting stand-in is ours too
+        assert list(inst.bin.iterdir()) == []
+
+
+def test_a_launcher_that_cannot_be_removed_keeps_the_installed_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A launcher uninstall cannot remove (a bin folder that is not writable, chattr +i) stays on
+    PATH: uninstall deleted the installed template anyway, and that launcher then said "install
+    it" and could not run `pyt uninstall` again. Now the installed template stays while one of
+    its launchers does: pyt keeps working, and `pyt uninstall` again finishes the job."""
+    inst = Installed(tmp_path, monkeypatch)
+    inst.stuck = False
+    before = _files(inst.snapshot)
+    launcher = inst.bin / "pyt"
+    real = cmd_install._unlink
+    blocked = [True]
+    monkeypatch.setattr(cmd_install, "_unlink", lambda path: False if blocked[0] and path == launcher else real(path))
+    with pytest.raises(PytError, match="could not remove") as e:
+        cmd_install.cmd_uninstall(NO_CFG, [])
+    assert f"{launcher}: in use or not writable" in str(e.value) and str(e.value).endswith("then run pyt uninstall again")
+    assert f"left {inst.snapshot} (the installed template): the launchers it could not remove run it" in capsys.readouterr().err
+    assert launcher.is_file() and _files(inst.snapshot) == before
+    blocked[0] = False
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert not inst.snapshot.parent.exists() and not launcher.exists()
+
+
+@posix_only
+@needs_git
+@needs_uv
+def test_the_launcher_left_by_a_failed_uninstall_runs_it_again(clone: Path, box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real launcher: after an uninstall that could not remove it, `pyt uninstall` typed
+    outside any project runs the installed template again (it said "install it", exit 2), and
+    finishes the job."""
+    assert pyt(clone, box, "install").returncode == 0
+    for key, value in box.env().items():
+        monkeypatch.setenv(key, value)
+    for key in [k for k in os.environ if k.upper() in DROP or k.upper().startswith("PYTEMPLATE_")]:
+        monkeypatch.delenv(key)
+    launcher = box.bin / "pyt"
+    real = cmd_install._unlink
+    monkeypatch.setattr(cmd_install, "_unlink", lambda path: False if path == launcher else real(path))
+    with pytest.raises(PytError, match="then run pyt uninstall again"):
+        cmd_install.cmd_uninstall(NO_CFG, [])
+    r = subprocess.run(["/bin/sh", str(launcher), "uninstall"], cwd=box.away, env=box.env(**_uv_dirs()), capture_output=True, text=True, timeout=180, check=False)
+    assert r.returncode == 0 and "pyt is uninstalled" in r.stderr, (r.stdout, r.stderr)
+    assert box.launchers() == {} and not box.snapshot.parent.exists()
 
 
 def test_is_launcher_and_not_ours(tmp_path: Path) -> None:

@@ -28,7 +28,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 from . import envs, proc, project, ui
@@ -55,17 +55,53 @@ EXTRA_PREFIX = "lazyvim.plugins.extras."
 LAZY_LUA = ROOT / ".lazy.lua"
 MARK = "PTNVIM"  # prefix of the JSON line the headless snippets print
 
+# Neovim reads every 'runtimepath' entry as a file glob (gen_expand_wildcards). On POSIX `* ? [ ] {
+# }` are wildcards (Neovim 0.12.5's path.c, path_has_exp_wildcard: `*?[{`), a comma separates
+# entries, a backslash escapes, a backtick is command substitution, a single quote sends the entry
+# through 'shell', and a `$NAME` is expanded. A wildcard that matches another folder is the worst
+# case: in `game?` the plugin's entry also named the sibling `game1`, which sorts first, and
+# require ran that folder's code, which nobody trusted. On Windows (os/win_defs.h) the wildcards
+# are `* ? [` (path_has_exp_wildcard: `*?[`; `*` and `?` cannot be in a name there), no entry ever
+# goes through 'shell' (SPECIAL_WILDCHAR, the `'`, `{` and backtick that need one, is POSIX only; a
+# backtick counts only around the whole entry, which starts with a drive there), a comma still
+# separates and a `$NAME` is still expanded (vim.fs.normalize too): a `'` (C:\Users\O'Brien), `{ }`
+# or `]` is a plain character. A project path holding one of these cannot carry the plugin on the
+# runtimepath (require fails or loads another folder's code, E79), so spec.lua skips the whole
+# integration there and names the character; this reports it for `nvim doctor` and `nvim trust`.
+RTP_UNSAFE = "[]{}*?,\\`'$"
+RTP_UNSAFE_WINDOWS = "[*?,$"
+
+
+def rtp_unsafe_text(*, windows: bool = IS_WINDOWS) -> str:
+    """The characters of `rtp_unsafe_char`, for a message: "[ ] { } * ? , \\ ` ' or $"."""
+    chars = list(RTP_UNSAFE_WINDOWS if windows else RTP_UNSAFE)
+    return " ".join(chars[:-1]) + " or " + chars[-1]
+
+
+def rtp_unsafe_char(path: PurePath, *, windows: bool = IS_WINDOWS) -> str | None:
+    """The first character of `path` Neovim cannot hold on its runtimepath, or None. `as_posix`
+    so a backslash counts only where it is a name character (POSIX), not a separator (Windows)."""
+    unsafe = RTP_UNSAFE_WINDOWS if windows else RTP_UNSAFE
+    for ch in path.as_posix():
+        if ch in unsafe:
+            return ch
+    return None
+
 # `-c` snippets: one line each, no double quotes (they go through the Windows command line).
 # QUERY_LUA must work on ANY Neovim, so an old one is reported as too old (doctor) or skipped
-# (selftest --nvim): vim.version() is a plain table before 0.10 (tostring gives "table: 0x..."),
-# and stdpath('state') is an error before 0.8 (the data dir held the shada then).
+# (selftest --nvim): it calls only the API functions every Neovim with Lua has (0.3.4 of Debian 10
+# included): api_info(), stdpath() and json_encode() through nvim_call_function. vim.version() is
+# a plain table before 0.10 (tostring gives "table: 0x...") and missing before 0.5, like vim.fn;
+# vim.json came with 0.6 (on 0.5.1 the query died on it, a raw Lua error instead of "too old");
+# stdpath('state') is an error before 0.8 (the data dir held the shada then).
 QUERY_LUA = (
-    "lua local v = vim.version(); local has_state, state = pcall(vim.fn.stdpath, 'state'); "
-    "io.stdout:write('" + MARK + "' .. vim.json.encode({"
-    "config = vim.fn.stdpath('config'), data = vim.fn.stdpath('data'), "
-    "state = has_state and state or vim.fn.stdpath('data'), cache = vim.fn.stdpath('cache'), "
-    "version = v.major .. '.' .. v.minor .. '.' .. v.patch, progpath = vim.v.progpath"
-    "}) .. '\\n')"
+    "lua local f = vim.api.nvim_call_function; local v = f('api_info', {}).version; "
+    "local has_state, state = pcall(f, 'stdpath', {'state'}); "
+    "io.stdout:write('" + MARK + "' .. f('json_encode', {{"
+    "config = f('stdpath', {'config'}), data = f('stdpath', {'data'}), "
+    "state = has_state and state or f('stdpath', {'data'}), cache = f('stdpath', {'cache'}), "
+    "version = v.major .. '.' .. v.minor .. '.' .. v.patch, progpath = vim.api.nvim_get_vvar('progpath')"
+    "}}) .. '\\n')"
 )
 # The file comes in $PT_TRUST_FILE (no quoting problems). The trust DB is written with
 # io.open(state .. '/trust', 'w'), which fails if the state directory does not exist yet.
@@ -124,8 +160,8 @@ class Nvim:
 
 
 def which(name: str) -> str | None:
-    """shutil.which on the PATH that child processes get (without this runner's own venv)."""
-    return shutil.which(name, path=proc.base_env().get("PATH"))
+    """proc.find_program on the PATH that child processes get (without this runner's own venv)."""
+    return proc.find_program(name, path=proc.base_env().get("PATH"))
 
 
 def find_nvim() -> str | None:
@@ -354,9 +390,10 @@ def lock_names_lazyvim(config: Path) -> bool:
     return isinstance(data, dict) and "LazyVim" in data
 
 
-def load_lazyvim_json(path: Path) -> dict[str, Any]:
+def load_lazyvim_json(path: Path, raw: bytes | None = None) -> dict[str, Any]:
+    """lazyvim.json's object, from `raw` when the caller already read the file."""
     try:
-        data = json.loads(path.read_bytes().decode("utf-8-sig"))
+        data = json.loads((path.read_bytes() if raw is None else raw).decode("utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise PytError(f"{path}: cannot read it as JSON ({e})") from None
     if not isinstance(data, dict):
@@ -405,8 +442,14 @@ def enable_extras(
     file is replaced whole (project.write_whole: a link stays a link); a config it may not write
     (a Nix store, another user's file) is a PytError that leaves no backup behind.
     """
-    raw = path.read_bytes()
-    data = load_lazyvim_json(path)
+    try:
+        raw = path.read_bytes()  # the backup's bytes, read once
+    except OSError as e:  # another user's 0600 file, a link to a folder it may not enter
+        names = ", ".join(short_extra(x) for x in wanted)
+        raise PytError(
+            f"cannot read {e.filename or path}: {e.strerror or e}. Enable the extras by hand (:LazyExtras, or {path}): {names}", 3
+        ) from None
+    data = load_lazyvim_json(path, raw)
     added = merge_extras(data, wanted)
     if not added or dry_run:
         return added, None
@@ -437,15 +480,33 @@ def short_extra(name: str) -> str:
 
 
 def remove_tree(path: Path) -> None:
-    """shutil.rmtree that also deletes read-only files (git objects on Windows)."""
+    """shutil.rmtree that also deletes read-only files (git objects on Windows). A symlink or a
+    junction goes as a link, never what it names, as e2e.rmtree: rmtree refuses a link, and the
+    retry chmodded the folder it names to 0o600 through it and returned, the link left (a
+    subfolder of selftest --nvim's --dir moved to another disk). POSIX: a folder without its
+    write, read or search bit is made the owner's rwx again and the tree removed once more
+    (e2e.rmtree_posix): the retry of a single step raised TypeError there (os.open without its
+    flags, rmtree being fd-based) and left the folder 0o600."""
+    from .cmd_env import _is_link  # cmd_env imports this module: import it lazily
 
-    def retry(func: Callable[[str], object], name: str, *_: object) -> None:
+    def retry(func: Callable[[str], object], name: str, exc: object) -> None:
+        # Windows (rmtree works by path there): a read-only file or folder loses the attribute
+        error = exc[1] if isinstance(exc, tuple) else exc  # onerror's exc_info (3.11), onexc's exception
+        if isinstance(error, BaseException) and os.path.islink(name):
+            raise error  # chmod follows a link
         os.chmod(name, stat.S_IWRITE | stat.S_IREAD)
         func(name)
 
+    if _is_link(path):
+        os.unlink(path)  # on Windows this also removes a directory symlink or a junction
+        return
     if not path.exists():
         return
-    if sys.version_info >= (3, 12):
+    if not IS_WINDOWS:
+        from .e2e import rmtree_posix  # e2e imports what this module never needs: import it lazily
+
+        rmtree_posix(path)
+    elif sys.version_info >= (3, 12):
         shutil.rmtree(path, onexc=retry)
     else:
         shutil.rmtree(path, onerror=retry)
@@ -509,8 +570,12 @@ def doctor(check: Check) -> None:
         return
     trust = trust_status(nv.trust_db, LAZY_LUA)
     trusted = {"trusted": "trusted", "missing": "missing"}.get(trust.state, "NOT trusted")
-    good = nv.version >= MIN_LAZYVIM and lazyvim and trust.state == "trusted"
-    hint = "details: ./pyt nvim doctor" + ("   (trust it once: ./pyt nvim trust)" if lazyvim and trust.state != "trusted" else "")
+    unsafe = rtp_unsafe_char(ROOT)
+    good = nv.version >= MIN_LAZYVIM and lazyvim and trust.state == "trusted" and not unsafe
+    if unsafe:
+        hint = f"details: ./pyt nvim doctor   (the path holds `{unsafe}`: move the project)"
+    else:
+        hint = "details: ./pyt nvim doctor" + ("   (trust it once: ./pyt nvim trust)" if lazyvim and trust.state != "trusted" else "")
     check(
         True if good else None,
         f"Neovim {nv.version_text}, LazyVim {'yes' if lazyvim else 'no'}, .lazy.lua {trusted}",
@@ -615,6 +680,13 @@ def cmd_doctor(cfg: Config) -> int:
     check(trust.state == "trusted", f".lazy.lua {trust.describe()}", "./pyt nvim trust   (or open Neovim here: (v)iew, :trust, restart)")
     if trust.state != "missing":
         ui.detail(f"         {trust.path}  sha256 {trust.sha256}  (database: {nv.trust_db})")
+    unsafe = rtp_unsafe_char(ROOT)
+    if unsafe:
+        check(
+            False,
+            f"the project path holds `{unsafe}`: Neovim cannot put it on 'runtimepath', so the ./pyt integration cannot load here",
+            f"move the project to a path without {rtp_unsafe_text()}",
+        )
     try:
         missing = missing_extras(nv.lazyvim_json)
     except PytError as e:  # LazyVim itself skips such a file without a word
@@ -633,10 +705,18 @@ def cmd_doctor(cfg: Config) -> int:
             check(True, "recommended extras enabled in lazyvim.json", "")
 
     ui.step("tools")
+    xcode_problem = None
+    if IS_MACOS:
+        from .cmd_env import _xcode_problem  # cmd_env imports this module: import it lazily
+
+        xcode_problem = _xcode_problem()
     for names, required, why, hint in TOOLS:
         found = _which_any(names)
         if found and IS_WINDOWS and "windowsapps" in found.lower() and names[-1] == "python":
             check(None, f"python is the Microsoft Store alias ({found})", "Install a real Python (scoop install python, or python.org) for Mason's PyPI packages")
+            continue
+        if found and xcode_problem is not None and names[0] in ("git", "python3", "python") and os.path.dirname(found) == "/usr/bin":
+            check(False if required else None, f"{names[0]} is the /usr/bin stub without the developer tools ({found}): {xcode_problem}", "xcode-select --install")
             continue
         if found:
             check(True, f"{names[0]}: {found}", "")
@@ -678,14 +758,32 @@ def cmd_doctor(cfg: Config) -> int:
 # --- trust / extras / bootstrap / sync --------------------------------------------------------------
 
 
+def _done(message: str, details: str = "") -> None:
+    """What the command did and where (a path, a hash, a backup): the answer to it, so -q, which
+    hides progress and ok lines, keeps it (5.3), as it keeps the paths render lists. `-q nvim
+    extras` rewrote lazyvim.json and made a backup without a word."""
+    if ui.QUIET:
+        ui.report(message)
+    else:
+        ui.ok(message)
+    if details:
+        ui.report(details)
+
+
 def cmd_trust(nv: Nvim) -> int:
     """nvim trust: pre-trust ROOT/.lazy.lua with vim.secure.trust (the same as (v)iew + :trust)."""
     before = trust_status(nv.trust_db, LAZY_LUA)
     if before.state == "missing":
         raise PytError(".lazy.lua not found: ./pyt render generates it")
+    bad = rtp_unsafe_char(ROOT)
+    if bad:
+        raise PytError(
+            f"the project path holds `{bad}`, which Neovim cannot put on its 'runtimepath': the "
+            f"./pyt integration cannot load here even once trusted. Move the project to a path "
+            f"without {rtp_unsafe_text()}"
+        )
     if before.state == "trusted":
-        ui.ok(f"already trusted: {before.path}")
-        ui.info(f"  sha256 {before.sha256}")
+        _done(f"already trusted: {before.path}", f"  sha256 {before.sha256}")
         return 0
     if proc.DRY_RUN:
         ui.info(f"would trust {before.path}\n  sha256 {before.sha256}\n  in {nv.trust_db}")
@@ -694,8 +792,7 @@ def cmd_trust(nv: Nvim) -> int:
     after = trust_status(nv.trust_db, LAZY_LUA)
     if after.state != "trusted":
         raise PytError(f"Neovim reported success, but {nv.trust_db} has no matching entry for {after.path} ({after.state})", 3)
-    ui.ok(f"trusted {after.path}")
-    ui.info(f"  sha256 {after.sha256}\n  database {nv.trust_db}")
+    _done(f"trusted {after.path}", f"  sha256 {after.sha256}\n  database {nv.trust_db}")
     ui.info("  It also lets .lazy.lua load the local plugin .pytemplate/nvim/. Any change to the file needs a new trust.")
     return 0
 
@@ -709,12 +806,10 @@ def cmd_extras(nv: Nvim) -> int:
         raise PytError(f"{path} does not exist yet. Start Neovim once (LazyVim creates it), then run ./pyt nvim extras again", 3)
     added, backup = enable_extras(path, dry_run=proc.DRY_RUN)
     if not added:
-        ui.ok(f"every recommended extra is already enabled in {path}")
+        _done(f"every recommended extra is already enabled in {path}")
         return 0
     verb = "would enable" if proc.DRY_RUN else "enabled"
-    ui.ok(f"{verb} in {path}: " + ", ".join(short_extra(e) for e in added))
-    if backup:
-        ui.info(f"  backup: {backup}")
+    _done(f"{verb} in {path}: " + ", ".join(short_extra(e) for e in added), f"  backup: {backup}" if backup else "")
     ui.info("  Restart Neovim: LazyVim imports them in order (see :LazyExtras).")
     return 0
 
@@ -722,9 +817,9 @@ def cmd_extras(nv: Nvim) -> int:
 def cmd_bootstrap(nv: Nvim) -> int:
     """nvim bootstrap: clone the LazyVim starter into <config> (only if <config> does not exist)."""
     if nv.config.exists():
-        ui.info(f"{nv.config} already exists: nothing done (an existing Neovim config is never touched)")
+        ui.report(f"{nv.config} already exists: nothing done (an existing Neovim config is never touched)")
         if not nv.lazyvim_installed():
-            ui.info("  It is not a LazyVim config. See https://lazyvim.github.io/installation to switch by hand.")
+            ui.report("  It is not a LazyVim config. See https://lazyvim.github.io/installation to switch by hand.")
         return 0
     git = which("git")
     if not git:
@@ -738,13 +833,16 @@ def cmd_bootstrap(nv: Nvim) -> int:
         remove_tree(nv.config / ".git")  # LazyVim's install steps: the config becomes your own
     except OSError as e:
         raise PytError(f"the starter is in {nv.config}, but its .git could not be removed ({e}): delete it by hand", 3) from None
-    ui.ok(f"LazyVim starter installed in {nv.config}")
-    ui.info("  Next: start nvim once (LazyVim installs its plugins), then ./pyt nvim trust && ./pyt nvim sync")
+    # one command per line, as `new` prints its next steps: cmd and Windows PowerShell 5.1 have no &&
+    _done(
+        f"LazyVim starter installed in {nv.config}",
+        "  Next: start nvim once (LazyVim installs its plugins), then run in the project:\n    ./pyt nvim trust\n    ./pyt nvim sync",
+    )
     return 0
 
 
 def cmd_sync(nv: Nvim) -> int:
-    """nvim sync: `nvim --headless "+Lazy! install" +qa` from the project (installs what .lazy.lua adds).
+    """nvim sync: `nvim --headless "+Lazy! install" +qa!` from the project (installs what .lazy.lua adds).
 
     install, never sync: Lazy! sync would also update every plugin of the user's config
     (rewriting lazy-lock.json) and clean the plugins its spec does not name.
@@ -765,20 +863,37 @@ def cmd_sync(nv: Nvim) -> int:
     # Headless Neovim exits 0 after a Lua error (a clone that failed: "Too many rounds of missing
     # plugins"; no lazy.nvim: "E492: Not an editor command"), so lazy.nvim itself is asked
     # afterwards which plugins are installed (SYNC_CHECK_LUA, run from a file: short argv).
-    argv = [nv.exe, "--headless", "+Lazy! install", "+lua dofile(vim.env.PT_NVIM_CHECK)", "+qa"]
+    # The prompts answer at once (NO_PROMPTS_LUA, before the config runs), and `qa!` quits
+    # whatever buffer the config left modified (`qa` failed with E37 and Neovim went on running).
+    argv = [nv.exe, "--headless", "--cmd", "lua dofile(vim.env.PT_NVIM_PROMPTS)", "+Lazy! install", "+lua dofile(vim.env.PT_NVIM_CHECK)", "+qa!"]
     ui.command(proc.show(argv))
     if proc.DRY_RUN:
         return 0
     with tempfile.TemporaryDirectory(prefix="pt-nvim-", ignore_cleanup_errors=True) as tmp:
         env = proc.base_env()
         env.setdefault("NVIM_LOG_FILE", str(Path(tmp) / "nvim.log"))  # else it may land in ROOT
-        check_lua, result = Path(tmp) / "check.lua", Path(tmp) / "plugins.json"
+        check_lua, result, prompts = Path(tmp) / "check.lua", Path(tmp) / "plugins.json", Path(tmp) / "prompts.lua"
         check_lua.write_text(SYNC_CHECK_LUA, encoding="utf-8", newline="\n")
-        env.update(PT_NVIM_CHECK=str(check_lua), PT_NVIM_RESULT=str(result))
-        code = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, check=False).returncode
+        prompts.write_text(NO_PROMPTS_LUA, encoding="utf-8", newline="\n")
+        env.update(PT_NVIM_CHECK=str(check_lua), PT_NVIM_RESULT=str(result), PT_NVIM_PROMPTS=str(prompts))
+        try:
+            code: int | None = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, check=False, timeout=SYNC_TIMEOUT).returncode
+        except subprocess.TimeoutExpired:  # subprocess.run has stopped it
+            code = None
         report = _read_report(result)
+    ui.report("")  # headless Neovim ends its last message without a line break: the result gets its own
+    if code is None:
+        raise PytError(
+            f"Neovim did not finish within {SYNC_TIMEOUT / 60:g} minutes and was stopped: does your config wait at a prompt "
+            "(see its messages above)? Start Neovim in the project to answer it, then run ./pyt nvim sync again",
+            1,
+        )
     if code != 0:
-        raise proc.CommandFailed(argv, code)
+        message = f"Neovim stopped with exit code {proc.exit_code(code)} before lazy.nvim could report: see its messages above (no network, a proxy?)"
+        lazy = nv.data / "lazy" / "lazy.nvim"
+        if not lazy.is_dir():
+            message += f"; {lazy}, where the LazyVim starter installs lazy.nvim, does not exist yet"
+        raise PytError(message + ". Run ./pyt nvim sync again, or start Neovim in the project", 1)
     if report is None:
         raise PytError("Neovim did not say which plugins are installed (see its messages above): run ./pyt nvim sync again", 1)
     if report.get("lazy") is not True:
@@ -792,10 +907,25 @@ def cmd_sync(nv: Nvim) -> int:
         )
     if failed:
         ui.warn(f"lazy.nvim reported errors for: {', '.join(failed)} (see the messages above, or :Lazy)")
-    ui.ok("plugins installed (your other plugins were neither updated nor removed)")
+    _done("plugins installed (your other plugins were neither updated nor removed)")
     return 0
 
 
+# A first install of a whole LazyVim on a slow line takes minutes; past this, Neovim waits at
+# something no headless run can answer, and `nvim sync` stops it (it never returned).
+SYNC_TIMEOUT = 1800.0
+# Run by `nvim sync` before the user's config (--cmd): headless Neovim waits for ever at a prompt,
+# whose keys no UI can give (stdin is /dev/null), and the LazyVim starter's bootstrap calls
+# getchar() ("Press any key to exit...") when its clone of lazy.nvim fails (offline, a proxy). The
+# prompts of vim.fn (and vim.ui.input/select, which call them) answer at once, as Esc would; a
+# Vimscript call is not covered: SYNC_TIMEOUT ends that one.
+NO_PROMPTS_LUA = """\
+vim.fn.getchar = function() return 27 end
+vim.fn.getcharstr = function() return "\\27" end
+vim.fn.input = function() return "" end
+vim.fn.inputsecret = vim.fn.input
+vim.fn.inputlist = function() return 0 end
+"""
 # Run by `nvim sync` after `Lazy! install` (which waits): lazy.nvim's own view of every plugin
 # of the spec, written as JSON to $PT_NVIM_RESULT (the user's terminal keeps Neovim's output).
 SYNC_CHECK_LUA = """\

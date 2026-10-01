@@ -31,10 +31,13 @@ from runner import cli, config, lintc, presets, render, ui  # noqa: E402
 from runner import tasks as task_runner  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.editors import vscode  # noqa: E402
-from runner.project import PRESETS, SRC, TEMPLATES  # noqa: E402
+from runner.project import PRESETS, SRC, TEMPLATE, TEMPLATES  # noqa: E402
 from runner.ui import PytError  # noqa: E402
 
 WS = "${workspaceFolder}"
+# The templates hold the shipped content (a project may edit its own, README: the typing
+# profiles, templates/vscode/settings.json): only there do the tests pin what they say
+TEMPLATE_REPO = (TEMPLATE / "template-repo").is_file()
 COMMANDS = set(cli.COMMANDS)
 
 
@@ -319,17 +322,36 @@ def severities(task: dict[str, Any]) -> dict[str, str]:
     return {m["owner"].removeprefix("pytemplate-"): m.get("severity", "*") for m in task["problemMatcher"] if m.get("severity") != "info"}
 
 
+def _profile_severities(profiles: list[str]) -> dict[str, str]:
+    """The matchers' severities for a task that runs the checks of `profiles`, read from those
+    profiles as the project has them (README: a project may edit them): ruff's findings are
+    warnings only when every profile has exit_zero; mypy runs unless every one skips it, and its
+    errors are errors when any is blocking."""
+    data = [render.load_profile(p) for p in profiles]
+    out = {"ruff": "warning" if all(d.get("ruff", {}).get("exit_zero") for d in data) else "error"}
+    if not all(d.get("skip_mypy") for d in data):
+        out["mypy"] = "error" if any(d.get("blocking") for d in data) else "warning"
+    return out
+
+
 def test_severity_follows_the_typing_profile() -> None:
     script = by_label(make("script"))  # cpython 'off' (no mypy) + mypyc
-    assert severities(script["pyt: check"]) == {"ruff": "error", "rules": "*"}
-    assert severities(script["pyt: check all"]) == {"ruff": "error", "mypy": "error", "rules": "*"}
-    warn = by_label(make("basedpyright"))  # relaxed 'warn': ruff exit_zero, mypy non-blocking
-    assert severities(warn["pyt: check"]) == {"ruff": "warning", "mypy": "warning", "rules": "*", "pyright": "*"}
-    assert severities(warn["pyt: check all"])["mypy"] == "error"
-    strict = by_label(make("strict"))
-    assert severities(strict["pyt: check"])["mypy"] == "error"
-    assert severities(by_label(make("mypyc-active"))["pyt: check"])["mypy"] == "error"
-    assert severities(script["pyt: report"]) == {"mypy": "error", "mypyc": "*"}
+    assert severities(script["pyt: check"]) == {**_profile_severities(["off"]), "rules": "*"}
+    assert severities(script["pyt: check all"]) == {**_profile_severities(["off", "mypyc"]), "rules": "*"}
+    warn = by_label(make("basedpyright"))  # relaxed 'warn'
+    assert severities(warn["pyt: check"]) == {**_profile_severities(["warn"]), "rules": "*", "pyright": "*"}
+    assert severities(warn["pyt: check all"])["mypy"] == _profile_severities(["warn", "mypyc"])["mypy"]
+    assert severities(by_label(make("strict"))["pyt: check"])["mypy"] == _profile_severities(["strict"])["mypy"]
+    assert severities(by_label(make("mypyc-active"))["pyt: check"])["mypy"] == _profile_severities(["mypyc"])["mypy"]
+    assert severities(script["pyt: report"]) == {"mypy": _profile_severities(["mypyc"])["mypy"], "mypyc": "*"}
+    if TEMPLATE_REPO:  # the shipped profiles: off and the mypyc and strict ones block, warn does not
+        assert severities(script["pyt: check"]) == {"ruff": "error", "rules": "*"}
+        assert severities(script["pyt: check all"]) == {"ruff": "error", "mypy": "error", "rules": "*"}
+        assert severities(warn["pyt: check"]) == {"ruff": "warning", "mypy": "warning", "rules": "*", "pyright": "*"}
+        assert severities(warn["pyt: check all"])["mypy"] == "error"
+        assert severities(by_label(make("strict"))["pyt: check"])["mypy"] == "error"
+        assert severities(by_label(make("mypyc-active"))["pyt: check"])["mypy"] == "error"
+        assert severities(script["pyt: report"]) == {"mypy": "error", "mypyc": "*"}
 
 
 def test_pyright_matcher_only_with_basedpyright() -> None:
@@ -390,13 +412,28 @@ def test_settings_and_extensions() -> None:
     cfg = preset("script", {"vscode": {"settings": {"tasks.statusbar.default.hide": False}}})
     files = generated(cfg)
     settings = files[".vscode/settings.json"]
-    assert settings["terminal.integrated.automationProfile.windows"]["path"] == "${env:windir}\\System32\\cmd.exe"
-    assert settings["terminal.integrated.automationProfile.linux"]["path"] == "/bin/sh"
-    assert settings["terminal.integrated.automationProfile.osx"]["path"] == "/bin/sh"
-    assert settings["tasks.statusbar.default.hide"] is False  # [vscode] settings wins
-    assert generated(make("script"))[".vscode/settings.json"]["tasks.statusbar.default.hide"] is True
-    assert {"**/.venv*/**", "**/.build/**", "**/dist/**"} <= set(settings["files.watcherExclude"])
+    assert settings["tasks.statusbar.default.hide"] is False  # [vscode] settings wins over the template
     assert "actboy168.tasks" in files[".vscode/extensions.json"]["recommendations"]
+    if TEMPLATE_REPO:  # the shipped templates/vscode/settings.json (a project may edit its own)
+        assert settings["terminal.integrated.automationProfile.windows"]["path"] == "${env:windir}\\System32\\cmd.exe"
+        assert settings["terminal.integrated.automationProfile.linux"]["path"] == "/bin/sh"
+        assert settings["terminal.integrated.automationProfile.osx"]["path"] == "/bin/sh"
+        assert generated(make("script"))[".vscode/settings.json"]["tasks.statusbar.default.hide"] is True
+        assert {"**/.venv*/**", "**/.build/**", "dist/**"} <= set(settings["files.watcherExclude"])
+
+
+@pytest.mark.skipif(not TEMPLATE_REPO, reason="the shipped templates/vscode/settings.json (a project may edit its own)")
+def test_vscode_excludes_only_the_roots_own_output_folders() -> None:
+    """files.watcherExclude held `**/dist/**`, every folder named dist at any depth: a subpackage
+    or test folder of that name is source (CLAUDE.md 3), and VS Code never saw the changes made
+    there outside the editor (a git checkout, ./pyt fmt) until a reload. A `**/` pattern names a
+    dot folder or a cache only (no module lives there); the root's dist/ is `dist/**`, which VS
+    Code reads relative to the workspace folder."""
+    settings = generated(make("script"))[".vscode/settings.json"]
+    for key in ("files.watcherExclude", "search.exclude", "files.exclude"):
+        anywhere = [p for p in settings[key] if p.startswith("**/") and not p[3:].startswith((".", "__pycache__"))]
+        assert not anywhere, (key, anywhere)
+    assert "dist/**" in settings["files.watcherExclude"]
 
 
 # --- problem matchers --------------------------------------------------------------------------
@@ -532,6 +569,12 @@ SAMPLES: list[tuple[str, str | None, dict[str, str | None]]] = [
     ("FAILED tests/test_core.py::test_fails_assert - assert (1 + 1) == 3", None, {}),
     ("tests\\test_core.py ..FF                                                  [100%]", None, {}),
     ("  C:\\p\\tests\\test_x.py:5: DeprecationWarning: old", None, {}),
+    # the -ra skip summary of a green run (every preset's addopts): the pytest matchers read an
+    # error on a file named "SKIPPED [1] tests/test_skip.py", or on a stage module's src/ copy
+    ("SKIPPED [1] tests/test_skip.py:5: ConnectionError: the service is not running", None, {}),
+    ("SKIPPED [12] tests\\test_skip.py:4: RuntimeError on this backend", None, {}),
+    ("SKIPPED [1] /home/dev/p1/.build/mypyc-dev/stage/myapp/app.py:3: ValueError: no display", None, {}),
+    ("SKIPPED [1] myapp/core/bench.py:3: assert not on this backend", None, {}),
     # ruff summaries and the runner's own lines
     ("Found 2 errors.", None, {}),
     ("[*] 1 fixable with the `--fix` option.", None, {}),

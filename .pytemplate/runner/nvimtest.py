@@ -39,7 +39,9 @@ from pathlib import Path
 
 from . import cmd_nvim, presets, proc, ui
 from .config import Config
-from .project import IS_WINDOWS, ROOT, check_private_dir, scratch_name, user_path
+from .e2e import PYTEST_VARIABLES
+from .envs import LOCK_MODE
+from .project import IS_WINDOWS, ROOT, base_lock, check_private_dir, make_private_dir, scratch_name, user_path
 from .ui import PytError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
@@ -56,10 +58,18 @@ PHASES = ("new+sync", "trust+lazy", "smoke")
 SMOKE_TYPING = "strict"
 
 # The inner ./pyt runs as if typed in a fresh shell: nothing from this runner's own
-# `uv run --script` environment, nor from a shell's stale PYTEMPLATE_* exports.
-RUNNER_DROP = frozenset({"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON"})
-# Anything that could make Neovim read the user's own config, data or server.
-NVIM_DROP = frozenset({"NVIM", "NVIM_APPNAME", "NVIM_LISTEN_ADDRESS", "NVIM_LOG_FILE", "VIMINIT", "EXINIT", "MYVIMRC", "MYGVIMRC"})
+# `uv run --script` environment, nor from a shell's stale PYTEMPLATE_* exports, nor the user's
+# lock mode and pytest options, settings for the user's own projects (e2e.SCRUBBED drops them
+# too): under UV_LOCKED the scratch projects' `./pyt new` refused to lock, and the smoke's tests
+# got a PYTEST_ADDOPTS meant for the user's own app.
+RUNNER_DROP = frozenset(
+    {"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON", *LOCK_MODE, *PYTEST_VARIABLES}
+)
+# Anything that could make Neovim read the user's own config, data or server, or another
+# Neovim's runtime: a running Neovim exports VIMRUNTIME to every job and terminal, and an isolated
+# Neovim of another version (selftest --nvim started from a 0.12 editor, testing the 0.11.2 floor)
+# ran on that version's runtime files, where its ftplugins and vim.treesitter failed.
+NVIM_DROP = frozenset({"NVIM", "NVIM_APPNAME", "NVIM_LISTEN_ADDRESS", "NVIM_LOG_FILE", "VIMINIT", "EXINIT", "MYVIMRC", "MYGVIMRC", "VIMRUNTIME", "VIM"})
 XDG_HOMES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
 
 
@@ -139,6 +149,42 @@ def uv_dirs(env: Mapping[str, str]) -> dict[str, str]:
     return out
 
 
+def user_git_config(base: Path, source: Mapping[str, str]) -> str | None:
+    """A GIT_CONFIG_GLOBAL file for Neovim's git (lazy.nvim clones the plugins with the user's
+    config: a proxy, url.*.insteadOf, http.sslCAInfo), or None when there is nothing to include.
+
+    git's global config is two files, ~/.gitconfig and $XDG_CONFIG_HOME/git/config, but nvim_env
+    moves XDG_CONFIG_HOME into the isolated tree, so git would read the empty moved one and miss
+    the user's. GIT_CONFIG_GLOBAL replaces BOTH defaults, so this file includes both of the user's
+    (resolved from `source`, the env before the isolation), and is written under `base`. In git's
+    own order: the XDG file first, then ~/.gitconfig, whose value wins for a key set in both
+    (the last one read wins; the other order gave Neovim's git the XDG file's proxy).
+    """
+    files: list[Path] = []
+    home = source.get("HOME") or source.get("USERPROFILE")
+    xdg = source.get("XDG_CONFIG_HOME")
+    if xdg or home:
+        files.append(Path(xdg) / "git" / "config" if xdg else Path(str(home)) / ".config" / "git" / "config")
+    if home:
+        files.append(Path(home) / ".gitconfig")
+    includes = [f"[include]\n\tpath = {git_config_value(f.as_posix())}\n" for f in files if f.is_file()]
+    if not includes:
+        return None
+    path = base / "gitconfig"
+    path.write_text("".join(includes), encoding="utf-8", newline="\n")
+    return str(path)
+
+
+def git_config_value(text: str) -> str:
+    """`text` as a git config value: in double quotes, where `#` and `;` start no comment, with
+    `\\` and `"` escaped and a line break, tab or backspace written as git's escape. Raw, a home
+    folder named `user#1` ended the include at `#` (git dropped the user's config without a word)
+    and one holding `\\` made every git call fail (a bad escape)."""
+    for raw, escaped in (("\\", "\\\\"), ('"', '\\"'), ("\n", "\\n"), ("\t", "\\t"), ("\b", "\\b")):
+        text = text.replace(raw, escaped)
+    return f'"{text}"'
+
+
 # --- smoke output ------------------------------------------------------------------------------------
 
 
@@ -209,7 +255,7 @@ def kill_tree(p: subprocess.Popen[bytes], grace: float = KILL_GRACE) -> None:
     own sessions), and SIGKILL after `grace` seconds.
     """
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True, check=False)
+        proc.taskkill(p.pid)
     else:
         try:
             os.killpg(p.pid, signal.SIGTERM)
@@ -261,7 +307,7 @@ def _run_logged(
     with log.open("w", encoding="utf-8", errors="replace") as out:
         try:
             p = subprocess.Popen(
-                args, cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                [proc.program(args[0]), *args[1:]], cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                 start_new_session=not IS_WINDOWS,
             )  # fmt: skip
         except FileNotFoundError:
@@ -306,20 +352,35 @@ def _check_isolated(nv: cmd_nvim.Nvim, layout: Layout) -> None:
 
 
 def _prepare_dir(layout: Layout) -> None:
+    from .e2e import unusable
+
     base = layout.base
-    resolved = base.resolve()
-    if resolved == ROOT or ROOT in resolved.parents:
-        raise PytError(f"--dir must be outside the template ({base}): Neovim would find its .lazy.lua")
-    if base.exists() and not base.is_dir():
-        raise PytError(f"--dir {base} is not a folder: pick another --dir")
-    check_private_dir(base, "--dir")
-    if base.exists() and any(base.iterdir()) and not (base / DIR_MARKER).is_file():
-        raise PytError(f"{base} is not empty and was not created by selftest --nvim: pick another --dir")
+    try:  # a --dir it cannot look into (below a folder it may not enter: Path.exists raises there on
+        # Python 3.11-3.13; its own without the read bit; a link loop: RuntimeError on 3.11 and 3.12)
+        resolved = base.resolve()
+        if resolved == ROOT or ROOT in resolved.parents:
+            raise PytError(f"--dir must be outside the template ({base}): Neovim would find its .lazy.lua")
+        # The projects are made below it (layout.projects), and spec.lua switches the whole ./pyt
+        # integration off in a folder Neovim cannot put on its runtimepath: every smoke check failed
+        # after minutes of installs, naming .lazy.lua's trust. Checked as `nvim trust` checks ROOT.
+        unsafe = cmd_nvim.rtp_unsafe_char(resolved)
+        if unsafe:
+            raise PytError(
+                f"--dir {resolved} holds `{unsafe}`, which Neovim cannot put on its 'runtimepath': the ./pyt "
+                f"integration could not load in the projects made below it. Pick a --dir without {cmd_nvim.rtp_unsafe_text()}"
+            )
+        if base.exists() and not base.is_dir():
+            raise PytError(f"--dir {base} is not a folder: pick another --dir")
+        check_private_dir(base, "--dir")
+        if base.exists() and any(base.iterdir()) and not (base / DIR_MARKER).is_file():
+            raise PytError(f"{base} is not empty and was not created by selftest --nvim: pick another --dir")
+    except (OSError, RuntimeError) as e:  # it was an internal-error traceback, exit 1
+        raise PytError(f"cannot use --dir {base}: {unusable(e)}: pick another --dir") from None
     try:
-        base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        make_private_dir(base, "--dir")
+        (base / DIR_MARKER).write_text("work directory of ./pyt selftest --nvim (safe to delete)\n", encoding="utf-8", newline="\n")
     except OSError as e:  # a parent that is a file, no permission
         raise PytError(f"cannot create --dir {base}: {e.strerror or e}") from None
-    (base / DIR_MARKER).write_text("work directory of ./pyt selftest --nvim (safe to delete)\n", encoding="utf-8", newline="\n")
 
 
 def base_info(nv: cmd_nvim.Nvim, lock: Path | None) -> dict[str, str]:
@@ -651,9 +712,15 @@ def _parse_args(args: list[str]) -> argparse.Namespace:
     return parser.parse_args(args)
 
 
+MAX_TIMEOUT = 86400  # a day per smoke run: Windows waits take 32-bit milliseconds (as shells.MAX_TIMEOUT)
+
+
 def selftest(cfg: Config, args: list[str]) -> int:
     """selftest --nvim [PRESET,...] [--keep] [--fresh] [--require] [--timeout S] [--dir DIR]"""
     ns = _parse_args(args)
+    if not 0 < ns.timeout <= MAX_TIMEOUT:  # also nan and inf: a usage error before minutes of installs
+        # (0 or less killed every smoke run at once: each preset failed as "timed out after 0 s")
+        raise PytError(f"selftest --nvim --timeout: {ns.timeout:g} is not a number of seconds above 0 (at most {MAX_TIMEOUT})")
     names = [p.strip() for p in ns.presets.split(",") if p.strip()]
     unknown = [p for p in names if p not in presets.available()]
     if unknown or not names:
@@ -686,9 +753,11 @@ def selftest(cfg: Config, args: list[str]) -> int:
 def _run(ns: argparse.Namespace, names: list[str], exe: str, layout: Layout) -> int:
     from .e2e import hidden_template_repository, isolate_git
 
-    renv = runner_env(proc.base_env())
+    source = proc.base_env()  # the user's env, before the git isolation below; for the git config
+    renv = runner_env(source)
     # Neovim keeps the user's git configuration: lazy.nvim clones the plugins with it (a proxy,
-    # url.*.insteadOf)
+    # url.*.insteadOf). nvim_env moves XDG_CONFIG_HOME, so point git at a config that includes the
+    # user's two global files, else the $XDG_CONFIG_HOME/git/config one would be lost (below).
     venv = nvim_env(layout, renv, uv_dirs(renv))
     # The ./pyt steps work in --dir only, as those of selftest --e2e: git there never sees a
     # repository around --dir (`new` skipped git init there and, with core.filemode = false, staged
@@ -703,32 +772,40 @@ def _run(ns: argparse.Namespace, names: list[str], exe: str, layout: Layout) -> 
             "hide the template's own. Pick a --dir outside that repository"
         )
     _prepare_dir(layout)
-    _remove(layout.logs)  # logs of the previous run
-    layout.logs.mkdir(parents=True)
-    version = cmd_nvim.query(exe, env=venv)
-    if version is not None and version.version < cmd_nvim.MIN_LAZYVIM:
-        msg = f"selftest --nvim: Neovim {version.version_text} is older than LazyVim's minimum {cmd_nvim.version_str(cmd_nvim.MIN_LAZYVIM)}"
-        if ns.require:
-            raise PytError(msg, 3)
-        ui.warn(msg + ": skipped")
-        return 0
-    nv, base_seconds = prepare_base(layout, exe, venv, fresh=ns.fresh)
+    if "GIT_CONFIG_GLOBAL" not in venv:  # let the user's own GIT_CONFIG_GLOBAL win
+        global_config = user_git_config(layout.base, source)
+        if global_config is not None:
+            venv["GIT_CONFIG_GLOBAL"] = global_config
+    # One run at a time per --dir: a second run deletes this one's logs (below), removes x/ under
+    # it while this one installs the base, and its project cleanup collides with this one's build.
+    # _prepare_dir above created the dir, so a second run is refused here.
+    with base_lock(layout.base, "selftest --nvim"):
+        _remove(layout.logs)  # logs of the previous run
+        layout.logs.mkdir(parents=True)
+        version = cmd_nvim.query(exe, env=venv)
+        if version is not None and version.version < cmd_nvim.MIN_LAZYVIM:
+            msg = f"selftest --nvim: Neovim {version.version_text} is older than LazyVim's minimum {cmd_nvim.version_str(cmd_nvim.MIN_LAZYVIM)}"
+            if ns.require:
+                raise PytError(msg, 3)
+            ui.warn(msg + ": skipped")
+            return 0
+        nv, base_seconds = prepare_base(layout, exe, venv, fresh=ns.fresh)
 
-    rows = [run_preset(p, layout, nv, renv=renv, venv=venv, timeout=ns.timeout) for p in names]
-    if not ns.keep:
-        for p in names:
-            try:
-                cmd_nvim.remove_tree(layout.projects / p)
-            except OSError as e:
-                ui.warn(f"could not remove {layout.projects / p}: {e}")
-    # the starter and plugin commits this run used (the uploaded CI logs; new pins after a green
-    # run without LOCK)
-    pins = record_pins(layout, nv)
-    _table(rows, base_seconds)
-    ui.report(f"  pinned to: {pins}")
-    ui.report(f"  logs: {layout.logs}" + (f"   projects: {layout.projects}" if ns.keep else "   (--keep keeps the projects)"))
-    if all(r.ok for r in rows):
-        ui.ok(f"selftest --nvim: {len(rows)} preset(s) passed")
-        return 0
-    ui.error(f"selftest --nvim: {sum(not r.ok for r in rows)} of {len(rows)} preset(s) failed")
-    return 1
+        rows = [run_preset(p, layout, nv, renv=renv, venv=venv, timeout=ns.timeout) for p in names]
+        if not ns.keep:
+            for p in names:
+                try:
+                    cmd_nvim.remove_tree(layout.projects / p)
+                except OSError as e:
+                    ui.warn(f"could not remove {layout.projects / p}: {e}")
+        # the starter and plugin commits this run used (the uploaded CI logs; new pins after a green
+        # run without LOCK)
+        pins = record_pins(layout, nv)
+        _table(rows, base_seconds)
+        ui.report(f"  pinned to: {pins}")
+        ui.report(f"  logs: {layout.logs}" + (f"   projects: {layout.projects}" if ns.keep else "   (--keep keeps the projects)"))
+        if all(r.ok for r in rows):
+            ui.ok(f"selftest --nvim: {len(rows)} preset(s) passed")
+            return 0
+        ui.error(f"selftest --nvim: {sum(not r.ok for r in rows)} of {len(rows)} preset(s) failed")
+        return 1

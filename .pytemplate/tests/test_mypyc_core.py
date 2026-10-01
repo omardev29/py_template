@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import configparser
+import glob
 import importlib.machinery
 import importlib.util
 import json
@@ -46,6 +47,15 @@ def make(data: dict[str, Any]) -> Config:
     cfg: Config = config._build(Config, data, "")
     config.validate(cfg)
     return cfg
+
+
+def real(data: dict[str, Any]) -> Config:
+    """make() for a test that runs the real tools environment through uv (mypyc, the precheck's
+    mypy): with this project's python.cpython. The template's default (3.14) asked uv for another
+    interpreter in a project on another minor, and uv replaced the project's .venv with an empty
+    one under the running suite (every later test that needed it failed)."""
+    own = config.load(set()).python.cpython
+    return make({**data, "python": {"cpython": own, **data.get("python", {})}})
 
 
 def _has_mypyc() -> bool:
@@ -190,13 +200,15 @@ def test_precheck_ruff_findings_are_syntax_errors(monkeypatch: pytest.MonkeyPatc
     assert not [c for c in tools.calls if "mypy" in c]  # stops at the syntax step
 
 
+@pytest.mark.parametrize("quiet", [False, True])
 @pytest.mark.parametrize("version", ["3.11", "3.14"])
-def test_precheck_mypy_that_aborts_never_passes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], version: str) -> None:
+def test_precheck_mypy_that_aborts_never_passes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], version: str, quiet: bool) -> None:
     same = 'tests/__init__.py: error: Duplicate module named "tests"'
     FakeTools(mypy={version: (2, same)}).install(monkeypatch)
+    monkeypatch.setattr(ui, "QUIET", quiet)
     with pytest.raises(PytError, match=f"mypy could not check the code as Python {version} .exit code 2"):
         cmd_mode._precheck_py311(make({}))
-    assert "Duplicate module" in capsys.readouterr().err  # the reason is shown
+    assert "Duplicate module" in capsys.readouterr().err  # the reason is shown, even with -q ("see above")
 
 
 def test_precheck_reports_only_the_errors_new_at_311(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -206,11 +218,139 @@ def test_precheck_reports_only_the_errors_new_at_311(monkeypatch: pytest.MonkeyP
     with pytest.raises(PytError, match="APIs that do not exist in Python 3.11"):
         cmd_mode._precheck_py311(make({}))
     err = capsys.readouterr().err
-    assert f"error: {new}" in err and "Incompatible types" not in err
+    assert new in err.splitlines() and "Incompatible types" not in err
     # the same errors at both versions: nothing new, the precheck passes
     FakeTools(mypy={"3.11": (1, both), "3.14": (1, both)}).install(monkeypatch)
     cmd_mode._precheck_py311(make({}))
     assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_precheck_prints_mypys_lines_as_mypy_wrote_them(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], quiet: bool) -> None:
+    """Each line new at 3.11 is mypy's own `path:line: error: ...`: printed through ui.error it
+    read `error: src/x.py:1: error: ...`, and the editors' parsers, which key on the runner's
+    prefix, took mypy's whole line for the message. Shown with -q too: it is the reason."""
+    new = 'src/myapp/b.py:1: error: Module "typing" has no attribute "override"  [attr-defined]'
+    FakeTools(mypy={"3.11": (1, new + "\n"), "3.14": (0, "")}).install(monkeypatch)
+    monkeypatch.setattr(ui, "QUIET", quiet)
+    with pytest.raises(PytError, match="APIs that do not exist in Python 3.11"):
+        cmd_mode._precheck_py311(make({}))
+    lines = capsys.readouterr().err.splitlines()
+    assert new in lines and not [line for line in lines if line.startswith("error: src/")], lines
+
+
+def test_precheck_compares_the_errors_by_place_and_code_never_by_wording(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """typeshed words the same error differently for each version: int() of a `str | None` lists
+    SupportsTrunc as 3.11 only. Compared by its whole text, the error was "new at 3.11", and PyPy
+    could not be enabled for valid 3.11 code (`int(os.environ.get("PORT"))`, common in untyped
+    code under the default `off` profile). An error is new only when its place and code are."""
+    at_311 = 'src/myapp/s.py:7: error: Argument 1 to "int" has incompatible type "str | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"  [arg-type]'
+    at_314 = 'src/myapp/s.py:7: error: Argument 1 to "int" has incompatible type "str | None"; expected "str | Buffer | SupportsInt | SupportsIndex"  [arg-type]'
+    FakeTools(mypy={"3.11": (1, at_311 + "\n"), "3.14": (1, at_314 + "\n")}).install(monkeypatch)
+    cmd_mode._precheck_py311(make({"python": {"cpython": "3.14"}}))
+    assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
+    # another error on the same line (another code) is still new; so is the same code elsewhere
+    other = 'src/myapp/s.py:7: error: Module "typing" has no attribute "override"  [attr-defined]'
+    moved = at_311.replace("s.py:7:", "s.py:8:")
+    FakeTools(mypy={"3.11": (1, f"{at_311}\n{other}\n{moved}\n"), "3.14": (1, at_314 + "\n")}).install(monkeypatch)
+    with pytest.raises(PytError, match="APIs that do not exist in Python 3.11"):
+        cmd_mode._precheck_py311(make({"python": {"cpython": "3.14"}}))
+    lines = capsys.readouterr().err.splitlines()
+    assert other in lines and moved in lines and at_311 not in lines
+    assert cmd_mode.precheck_key(at_311) == cmd_mode.precheck_key(at_314) == ("src/myapp/s.py:7", "arg-type")
+    assert cmd_mode.precheck_key("src/a.py:1: error: Name 'x' is not defined") == ("src/a.py:1", "")
+
+
+@needs_venv
+def test_precheck_real_mypy_passes_an_error_typeshed_words_per_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real mypy of .venv: `int(os.environ.get("PORT"))` runs on PyPy 3.11, and its type
+    error, worded per version, is no API that 3.11 lacks."""
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "settings.py").write_text('import os\n\n\ndef port():\n    return int(os.environ.get("PORT"))\n', encoding="utf-8")
+    monkeypatch.setattr(cmd_mode, "code_dirs", lambda: [str(code)])
+    monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
+    cmd_mode._precheck_py311(real({}))
+    assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
+
+
+@needs_venv
+def test_precheck_real_ruff_blocks_only_syntax_311_lacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The ruff step selected F63, F7 and F82 too, and called any finding "syntax that does not
+    exist in Python 3.11": `x is "a"` (F632) or an undefined name, the same on every version and
+    a warning that `check` passes under the warn profile, refused PyPy. Only what 3.11 cannot
+    parse blocks (the real ruff and mypy of .venv)."""
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "names.py").write_text('def is_default(name: str) -> bool:\n    return name is "default"\n\n\ndef use() -> object:\n    return undefined_name\n', encoding="utf-8")
+    monkeypatch.setattr(cmd_mode, "code_dirs", lambda: [str(code)])
+    monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
+    cmd_mode._precheck_py311(real({}))
+    assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
+    (code / "generic.py").write_text("def first[T](xs: list[T]) -> T:\n    return xs[0]\n", encoding="utf-8")
+    with pytest.raises(PytError, match="syntax that does not exist in Python 3.11"):
+        cmd_mode._precheck_py311(real({}))
+
+
+def test_precheck_ruff_excludes_what_checks_ruff_excludes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--isolated reads no configuration, so ruff fell back to its own default `exclude`, whose
+    names (dist, venv, _build, node_modules...) match a folder at ANY depth: src/<pkg>/dist/ was
+    never checked. The precheck's ruff gets the project's list, ./pyt check's (the root's own
+    folders anchored, render.ruff_exclude), on its command line."""
+    tools = FakeTools().install(monkeypatch)
+    cmd_mode._precheck_py311(make({}))
+    ruff = next(c for c in tools.calls if "ruff" in c)
+    assert "--isolated" in ruff and ruff.count("--exclude") == 1
+    excludes = ruff[ruff.index("--exclude") + 1].split(",")
+    assert excludes == render.ruff_exclude() == render.ruff_config(make({}), "off")["exclude"]
+    assert {"./dist", "./venv", "./_build", "./node_modules", ".venv", ".git"} <= set(excludes)
+    assert not {"dist", "venv", "_build", "node_modules"} & set(excludes)
+
+
+@needs_venv
+def test_precheck_real_ruff_checks_every_folder_checks_ruff_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A PEP 701 f-string (`f"{t["k"]}"`: Python 3.11 and PyPy 3.11 cannot parse it, mypy's 3.11
+    parse passes it) in src/<pkg>/dist/ passed the gate: ruff's default excludes skipped the
+    folder, PyPy was enabled and locked in, and the code died with SyntaxError there. The real
+    ruff of .venv, run in the tree as in its own project: every folder ./pyt check's ruff checks is
+    checked, and a dot folder (no module lives there) stays out, as it does for check."""
+    root = tmp_path / "proj"
+    bad = 'TABLE = {"k": 1}\nLABEL = f"value: {TABLE["k"]}"\n'
+    names = ("dist", "venv", "_build", "node_modules", "__pypackages__", "site-packages", "buck-out")
+    files = {"src/pk/__init__.py": "", "tests/test_pk.py": "def test_pk() -> None:\n    assert True\n"}
+    for name in names:
+        files[f"src/pk/{name}/{name.strip('_').replace('-', '_')}_mod.py"] = bad
+    files["src/pk/.ipynb_checkpoints/pk-checkpoint.py"] = bad
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(cmd_mode, "ROOT", root)
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_mode, "code_dirs", lambda: ["src", "tests"])
+    real_uv = envs.uv
+
+    def uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        # this project's tools environment, run in the tree (the folder ./pyt runs ruff in)
+        return real_uv(env, [args[0], "--project", str(ROOT), *args[1:]], cwd=root, **kw)
+
+    monkeypatch.setattr(cmd_mode.envs, "uv", uv)
+    monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
+    with pytest.raises(PytError, match="syntax that does not exist in Python 3.11"):
+        cmd_mode._precheck_py311(real({}))
+    captured = capfd.readouterr()
+    said = (captured.out + captured.err).replace("\\", "/")
+    for name in names:
+        assert f"src/pk/{name}/" in said, (name, said)
+    assert ".ipynb_checkpoints" not in said
+    for name in names:  # fixed: the dot folder's copy, which no import reaches, never blocks
+        for module in (root / "src" / "pk" / name).iterdir():
+            module.write_text('TABLE = {"k": 1}\nLABEL = f"value: {TABLE[\'k\']}"\n', encoding="utf-8")
+    cmd_mode._precheck_py311(real({}))
+    assert "ok the code is valid on Python 3.11" in capfd.readouterr().err
 
 
 def test_precheck_checks_only_the_code_folders_that_hold_python(
@@ -247,7 +387,65 @@ def test_precheck_real_mypy_with_a_test_folder_without_python(
     (tests / "__pycache__").mkdir(parents=True)
     monkeypatch.setattr(cmd_mode, "code_dirs", lambda: [str(src), str(tests)])
     monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
+    cmd_mode._precheck_py311(real({}))
+    assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
+
+
+def test_precheck_names_modules_from_src_as_the_projects_mypy_ini(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The precheck's mypy reads no config (the "off" profile's ignore_errors), so it gets what
+    .mypy.ini says about module names itself: explicit package bases and MYPYPATH = its
+    mypy_path (src, plus typings/ when it holds stubs), relative to the project folder."""
+    calls: list[tuple[list[str], Any]] = []
+
+    def uv(_env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(([str(a) for a in args], kw.get("extra_env")))
+        return _done([str(a) for a in args])
+
+    monkeypatch.setattr(cmd_mode.envs, "sync", lambda env, **_kw: None)
+    monkeypatch.setattr(cmd_mode.envs, "uv", uv)
+    monkeypatch.setattr(render, "typings_dir", lambda: None)
+    monkeypatch.delenv("MYPYPATH", raising=False)
     cmd_mode._precheck_py311(make({}))
+    mypy = [(argv, env) for argv, env in calls if "mypy" in argv]
+    assert len(mypy) == 2 and all("--explicit-package-bases" in argv and env == {"MYPYPATH": "src"} for argv, env in mypy), mypy
+    monkeypatch.setattr(render, "typings_dir", lambda: tmp_path / "typings")
+    assert cmd_mode._precheck_mypypath() == os.pathsep.join(["src", "typings"])
+    # the caller's own MYPYPATH, which ./pyt check's mypy reads before .mypy.ini's mypy_path
+    stubs = str(tmp_path / "stubs")
+    monkeypatch.setenv("MYPYPATH", stubs)
+    assert cmd_mode._precheck_mypypath() == os.pathsep.join([stubs, "src", "typings"])
+
+
+@needs_venv
+def test_precheck_real_mypy_in_a_project_whose_app_package_has_no_init_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An app package without __init__.py works with check, test and mypyc (.mypy.ini names its
+    modules from src, CLAUDE.md 6.2): the precheck's mypy named src/pk/app.py both `app` and
+    `pk.app`, stopped ("Source file found twice"), and mode --supports +pypy and apply could not
+    enable PyPy. The real mypy of .venv, run in the tree as in its own project."""
+    root = tmp_path / "proj"
+    files = {
+        "src/main.py": "import pk.app\n\nprint(pk.app.VALUE)\n",
+        "src/pk/app.py": "from pk.core import bench\n\nVALUE = bench.f()\n",
+        "src/pk/core/bench.py": "def f() -> int:\n    return 1\n",
+        "tests/test_core.py": "from pk.core import bench\n\n\ndef test_f() -> None:\n    assert bench.f() == 1\n",
+    }
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(cmd_mode, "ROOT", root)
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_mode, "code_dirs", lambda: ["src", "tests"])
+    real_uv = envs.uv
+
+    def uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        # this project's tools environment, run in the tree (the folder ./pyt runs mypy in)
+        return real_uv(env, [args[0], "--project", str(ROOT), *args[1:]], cwd=root, **kw)
+
+    monkeypatch.setattr(cmd_mode.envs, "uv", uv)
+    monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
+    cmd_mode._precheck_py311(real({}))
     assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
 
 
@@ -264,15 +462,17 @@ NEW_APIS = (
 def test_precheck_real_mypy_catches_new_apis_with_the_off_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The project's own .mypy.ini is the "off" profile (ignore_errors = True): it must not matter
-    assert "ignore_errors = True" in (ROOT / ".mypy.ini").read_text(encoding="utf-8")
+    # The template's own .mypy.ini is the "off" profile (ignore_errors = True): it must not matter
+    # (a project may run another profile: then nothing would hide the errors anyway)
+    if (ROOT / ".pytemplate" / "template-repo").is_file():
+        assert "ignore_errors = True" in (ROOT / ".mypy.ini").read_text(encoding="utf-8")
     code = tmp_path / "code"
     code.mkdir()
     (code / "newapi.py").write_text(NEW_APIS, encoding="utf-8")
     monkeypatch.setattr(cmd_mode, "code_dirs", lambda: [str(code)])
     monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
     with pytest.raises(PytError, match="APIs that do not exist in Python 3.11"):
-        cmd_mode._precheck_py311(make({}))
+        cmd_mode._precheck_py311(real({}))
     err = capsys.readouterr().err
     assert 'Module "typing" has no attribute "override"' in err
     assert err.count('has no attribute "batched"') == 1  # inside an unannotated function
@@ -282,7 +482,7 @@ def test_precheck_real_mypy_catches_new_apis_with_the_off_profile(
         ),
         encoding="utf-8",
     )
-    cmd_mode._precheck_py311(make({}))
+    cmd_mode._precheck_py311(real({}))
     assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
 
 
@@ -314,6 +514,20 @@ def test_lintc_reports_an_unparsable_file(tmp_path: Path, source: bytes, line: i
     assert f"Python {sys.version_info.major}.{sys.version_info.minor}" in found[0].message
     # the `path:N: msg` shape that RULES_RE and the Neovim parser read
     assert str(lintc.Finding(ROOT / "src" / "m.py", line, found[0].message)).startswith(f"src/m.py:{line}: cannot parse")
+
+
+def test_lintc_reports_a_file_it_cannot_read(tmp_path: Path) -> None:
+    """A compiled module the runner cannot read (another user's, locked by another program)
+    ended check, build and the pre-commit hook in an internal-error traceback: parse's
+    OSError was not caught. It is one finding naming the file, as a syntax error is. (A folder
+    named like the module: its read fails for root too, IsADirectoryError or, on Windows,
+    PermissionError.)"""
+    mod = tmp_path / "m.py"
+    mod.mkdir()
+    found = lintc.lint_file(make({}), mod)
+    assert [f.line for f in found] == [1]
+    assert found[0].message.startswith("cannot read it: ") and "skipped this file" in found[0].message
+    assert lintc.lint(make({}), [mod]) == found
 
 
 def test_lintc_lint_sorts_and_survives_an_unparsable_file(tmp_path: Path) -> None:
@@ -436,6 +650,144 @@ def test_lintc_flags_classes_mypyc_compiles_as_python_classes_for_their_metaclas
     assert [f.note for f in found] == ([] if kind is None else ["has the metaclass" not in kind])
 
 
+# The app's own modules that hand on the real dataclass, final and ABCMeta (mypy follows them)
+REEXPORTS = {
+    "myapp/__init__.py": "",
+    "myapp/core/__init__.py": "from .compat import final as final\n",
+    "myapp/core/compat.py": (
+        "from abc import ABCMeta\nfrom dataclasses import dataclass\nfrom enum import Enum\nfrom typing import final\n\n"
+        "__all__ = ['ABCMeta', 'Enum', 'dataclass', 'final']\n"
+    ),
+    "myapp/core/again.py": "from .compat import dataclass\n",  # a re-export of a re-export
+    "myapp/core/star.py": "from .compat import *\n",
+    "myapp/core/own.py": "def dataclass(cls: type) -> type:\n    return cls\n\n\nclass Meta(type):\n    pass\n",  # the app's own
+}
+
+
+@pytest.mark.parametrize(
+    ("source", "native"),
+    [
+        ("from .compat import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", True),
+        ("from myapp.core.compat import final\n\n\n@final\nclass P:\n    x: int = 0\n", True),
+        ("from . import compat\n\n\n@compat.dataclass\nclass P:\n    x: int = 0\n", True),
+        ("import myapp.core.compat as c\n\n\n@c.final\nclass P:\n    x: int = 0\n", True),
+        ("from .again import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", True),
+        ("from myapp.core import final\n\n\n@final\nclass P:\n    x: int = 0\n", True),  # the package's __init__
+        ("from .star import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", True),
+        ("from .compat import *\n\n\n@dataclass\nclass P:\n    x: int = 0\n", True),
+        ("from .compat import ABCMeta\n\n\nclass P(metaclass=ABCMeta):\n    x: int = 0\n", True),
+        # what the app defines itself stays its own, and so does what cannot be read
+        ("from .own import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", False),
+        ("from .own import Meta\n\n\nclass P(metaclass=Meta):\n    x: int = 0\n", False),
+        ("from .missing import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", False),
+    ],
+)
+def test_lintc_follows_what_the_apps_own_modules_re_export(src_tree: Path, source: str, native: bool) -> None:
+    """mypy follows `from .compat import dataclass` to dataclasses.dataclass when compat imports
+    it from there, and mypyc compiles the class natively: lintc said "uses @dataclass: mypyc
+    compiles it as a regular (slow) Python class", an error under the mypyc profile that failed
+    check, build and the hook (the same for final and ABCMeta)."""
+    _project(src_tree, {**REEXPORTS, "myapp/core/model.py": source})
+    found = lintc.lint_file(make({}), src_tree / "myapp" / "core" / "model.py")
+    assert (found == []) is native, [f.message for f in found]
+
+
+def test_lintc_reads_an_enum_the_apps_own_module_re_exports_as_one(src_tree: Path) -> None:
+    _project(src_tree, {**REEXPORTS, "myapp/core/model.py": "from .compat import Enum\n\n\nclass P(Enum):\n    A = 1\n"})
+    found = lintc.lint_file(make({}), src_tree / "myapp" / "core" / "model.py")
+    assert [(f.note, "is an Enum" in f.message) for f in found] == [(True, True)]
+
+
+def test_lintc_reads_a_folder_it_may_not_enter_as_no_module_of_the_app(src_tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path.is_file raises PermissionError for a file in a folder the user may not enter (Python
+    3.11 to 3.13; root enters it anyway, so the error is made here): following a name into such a
+    folder never ends in an internal error, and the name stays the app's own."""
+    _project(src_tree, {**REEXPORTS, "myapp/core/locked/__init__.py": "", "myapp/core/model.py": "from .locked import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n"})
+    is_file = Path.is_file
+
+    def denied(self: Path) -> bool:
+        if "locked" in self.parts:
+            raise PermissionError(13, "Permission denied", str(self))
+        return is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", denied)
+    found = lintc.lint_file(make({}), src_tree / "myapp" / "core" / "model.py")
+    assert ["uses @dataclass" in f.message for f in found] == [True]
+
+
+BACKPORT = """\
+import sys
+from enum import Enum
+from functools import total_ordering
+
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:
+
+    class StrEnum(str, Enum):
+        \"\"\"A backport of enum.StrEnum.\"\"\"
+
+if sys.version_info < (3, 11):
+
+    @total_ordering
+    class Old:
+        pass
+"""
+
+
+def test_lintc_skips_the_classes_mypy_reads_as_unreachable_on_python_cpython(tmp_path: Path) -> None:
+    """mypy reads a sys.version_info test for the Python mypyc compiles with (python.cpython), and
+    mypyc skips the branch it finds unreachable: a backport class there was a blocking "defined
+    inside a module-level `if` block" (and a slow-class error for its decorator), though mypyc
+    compiled the module and it ran."""
+    assert _lint(tmp_path, BACKPORT) == []
+    found = _lint(tmp_path, BACKPORT.replace(">= (3, 11)", ">= (3, 99)").replace("< (3, 11)", "< (3, 99)"))
+    assert sorted((f.line, f.message.split(":")[0]) for f in found) == [
+        (9, "class 'StrEnum' defined inside a module-level `if` block"),
+        (9, "class 'StrEnum' is an Enum (metaclass EnumMeta)"),
+        (15, "class 'Old' defined inside a module-level `if` block"),
+        (15, "class 'Old' uses @total_ordering"),
+    ]
+    # the version is python.cpython's
+    source = "import sys\n\nif sys.version_info >= (3, 14):\n    class New: ...\nelse:\n    class Older: ...\n"
+    assert [f.line for f in _lint(tmp_path, source, {"python": {"cpython": "3.14"}})] == [4]
+    assert [f.line for f in _lint(tmp_path, source, {"python": {"cpython": "3.13"}})] == [6]
+
+
+@pytest.mark.parametrize(
+    ("test", "checking", "runtime"),
+    [
+        ("sys.version_info >= (3, 11)", True, True),
+        ("sys.version_info[:2] < (3, 11)", False, False),
+        ("TYPE_CHECKING", True, False),
+        ("typing.TYPE_CHECKING", True, False),
+        ("not TYPE_CHECKING", False, True),
+        ("MYPY", True, False),
+        ("six.PY3", True, True),
+        ("PY2", False, False),
+        ("FLAG", None, None),
+        ("sys.platform == 'win32'", None, None),  # another OS compiles the other branch
+        ("FLAG and sys.version_info < (3, 0)", False, False),  # one False decides an and
+        ("FLAG or sys.version_info >= (3, 0)", True, True),  # one True decides an or
+        ("FLAG and sys.version_info >= (3, 0)", None, None),
+        ("not (sys.version_info >= (3, 11) and sys.version_info[0] == 3)", False, False),
+        ("TYPE_CHECKING and FLAG", None, False),
+        ("not (TYPE_CHECKING or FLAG)", False, None),
+        # deeper than the recursion limit, so a recursive reading would fail, and still within what
+        # Python 3.11 parses inside pytest (3001 levels did not: "maximum recursion depth exceeded
+        # during ast construction"): read in a loop
+        ("not " * 1501 + "TYPE_CHECKING", False, True),  # odd: not TYPE_CHECKING
+    ],
+)
+def test_lintc_reads_a_test_as_mypy_does(test: str, checking: bool | None, runtime: bool | None) -> None:
+    """The value mypy's infer_condition_value gives a test, as mypy reads it and at runtime
+    (None: it cannot tell, so both branches count); the real mypyc agrees on every class of
+    CLASSES_IN_BLOCKS (test_lintc_flags_every_class_the_locked_mypyc_rejects_as_nested)."""
+    node = ast.parse(test, mode="eval").body
+    assert lintc._static_value(node, (3, 14), checking=True) is checking
+    assert lintc._static_value(node, (3, 14), checking=False) is runtime
+
+
 @needs_venv
 def test_lintc_native_metaclasses_follow_the_locked_mypyc() -> None:
     """A mypy bump that changes what mypyc accepts as the metaclass of a native class, or drops
@@ -534,6 +886,23 @@ def test_lintc_flags_a_lone_module_next_to_a_leftover_folder(src_tree: Path) -> 
         ("def f() -> None:\n    def g() -> None:\n        class L: ...\n", [], [(3, "class 'L' defined inside a function")]),
         ("class A:\n    if True:\n        class B: ...\n", [], [(3, "nested class 'B'")]),
         ("async def f() -> None:\n    class L: ...\n", [], [(2, "class 'L' defined inside a function")]),
+        # a class in a module-level block: mypyc compiles only the module's own statements
+        ("try:\n    class A: ...\nexcept ImportError:\n    class B: ...\n", [], [(2, "class 'A' defined inside a module-level `try` block"), (4, "class 'B' defined inside")]),
+        ("try:\n    pass\nexcept* ValueError:\n    pass\nelse:\n    class E: ...\nfinally:\n    class F: ...\n", [], [(6, "`try` block"), (8, "`try` block")]),
+        ("import sys\nif sys.argv:\n    class P: ...\nelif True:\n    class Q: ...\n", [], [(3, "class 'P' defined inside a module-level `if` block"), (5, "class 'Q'")]),
+        # a sys.version_info test mypy reads on python.cpython (3.14): its false branch is
+        # unreachable, and mypyc skips it (a backport class under the else was a false error)
+        ("import sys\nif sys.version_info >= (3, 12):\n    class P: ...\nelif True:\n    class Q: ...\n", [], [(3, "class 'P' defined inside a module-level `if` block")]),
+        ("import sys\nif sys.version_info < (3, 12):\n    class P: ...\nelse:\n    class Q: ...\n", [], [(5, "class 'Q' defined inside a module-level `if` block")]),
+        ("for _ in ():\n    class F: ...\nwhile False:\n    class W: ...\n", [], [(2, "`for` block"), (4, "`while` block")]),
+        ("import contextlib\nwith contextlib.nullcontext():\n    if True:\n        class C:\n            class D: ...\n", [], [(4, "class 'C' defined inside a module-level `with` block"), (5, "nested class 'D'")]),
+        ("match 1:\n    case 1:\n        class M: ...\n", [], [(3, "class 'M' defined inside a module-level `match` block")]),
+        # mypy reads TYPE_CHECKING as true: mypyc rejects a class under it, and compiles the other
+        # branch, which runs, as a RuntimeError (no class there)
+        ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    class P: ...\nelse:\n    class R: ...\n", [], [(3, "class 'P' defined inside a module-level `if`"), (5, "mypy reads this block as unreachable, but it runs")]),
+        ("import typing\nif not typing.TYPE_CHECKING:\n    class R: ...\nelse:\n    class P: ...\n", [], [(3, "mypy reads this block as unreachable, but it runs"), (5, "class 'P' defined inside a module-level `if`")]),
+        # a class in a function of such a block is the function rule's, once
+        ("if True:\n    def f() -> None:\n        class L: ...\n", [], [(3, "class 'L' defined inside a function")]),
         # forbid_imports: dotted names through `from a import b`; relative imports are the app's modules
         ("import flet as ft\n", ["flet"], [(1, "import of 'flet' is forbidden")]),
         ("import flet.controls\n", ["flet"], [(1, "import of 'flet.controls' is forbidden")]),
@@ -545,7 +914,7 @@ def test_lintc_flags_a_lone_module_next_to_a_leftover_folder(src_tree: Path) -> 
         ("from .flet import helper\n", ["flet"], []),
         ("from . import flet\n", ["flet"], []),
         ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import flet\n", ["flet"], []),
-        ("import typing\nif typing.TYPE_CHECKING:\n    pass\nelse:\n    import flet\n", ["flet"], [(5, "import of 'flet'")]),
+        ("import typing\nif typing.TYPE_CHECKING:\n    pass\nelse:\n    import flet\n", ["flet"], [(5, "import of 'flet'"), (5, "mypy reads this block as unreachable")]),
         # `if __name__ == "__main__"` in either order; other comparisons are fine
         ("if __name__ != 'x':\n    pass\n", [], []),
         ("if __name__ == 'x':\n    pass\n", [], []),
@@ -560,6 +929,471 @@ def test_lintc_reports_each_problem_once(tmp_path: Path, source: str, forbid: li
     assert len(got) == len(expected), got
     for (line, msg), (want_line, want) in zip(got, sorted(expected), strict=True):
         assert line == want_line and want in msg, got
+
+
+CLASSES_IN_BLOCKS = """\
+import contextlib
+import sys
+from typing import TYPE_CHECKING
+
+FLAG = bool(len(__name__))
+PY3 = True
+PY2 = False
+MYPY = False
+
+# what mypy reads in a sys.version_info test on any Python 3.11 or newer: the false branch is
+# unreachable, and mypyc skips it
+if sys.version_info >= (3, 11):
+    class OnThisPython: ...
+else:
+    class OnOldPython: ...
+
+if sys.version_info < (3, 11):
+    class Backport: ...
+elif (3, 11) <= sys.version_info[:2] and FLAG:
+    class Maybe: ...
+else:
+    class Otherwise: ...
+
+if not sys.version_info[0] == 3:
+    class NeverOnPython3: ...
+
+if sys.version_info >= (4,) or FLAG:
+    class Either: ...
+
+if sys.version_info >= (3, 11, 1):  # longer than what mypy reads: both branches count
+    class LongTuple: ...
+else:
+    class LongTupleElse: ...
+
+if sys.version_info[1:2] >= (11,):
+    class MinorSlice: ...
+else:
+    class MinorSliceElse: ...
+
+# the rest of mypy's reading: `not` of anything, one False decides an `and` and one True an
+# `or` (whatever the other side), PY3 and PY2, MYPY like TYPE_CHECKING
+if not (sys.version_info >= (3, 11) and sys.version_info[0] == 3):
+    class NotBoth: ...
+
+if not not (sys.version_info < (3, 0)):
+    class NotNot: ...
+
+if FLAG and sys.version_info < (3, 0):
+    class AndFalse: ...
+
+if FLAG or sys.version_info >= (3, 0):
+    class OrTrue: ...
+else:
+    class OrTrueElse: ...
+
+if PY3:
+    class Py3: ...
+else:
+    class Py3Else: ...
+
+if PY2:
+    class Py2: ...
+
+if MYPY:
+    class Mypy: ...
+else:
+    class MypyElse: ...
+
+if TYPE_CHECKING and FLAG:
+    class CheckingAndFlag: ...
+
+if not (TYPE_CHECKING or FLAG):
+    class NotCheckingOrFlag: ...
+
+try:
+    class InTry: ...
+except ImportError:
+    class InHandler: ...
+else:
+    class InElse: ...
+finally:
+    class InFinally: ...
+
+if FLAG:
+    class InIf: ...
+else:
+    class InIfElse: ...
+
+if TYPE_CHECKING:
+    class OnlyForMypy: ...
+else:
+    class NeverForMypy: ...
+
+if not TYPE_CHECKING:
+    class NeverForMypyEither: ...
+
+for _i in range(1):
+    class InFor: ...
+
+while not FLAG:
+    class InWhile: ...
+
+with contextlib.nullcontext():
+    class InWith: ...
+
+match FLAG:
+    case True:
+        class InCase: ...
+    case _:
+        pass
+
+if FLAG:
+    def make() -> object:
+        class InFunction: ...
+        return InFunction()
+
+
+class AtModuleLevel: ...
+"""
+
+
+@needs_venv
+def test_lintc_flags_every_class_the_locked_mypyc_rejects_as_nested(tmp_path: Path) -> None:
+    """mypyc compiles only the classes of a module's own statements: one in a module-level
+    if/try/with/for/while/match block (a version check, a `try:` fallback, an `if TYPE_CHECKING:`
+    Protocol) stopped `run mypyc`, `test mypyc` and every build with "Nested class definitions
+    not supported", while `check` said "mypyc rules: no problems". The rules flag exactly the
+    lines the locked mypyc rejects: if this fails after a mypy bump, mypyc changed what it
+    supports (lintc._block_classes)."""
+    (tmp_path / "m.py").write_text(CLASSES_IN_BLOCKS, encoding="utf-8")
+    r = subprocess.run([str(TOOL_PYTHON), "-m", "mypyc", "m.py"], cwd=tmp_path, capture_output=True, text=True, timeout=600, check=False)
+    rejected = {int(n) for n in re.findall(r"^m\.py:(\d+): error: Nested class definitions not supported", r.stdout + r.stderr, re.M)}
+    assert r.returncode != 0 and rejected, r.stdout + r.stderr
+    # what runs but mypy never reads (the else of `if TYPE_CHECKING:`) is another rule's, pinned
+    # by test_real_compile_fails_exactly_where_lintc_says_mypy_skips_what_runs
+    skipped = (lintc.UNREACHABLE_BUT_RUN, lintc.NEVER_READ_BUT_RUN)
+    found = [f for f in lintc.lint_file(make({}), tmp_path / "m.py") if f.message not in skipped]
+    assert {f.line for f in found} == rejected, ([(f.line, f.message) for f in found], sorted(rejected))
+
+
+# What runs but mypy never reads, which the locked mypyc compiles to fail (mypyc/mypyc#1159). A line
+# ending in `# raises` starts a block mypy reads as unreachable: compiled, it raises
+# RuntimeError("Reached allegedly unreachable code!"). One ending in `# never read` holds an operand
+# mypy never reads (after `TYPE_CHECKING or`): compiled, it raises NameError, or RuntimeError("mypyc
+# internal error: should be unreachable") for a value. `# raises (the test fails first)`: its test's
+# operand fails before the block. Every other case runs.
+UNREACHABLE_CASES = """\
+import sys
+from typing import TYPE_CHECKING
+
+FLAG = len(sys.argv) > 99
+MYPY = False
+
+
+def case_else_of_checking() -> int:
+    if TYPE_CHECKING:
+        x = 1
+    else:
+        x = 2  # raises
+    return x
+
+
+def case_body_of_not_checking() -> int:
+    if not TYPE_CHECKING:
+        return 3  # raises
+    return 0
+
+
+def case_else_of_mypy() -> int:
+    if MYPY:
+        return 4
+    else:
+        return 5  # raises
+
+
+def case_elif_after_checking() -> int:
+    if TYPE_CHECKING:
+        return 6
+    elif FLAG:  # raises
+        return 7
+    return 8
+
+
+def case_flag_or_checking() -> int:
+    if FLAG or TYPE_CHECKING:
+        return 9
+    else:
+        return 10  # raises
+
+
+def case_in_a_loop() -> int:
+    total = 0
+    for i in range(2):
+        try:
+            if TYPE_CHECKING:
+                total += i
+            else:
+                total -= i  # raises
+        finally:
+            total += 1
+    return total
+
+
+def case_in_a_nested_function() -> int:
+    def inner() -> int:
+        if not TYPE_CHECKING:
+            return 11  # raises
+        return 12
+
+    return inner()
+
+
+class Holder:
+    def method(self) -> int:
+        if TYPE_CHECKING:
+            return 13
+        else:
+            pass  # raises
+        return 14
+
+
+def case_in_a_method() -> int:
+    return Holder().method()
+
+
+def case_checking_or_flag() -> int:
+    if TYPE_CHECKING or FLAG:  # never read
+        return 15
+    return 16
+
+
+def case_value_of_checking_or_flag() -> bool:
+    return TYPE_CHECKING or FLAG  # never read
+
+
+def case_not_checking_and_flag() -> int:
+    if not TYPE_CHECKING and not FLAG:  # never read
+        return 17  # raises (the test fails first)
+    return 18
+
+
+def case_not_of_checking_or_flag() -> int:
+    if not (TYPE_CHECKING or FLAG):  # never read
+        return 19  # raises (the test fails first)
+    return 20
+
+
+def case_body_of_checking() -> int:
+    if TYPE_CHECKING:
+        return 21
+    return 22
+
+
+def case_checking_and_flag() -> int:
+    if TYPE_CHECKING and FLAG:
+        return 23
+    else:
+        return 24
+
+
+def case_version_or_flag() -> int:
+    if sys.version_info >= (3, 11) or FLAG:
+        return 25
+    else:
+        return 26
+
+
+def case_inside_a_block_that_never_runs() -> int:
+    if TYPE_CHECKING:
+        if not TYPE_CHECKING:
+            return 27
+    return 28
+
+
+def case_conditional_expression() -> int:
+    return 29 if TYPE_CHECKING else 30
+"""
+
+UNREACHABLE_TOP = """\
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+else:
+    Sequence = list  # raises
+
+
+def total(xs: Sequence[int]) -> int:
+    return sum(xs)
+"""
+
+
+def _marked(source: str, *markers: str) -> set[int]:
+    return {n for n, line in enumerate(source.splitlines(), 1) if line.endswith(markers)}
+
+
+def test_lintc_flags_what_runs_but_mypy_never_reads(tmp_path: Path) -> None:
+    """mypyc compiles a block mypy reads as unreachable as a RuntimeError, also the else of `if
+    TYPE_CHECKING:` (or `if MYPY:`) and the body of `if not TYPE_CHECKING:`, which run: the
+    runtime fallback `else: Sequence = list` passed check, the hook and the build's checks, and
+    the compiled module failed at import (lintc said mypyc skipped those blocks). The same for an
+    operand mypy never reads (`TYPE_CHECKING or FLAG`). Any scope, any test mypy and the runtime
+    read apart; never what never runs, nor an if statement in a class body, which mypyc refuses on
+    its own."""
+    for source in (UNREACHABLE_CASES, UNREACHABLE_TOP):
+        found = _lint(tmp_path, source)
+        blocks = {f.line for f in found if f.message == lintc.UNREACHABLE_BUT_RUN}
+        operands = {f.line for f in found if f.message == lintc.NEVER_READ_BUT_RUN}
+        assert blocks == _marked(source, "# raises", "# raises (the test fails first)"), [(f.line, f.message) for f in found]
+        assert operands == _marked(source, "# never read"), [(f.line, f.message) for f in found]
+        assert not any(f.note for f in found)  # errors like the other rules: blocking under the mypyc profile
+    in_a_class = "from typing import TYPE_CHECKING\n\n\nclass Settings:\n    if TYPE_CHECKING:\n        x: int\n    else:\n        x = 0\n"
+    assert not [f for f in _lint(tmp_path, in_a_class) if f.message == lintc.UNREACHABLE_BUT_RUN]
+    default = "import sys\nfrom typing import TYPE_CHECKING\n\n\nclass Settings:\n    debug: bool = TYPE_CHECKING or len(sys.argv) > 1\n"
+    assert [(f.line, f.message) for f in _lint(tmp_path, default)] == [(6, lintc.NEVER_READ_BUT_RUN)]
+    for message in (lintc.UNREACHABLE_BUT_RUN, lintc.NEVER_READ_BUT_RUN):
+        assert "boundary module" in message
+    assert "Reached allegedly unreachable code!" in lintc.UNREACHABLE_BUT_RUN and "NameError" in lintc.NEVER_READ_BUT_RUN
+
+
+@needs_compiler
+def test_real_compile_fails_exactly_where_lintc_says_mypy_skips_what_runs(tmp_path: Path) -> None:
+    """The lines the rules flag are exactly those where the locked mypyc's compiled code fails,
+    with the error each rule names, and every other case runs: if this fails after a mypy bump,
+    mypyc changed (mypyc/mypyc#1159 fixed: the rules can go)."""
+    (tmp_path / "cases.py").write_text(UNREACHABLE_CASES, encoding="utf-8")
+    (tmp_path / "top.py").write_text(UNREACHABLE_TOP, encoding="utf-8")
+    r = subprocess.run(
+        [str(TOOL_PYTHON), "-m", "mypyc", "cases.py", "top.py"], cwd=tmp_path, capture_output=True, text=True, timeout=600, check=False
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    probe = (
+        "import json, sys, traceback\n"
+        "sys.path.insert(0, '.')\n"
+        "def failed(e, name):\n"
+        "    line = [f.lineno for f in traceback.extract_tb(e.__traceback__) if f.filename.endswith(name)][-1]\n"
+        "    return [line, type(e).__name__, str(e)]\n"
+        "out = {}\n"
+        "try:\n"
+        "    import top\n"
+        "except Exception as e:\n"
+        "    out['top'] = failed(e, 'top.py')\n"
+        "import cases\n"
+        "assert not cases.__file__.endswith('.py'), cases.__file__\n"
+        "for name in sorted(n for n in dir(cases) if n.startswith('case_')):\n"
+        "    try:\n"
+        "        out[name] = ['ran', getattr(cases, name)()]\n"
+        "    except Exception as e:\n"
+        "        out[name] = failed(e, 'cases.py')\n"
+        "print('PTLINES' + json.dumps(out))\n"
+    )
+    r = subprocess.run([str(TOOL_PYTHON), "-c", probe], cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False)
+    assert r.returncode == 0 and "PTLINES" in r.stdout, r.stdout + r.stderr
+    results = json.loads(r.stdout.split("PTLINES", 1)[1])
+    failed = {n: v for n, v in results.items() if v[0] != "ran"}
+    alleged = "Reached allegedly unreachable code!"
+    assert failed.pop("top") == [_marked(UNREACHABLE_TOP, "# raises").pop(), "RuntimeError", alleged], results
+    blocks, operands = set(), set()
+    for line, kind, error in failed.values():
+        if (kind, error) == ("RuntimeError", alleged):
+            blocks.add(line)
+        else:
+            assert kind == "NameError" or error == "mypyc internal error: should be unreachable", results
+            operands.add(line)
+    assert blocks == _marked(UNREACHABLE_CASES, "# raises"), results
+    assert operands == _marked(UNREACHABLE_CASES, "# never read"), results
+    for source, name in ((UNREACHABLE_CASES, "cases.py"), (UNREACHABLE_TOP, "top.py")):
+        found = lintc.lint_file(real({}), tmp_path / name)
+        assert {f.line for f in found if f.message == lintc.UNREACHABLE_BUT_RUN} == _marked(source, "# raises", "# raises (the test fails first)")
+        assert {f.line for f in found if f.message == lintc.NEVER_READ_BUT_RUN} == _marked(source, "# never read")
+
+
+RUNTIME_PROTOCOLS = {
+    # module name -> source: each defines HasLen, and `size` uses it at runtime
+    "plain": "from typing import Protocol, runtime_checkable\n\n\n@runtime_checkable\nclass HasLen(Protocol):\n    def __len__(self) -> int: ...\n",
+    "silenced": (
+        "from typing import Protocol, runtime_checkable\n\nfrom mypy_extensions import mypyc_attr\n\n\n"
+        "@runtime_checkable\n@mypyc_attr(native_class=False)\nclass HasLen(Protocol):\n    def __len__(self) -> int: ...\n"
+    ),
+    "silenced_first": (
+        "import typing as t\n\nfrom mypy_extensions import mypyc_attr\n\n\n"
+        "@mypyc_attr(native_class=False)\n@t.runtime_checkable\nclass HasLen(t.Protocol):\n    def __len__(self) -> int: ...\n"
+    ),
+    "extensions": (
+        "from typing import TypeVar\n\nimport typing_extensions\n\nT = TypeVar('T', covariant=True)\n\n\n"
+        "@typing_extensions.runtime\nclass HasLen(typing_extensions.Protocol[T]):\n    def __len__(self) -> int: ...\n\n"
+        "    def first(self) -> T: ...\n"
+    ),
+}
+SIZE = "\n\ndef size(x: object) -> int:\n    return len(x) if isinstance(x, HasLen) else -1\n"
+
+
+def test_lintc_flags_a_runtime_checkable_protocol_whatever_silences_it(tmp_path: Path) -> None:
+    """mypyc compiles a Protocol class (a trait) without its protocol nature: @runtime_checkable
+    raises TypeError at import. lintc called it a slow class that works and offered
+    @mypyc_attr(native_class=False), which silenced it: check and the build's checks passed, and
+    the compiled module still failed at import. Every spelling of mypy's names; a Protocol used
+    only for typing is fine."""
+    for name, source in RUNTIME_PROTOCOLS.items():
+        found = [(f.line, f.message) for f in _lint(tmp_path, source + SIZE)]
+        line = next(n for n, text in enumerate(source.splitlines(), 1) if text.startswith("class HasLen"))
+        assert len(found) == 1 and found[0][0] == line, (name, found)
+        message = found[0][1]
+        assert "is a @runtime_checkable Protocol" in message and "TypeError at import" in message and "boundary module" in message
+        assert "if intended" not in message, message  # no silencer is offered: none works
+    typing_only = "from typing import Protocol\n\n\nclass HasLen(Protocol):\n    def __len__(self) -> int: ...\n\n\ndef size(x: HasLen) -> int:\n    return len(x)\n"
+    assert _lint(tmp_path, typing_only) == []
+    star = "from typing import *\n\n\n@runtime_checkable\nclass HasLen(Protocol):\n    def __len__(self) -> int: ...\n"
+    assert [f.line for f in _lint(tmp_path, star)] == [5]
+
+
+@needs_venv
+def test_lintc_protocol_names_follow_the_locked_mypy() -> None:
+    """A mypy bump that changes the names it reads as Protocol or runtime_checkable must fail selftest."""
+    code = (
+        "from mypy.nodes import RUNTIME_PROTOCOL_DECOS\n"
+        "from mypy.types import PROTOCOL_NAMES\n"
+        "print(' '.join(sorted(PROTOCOL_NAMES)) + '|' + ' '.join(sorted(RUNTIME_PROTOCOL_DECOS)))\n"
+    )
+    r = subprocess.run([str(TOOL_PYTHON), "-I", "-c", code], capture_output=True, text=True, check=True)
+    bases, decorators = r.stdout.strip().split("|")
+    assert set(bases.split()) == set(lintc.PROTOCOL_BASES)
+    assert set(decorators.split()) == set(lintc.RUNTIME_CHECKABLE)
+
+
+@needs_compiler
+def test_real_compile_a_runtime_checkable_protocol_fails_at_import(tmp_path: Path) -> None:
+    """The locked mypyc: each @runtime_checkable Protocol of RUNTIME_PROTOCOLS fails at import,
+    @mypyc_attr(native_class=False) in either order too, and a Protocol used for typing only
+    imports and works. If this fails after a mypy bump, mypyc keeps a Protocol's nature now and
+    the rule can go (lintc._runtime_checkable_protocol)."""
+    names = [*RUNTIME_PROTOCOLS, "typing_only"]
+    for name, source in RUNTIME_PROTOCOLS.items():
+        (tmp_path / f"{name}.py").write_text(source + SIZE, encoding="utf-8")
+    (tmp_path / "typing_only.py").write_text(
+        "from typing import Protocol\n\n\nclass HasLen(Protocol):\n    def __len__(self) -> int: ...\n\n\n"
+        "def size(x: HasLen) -> int:\n    return len(x)\n",
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [str(TOOL_PYTHON), "-m", "mypyc", *(f"{n}.py" for n in names)], cwd=tmp_path, capture_output=True, text=True, timeout=600, check=False
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    probe = (
+        "import importlib, json, sys\n"
+        "sys.path.insert(0, '.')\n"
+        "out = {}\n"
+        f"for name in {names!r}:\n"
+        "    try:\n"
+        "        mod = importlib.import_module(name)\n"
+        "        assert not mod.__file__.endswith('.py'), mod.__file__\n"
+        "        out[name] = ['ran', mod.size([1, 2])]\n"
+        "    except TypeError as e:\n"
+        "        out[name] = ['TypeError', str(e)]\n"
+        "print('PTPROTO' + json.dumps(out))\n"
+    )
+    r = subprocess.run([str(TOOL_PYTHON), "-c", probe], cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False)
+    assert r.returncode == 0 and "PTPROTO" in r.stdout, r.stdout + r.stderr
+    results = json.loads(r.stdout.split("PTPROTO", 1)[1])
+    assert results.pop("typing_only") == ["ran", 2], results
+    for name, (kind, error) in results.items():
+        assert kind == "TypeError" and "protocol" in error, (name, results)
 
 
 @pytest.mark.skipif(not hasattr(ast, "TemplateStr"), reason="t-strings need Python 3.14")
@@ -860,6 +1694,35 @@ def test_compiled_sources_follow_a_symlinked_subpackage(src_tree: Path, tmp_path
     assert "myapp.core.linked.z" in mypyc.compiled_modules(make({}))
 
 
+def test_only_modules_python_can_import_are_compiled_and_linted(src_tree: Path) -> None:
+    """JupyterLab writes .ipynb_checkpoints/<name>-checkpoint.py next to every .py it opened, a
+    Finder copy is `a copy.py`, a data folder `sample-data/`: none is a module Python can import.
+    mypyc got them all: C names with '-' or ' ' (a C compile error, with the C compiler hint on a
+    working compiler) or a stray top-level extension ("did not generate an extension"), and lintc
+    failed `check` and the hook on a stale checkpoint copy. compile.exclude cannot name them."""
+    from runner import hooks
+
+    stale = "class A:\n    class B:\n        pass\n"  # a nested class: a lintc error under the mypyc profile
+    leftovers = [
+        "myapp/core/.ipynb_checkpoints/a-checkpoint.py",
+        "myapp/core/a copy.py",
+        "myapp/core/sample-data/fixture.py",
+        "myapp/core/sub/.hidden/x.py",
+        "myapp/core/sub/n.old.py",
+    ]
+    _project(src_tree, {**CORE_TREE, **dict.fromkeys(leftovers, stale)})
+    cfg = make({"backend": {"active": "mypyc"}})
+    assert mypyc.compiled_modules(cfg) == ["myapp.core.a", "myapp.core.sub.m", "myapp.core.sub.n", "myapp.core.subx.k"]
+    assert lintc.lint(cfg, mypyc.compiled_sources(cfg)) == []
+    staged = {f"src/{name}" for name in leftovers} | {"src/myapp/core/a.py"}
+    result = hooks.check_mypyc(cfg, src_tree.parent, staged)
+    assert result.passed is True and not result.errors and not result.warnings
+    # a folder of compile.modules that holds only such files compiles nothing: an error, as before
+    _project(src_tree, {"myapp/other/__init__.py": "", "myapp/other/.ipynb_checkpoints/b-checkpoint.py": "X = 1\n"})
+    with pytest.raises(PytError, match="holds a module to compile"):
+        mypyc.compiled_sources(make({"compile": {"modules": ["myapp.other"]}}))
+
+
 def test_hook_reports_an_unparsable_module_and_a_bad_exclude(src_tree: Path) -> None:
     """Through the pre-commit hook's check with the real lintc: a failed check, never a crash."""
     from runner import hooks
@@ -951,6 +1814,81 @@ def test_sync_tree_warns_about_a_broken_symlink(tmp_path: Path, capsys: pytest.C
     assert _snapshot(dst) == {"a.py": b"x = 1\n"}
 
 
+def test_sync_tree_refuses_a_folder_it_cannot_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folder of src/ the user can enter but not list (mode 0311, another user's 0711): os.walk
+    skipped it without a word, so every build shipped it empty (the app still opened its files by
+    name in development), and the sync deleted the copy an earlier build had made."""
+    src = _project(tmp_path / "src", {"p1/__init__.py": "X = 1\n", "p1/data/table.json": "{}\n"})
+    dst = tmp_path / "stage"
+    mypyc.sync_tree(src, dst)
+    locked = src / "p1" / "data"
+    real = os.scandir
+
+    def scandir(path: Any = ".") -> Any:  # what a folder without its r bit gives a non-root user
+        if Path(os.fsdecode(path)) == locked:
+            raise PermissionError(13, "Permission denied", os.fsdecode(path))
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    with pytest.raises(PytError, match=r"cannot list .*data/: Permission denied"):
+        mypyc.sync_tree(src, dst)
+    assert (dst / "p1" / "data" / "table.json").read_text(encoding="utf-8") == "{}\n"  # the earlier copy stays
+    with pytest.raises(PytError, match=r"cannot list .*data/"):  # the other walks stop too
+        list(mypyc.walk(src))
+    monkeypatch.undo()
+    assert list(mypyc.walk(tmp_path / "nowhere")) == []  # a folder that is gone is no loss: nothing to copy
+
+
+def test_sync_tree_names_a_file_it_cannot_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file of src/ it cannot read (another user's 0600 after a sudo run, one another program
+    locks on Windows) ended run mypyc, test mypyc, compile and every build in an internal-error
+    traceback; the wheel method already named it. The copy's side, a file under .build/ another
+    user left, and a full disk go on to cli.main, which names them."""
+    import errno
+
+    src = _project(tmp_path / "src", {"p1/__init__.py": "X = 1\n", "p1/secret.txt": "s\n"})
+    secret = src / "p1" / "secret.txt"
+    real = mypyc.copy_writable
+
+    def unreadable(a: str, b: str) -> str:
+        if Path(a) == secret:
+            raise PermissionError(13, "Permission denied", a)
+        return real(a, b)
+
+    monkeypatch.setattr(mypyc, "copy_writable", unreadable)
+    with pytest.raises(PytError, match=r"^cannot copy .*secret\.txt: Permission denied$"):
+        mypyc.sync_tree(src, tmp_path / "stage")
+    for error in (PermissionError(13, "Permission denied", str(tmp_path / "stage2" / "p1" / "secret.txt")), OSError(errno.ENOSPC, "No space left on device")):
+
+        def fails(a: str, b: str, error: OSError = error) -> str:
+            raise error
+
+        monkeypatch.setattr(mypyc, "copy_writable", fails)
+        with pytest.raises(OSError) as caught:
+            mypyc.sync_tree(src, tmp_path / "stage2")
+        assert caught.value is error
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a named pipe (POSIX)")
+def test_sync_tree_names_a_named_pipe_of_src(tmp_path: Path) -> None:
+    src = _project(tmp_path / "src", {"p1/__init__.py": "X = 1\n"})
+    os.mkfifo(src / "p1" / "pipe.fifo")
+    with pytest.raises(PytError, match=r"^cannot copy .*pipe\.fifo: .*is a named pipe$"):
+        mypyc.sync_tree(src, tmp_path / "stage")
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX modes, as a user they bind (not root)")
+def test_sync_tree_refuses_a_folder_without_its_read_bit(tmp_path: Path) -> None:
+    src = _project(tmp_path / "src", {"p1/__init__.py": "X = 1\n", "p1/data/table.json": "{}\n"})
+    (src / "p1" / "data").chmod(0o311)
+    try:
+        assert (src / "p1" / "data" / "table.json").read_text(encoding="utf-8") == "{}\n"  # by name: fine
+        with pytest.raises(PytError, match=r"cannot list .*data/"):
+            mypyc.sync_tree(src, tmp_path / "stage")
+    finally:
+        (src / "p1" / "data").chmod(0o755)
+
+
 def test_sync_tree_handles_type_changes_and_removed_packages(tmp_path: Path) -> None:
     src, dst = _project(tmp_path / "src", {"pkg/__init__.py": ""}), tmp_path / "dst"
     data = src / "pkg" / "data"
@@ -975,6 +1913,36 @@ def test_sync_tree_handles_type_changes_and_removed_packages(tmp_path: Path) -> 
     _project(dst, {"pkg/__pycache__/__init__.cpython-314.pyc": b"pyc"})
     mypyc.sync_tree(src, dst)
     assert (dst / "pkg" / "__pycache__").is_dir()  # the caches of live folders are kept
+
+
+def _case_insensitive(folder: Path) -> bool:
+    """Whether the file system of `folder` finds a name in another case (macOS's and Windows'
+    default volumes)."""
+    probe = folder / "CaseProbe"
+    probe.mkdir()
+    try:
+        return (folder / "caseprobe").exists()
+    finally:
+        probe.rmdir()
+
+
+def test_sync_tree_follows_a_case_only_rename(tmp_path: Path) -> None:
+    """A case-only rename in src/ (`git mv Data.py data.py`, a folder Core/ -> core/) on a
+    case-insensitive volume, where the copy is still found under its old name: Windows kept that
+    spelling, which Python's case-sensitive import never finds, and macOS deleted the copy as a
+    file src/ no longer has, so the first build after the rename shipped without the module."""
+    if not _case_insensitive(tmp_path):
+        pytest.skip("a case-sensitive file system (the macOS and Windows runs take this test)")
+    src, dst = _project(tmp_path / "src", {"pkg/Data.py": "X = 1\n", "pkg/Core/m.py": "Y = 2\n"}), tmp_path / "dst"
+    for path in (src / "pkg" / "Data.py", src / "pkg" / "Core" / "m.py"):
+        os.utime(path, (1_700_000_000, 1_700_000_000))  # whole seconds, which every file system keeps
+    mypyc.sync_tree(src, dst)
+    for old, new in (("Data.py", "data.py"), ("Core", "core")):
+        (src / "pkg" / old).rename(src / "pkg" / "renaming")  # in two steps, which any file system takes
+        (src / "pkg" / "renaming").rename(src / "pkg" / new)
+    mypyc.sync_tree(src, dst)
+    assert _snapshot(dst) == {"pkg": None, "pkg/core": None, "pkg/core/m.py": b"Y = 2\n", "pkg/data.py": b"X = 1\n"}
+    assert mypyc.sync_tree(src, dst) == 0  # stable
 
 
 def test_sync_tree_leaves_the_tool_caches_out(tmp_path: Path) -> None:
@@ -1194,6 +2162,10 @@ class FakeCompiler:
                 ext = Path(spec["stage"]) / (f[:-3] + self.suffix)
                 if f[:-3].replace("/", ".") not in self.skip and (spec["force"] or not ext.exists()):
                     ext.write_bytes(spec["opt_level"].encode())
+                # compile.separate = true: one shared lib per module, rebuilt like the module
+                lib = Path(spec["stage"]) / (f[:-3] + "__mypyc" + self.suffix)
+                if spec["separate"] and (spec["force"] or not lib.exists()):
+                    lib.write_bytes(b"lib")
             if not spec["separate"]:
                 (Path(spec["stage"]) / (spec["group"] + "__mypyc" + self.suffix)).write_bytes(b"lib")
         return _done([str(a) for a in argv])
@@ -1305,6 +2277,72 @@ def test_build_forces_a_rebuild_when_the_compiler_environment_changes(fake_build
     assert fake_build.force  # removed is a change too
 
 
+def test_build_forces_a_rebuild_when_the_locked_mypyc_or_setuptools_moves(fake_build: FakeCompiler, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """mypyc compiles the C runtime of the INSTALLED mypy (lib-rt: CPy.h, init.c...) into every
+    extension, and setuptools drives the compiler; neither is a source setuptools compares, and an
+    app's generated C is often the same under two mypy releases: once the lock moved mypy (./pyt
+    lock --upgrade), the stage kept the old mypyc's binaries (verified with mypy 2.2.0 -> 2.3.1:
+    the pyz shipped the 2.2.0 .so) and every build shipped them."""
+    lock = tmp_path / "uv.lock"
+    monkeypatch.setattr(mypyc, "LOCK", lock)
+
+    def locked(mypy: str, setuptools: str = "84.0.0") -> None:
+        packages = {"mypy": mypy, "setuptools": setuptools, "rich": "15.0.0"}
+        lock.write_text("version = 1\n" + "".join(f'\n[[package]]\nname = "{n}"\nversion = "{v}"\n' for n, v in packages.items()), encoding="utf-8")
+
+    cfg = make({"compile": {"separate": True}})
+    locked("2.2.0")
+    mypyc.build(cfg, "release")
+    mypyc.build(cfg, "release")
+    assert not fake_build.force
+    cache = mypyc.profile(cfg, "release").dir
+    for sub in ("mypy_cache", "c"):
+        (cache / sub).mkdir(exist_ok=True)
+        (cache / sub / "stale").write_text("from mypy 2.2.0", encoding="utf-8")
+    locked("2.3.1")
+    mypyc.build(cfg, "release")
+    assert fake_build.force  # build_ext --force, without the IR and C of the old mypyc
+    assert not (cache / "mypy_cache").exists() and not (cache / "c").exists()
+    mypyc.build(cfg, "release")
+    assert not fake_build.force
+    locked("2.3.1", setuptools="85.0.0")
+    mypyc.build(cfg, "release")
+    assert fake_build.force
+    record = json.loads((cache / mypyc.COMPILED_STAMP).read_text(encoding="utf-8"))
+    assert record["toolchain"] == {"mypy": ["2.3.1"], "setuptools": ["85.0.0"]}  # rich makes no binary
+    assert "toolchain" not in fake_build.specs[-1]  # recorded, not an input of tools/mypyc_build.py
+    lock.write_text(lock.read_text(encoding="utf-8").replace('"rich"', '"pygments"'), encoding="utf-8")
+    mypyc.build(cfg, "release")
+    assert not fake_build.force
+
+
+@needs_venv
+def test_mypycify_leaves_its_runtime_out_of_what_setuptools_compares(tmp_path: Path) -> None:
+    """The locked mypyc, for real (no C compiler needed): Extension.depends names none of the
+    files of its lib-rt, which it compiles into every extension, so setuptools never rebuilds an
+    extension for a new mypyc (mypyc.TOOLCHAIN does). If mypyc ever names them, this fails, and
+    the version record can go (CLAUDE.md 15.1)."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "a.py").write_text("def f(x: int) -> int:\n    return x + 1\n", encoding="utf-8")
+    (tmp_path / "pkg" / "b.py").write_text("from pkg.a import f\n\n\ndef g(x: int) -> int:\n    return f(x) * 2\n", encoding="utf-8")
+    code = (  # as tools/mypyc_build.py calls it: a group, whose shared lib holds the runtime
+        "import os, sys\n"
+        "from mypyc.build import include_dir, mypycify\n"
+        "os.chdir(sys.argv[1])\n"
+        "exts = mypycify(['pkg/a.py', 'pkg/b.py'], target_dir='c', group_name='pkg')\n"
+        "deps = [os.path.abspath(d) for e in exts for d in e.depends]\n"
+        "runtime = os.path.normcase(os.path.abspath(include_dir()))\n"
+        "print('PTDEPS', len(deps), sum(os.path.normcase(d).startswith(runtime) for d in deps))\n"
+    )
+    r = subprocess.run([str(TOOL_PYTHON), "-I", "-c", code, str(tmp_path)], capture_output=True, text=True, timeout=300, check=False)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTDEPS")), None)
+    assert line is not None, r.stdout[-2000:] + r.stderr[-2000:]
+    _, generated, runtime = line.split()
+    assert int(generated) > 0  # what it does name: the headers it generates
+    assert int(runtime) == 0
+
+
 def test_build_does_not_force_for_annotate_or_new_modules(fake_build: FakeCompiler, src_tree: Path) -> None:
     mypyc.build(make({}), "dev")
     mypyc.build(make({"compile": {"annotate": True}}), "dev")
@@ -1379,14 +2417,75 @@ def test_build_leaves_a_vendored_native_file_alone(
     assert not (stage / "myapp" / "native" / "libfoo.so").exists()
 
 
-def test_build_with_separate_keeps_the_per_module_libs(fake_build: FakeCompiler) -> None:
-    """compile.separate = true: <module>__mypyc libs are wanted (they were deleted on every build)."""
+def test_build_on_windows_sets_the_extensions_the_app_holds_aside(fake_build: FakeCompiler, src_tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows deletes no DLL a process has loaded, but renames it: setuptools' build_ext
+    # --inplace deletes each extension of the stage before it copies the new one in, so while
+    # the app still ran from the stage (./pyt run mypyc in another terminal, a debug session)
+    # every build that changed it failed, with the compiler-install hint
+    monkeypatch.setattr(mypyc, "IS_WINDOWS", True)
+    cfg = make({})
+    stage = mypyc.profile(cfg, "dev").stage
+    mypyc.build(cfg, "dev")
+    loaded = set(mypyc.extension_files(stage))  # the running app has them mapped
+    vendored = src_tree / "myapp" / "native" / ("_v" + LINUX_EXT)  # app content, never set aside
+    vendored.parent.mkdir()
+    vendored.write_bytes(b"v")
+    real_run = fake_build.run
+
+    def setuptools_like(argv: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        still = sorted(p for p in loaded if p.exists())
+        if still:  # where setuptools must first delete the old file: Access is denied
+            return _done([str(a) for a in argv], mypyc.C_BUILD_FAILED, "", f"error: could not delete '{still[0]}': Access is denied\n")
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(mypyc.proc, "run", setuptools_like)
+    mypyc.build(cfg, "dev")  # it failed: "could not delete ...", and the compiler-install hint
+    assert sorted(mypyc.extension_files(stage)) == sorted([*loaded, stage / "myapp" / "native" / ("_v" + LINUX_EXT)])
+    aside = stage.parent / mypyc.SET_ASIDE
+    assert len(list(aside.iterdir())) == len(loaded)  # the old ones, still loaded: deleted later
+    # a module no longer compiled: its loaded extension leaves the stage the same way
+    (src_tree / "myapp" / "core" / "n.py").write_text("Y = 2\n", encoding="utf-8")
+    monkeypatch.setattr(mypyc.proc, "run", real_run)
+    mypyc.build(cfg, "dev")
+    gone = stage / "myapp" / "core" / ("n" + LINUX_EXT)
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == gone:
+            raise PermissionError(13, "Access is denied", str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    (src_tree / "myapp" / "core" / "n.py").unlink()
+    mypyc.build(cfg, "dev")
+    assert not gone.exists() and any(p.name.endswith("-n" + LINUX_EXT) for p in aside.iterdir())
+
+
+def test_build_says_a_file_of_the_stage_is_in_use(fake_build: FakeCompiler) -> None:
+    # What setuptools still could not replace: never the compiler-install hint
+    fake_build.code, fake_build.stderr = mypyc.C_BUILD_FAILED, "error: could not delete 'stage\\myapp\\core\\m.cp314-win_amd64.pyd': Access is denied\n"
+    with pytest.raises(PytError) as err:
+        mypyc.build(make({}), "dev")
+    assert "a file of the stage is in use" in str(err.value) and "still running" in str(err.value)
+    assert mypyc.has_compiler_hint() not in str(err.value) and err.value.code == 1
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_build_with_separate_keeps_the_per_module_libs(fake_build: FakeCompiler, monkeypatch: pytest.MonkeyPatch, windows: bool) -> None:
+    """compile.separate = true: <module>__mypyc libs are wanted (they were deleted before every
+    build, so every incremental build compiled them again)."""
+    monkeypatch.setattr(mypyc, "IS_WINDOWS", windows)
     cfg = make({"compile": {"separate": True}})
     stage = mypyc.profile(cfg, "dev").stage
     mypyc.build(make({}), "dev")  # first with the shared lib
-    (stage / "myapp" / "core" / ("m__mypyc" + LINUX_EXT)).write_bytes(b"lib")  # what separate = true builds
-    mypyc.build(cfg, "dev")
+    mypyc.build(cfg, "dev")  # a new option: a full build
+    lib = stage / "myapp" / "core" / ("m__mypyc" + LINUX_EXT)
     assert _left(stage) == [f"myapp/core/m{LINUX_EXT}", f"myapp/core/m__mypyc{LINUX_EXT}"]  # the old group lib is gone
+    lib.write_bytes(b"kept")
+    mypyc.build(cfg, "dev")  # incremental: the lib stays as it is
+    assert not fake_build.force and _left(stage) == [f"myapp/core/m{LINUX_EXT}", f"myapp/core/m__mypyc{LINUX_EXT}"]
+    if not mypyc.IS_WINDOWS:  # Windows sets every mypyc output aside before it compiles, and rebuilds it
+        assert lib.read_bytes() == b"kept"
 
 
 def test_build_fails_when_an_extension_is_missing(fake_build: FakeCompiler, src_tree: Path) -> None:
@@ -1448,6 +2547,84 @@ def test_build_compiler_hint_only_when_the_c_step_failed(
     assert str(err.value).startswith(f"mypyc failed (exit code {exit_code})") and err.value.code == exit_code
     if not verbose and stdout:
         assert stdout in capsys.readouterr().err  # the captured output is shown
+
+
+@pytest.mark.parametrize("code", [mypyc.MYPYC_REJECTED, mypyc.COMPILER_MISSING, mypyc.C_BUILD_FAILED, 2])
+def test_build_shows_why_it_failed_even_with_q(fake_build: FakeCompiler, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], code: int) -> None:
+    # -q hides progress, never what to fix: `./pyt -q run mypyc` said only "fix the errors
+    # above" with nothing above, and `CC=/nonexistent/cc ./pyt -q compile` hid which compiler
+    monkeypatch.setattr(ui, "QUIET", True)
+    fake_build.code, fake_build.stdout, fake_build.stderr = code, "myapp/core/m.py:1: error: bad  [return-value]\n", "error: CC was not found\n"
+    with pytest.raises(PytError):
+        mypyc.build(make({}), "dev")
+    err = capsys.readouterr().err
+    assert "myapp/core/m.py:1: error: bad  [return-value]" in err and "error: CC was not found" in err
+
+
+def test_wheel_shows_why_uv_build_failed_even_with_q(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # uv's --quiet (-q) dropped the build backend's output: mypy's errors, setuptools' compiler
+    # error; only "The build backend returned an error" was left
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    captures: list[bool] = []
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if args[0] == "build":  # not the question whether a compiler starts (mypyc.missing_compiler)
+            captures.append(kw.get("capture", False))
+        assert kw.get("check") is False
+        return _done([str(a) for a in args], 2, "", "  [stderr]\n  src/pkg/core/m.py:3: error: bad\nerror: The build backend returned an error\n")
+
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", fake_uv)
+    for quiet in (True, False):
+        monkeypatch.setattr(ui, "QUIET", quiet)
+        with pytest.raises(proc.CommandFailed) as err:
+            wheel.build(BuildRequest(_wheel_cfg(), "mypyc", "wheel", wheel_project / "src"))
+        assert err.value.code == 2 and "build --wheel" in str(err.value)
+        assert captures[-1] is quiet  # without -q uv's output streams as it comes
+        if quiet:
+            assert "src/pkg/core/m.py:3: error: bad" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("backend", "missing", "code"),
+    [
+        ("mypyc", "the C compiler command 'cc' cannot start: cc was not found\nHINT", 3),
+        ("mypyc", None, 2),  # the compiler starts: uv's failure as it is (a type error, a C error)
+        ("cpython", None, 2),  # nothing to compile: never asked
+    ],
+)
+def test_wheel_a_compiler_that_cannot_start_is_a_missing_requirement(
+    wheel_project: Path, monkeypatch: pytest.MonkeyPatch, backend: str, missing: str | None, code: int
+) -> None:
+    # CC=/nonexistent/cc ./pyt build mypyc --method wheel: exit 2 and uv's "Build failures usually
+    # indicate a problem with the package", where the stage says the compiler is missing, exit 3
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    asked: list[envs.PyEnv] = []
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", lambda env, args, **kw: _done([str(a) for a in args], 2, "", "error: [Errno 2] No such file or directory: 'cc'\n"))
+    monkeypatch.setattr(wheel.mypyc, "missing_compiler", lambda tool: asked.append(tool) or missing)
+    with pytest.raises(PytError) as err:
+        wheel.build(BuildRequest(_wheel_cfg(), backend, "wheel", wheel_project / "src"))
+    assert err.value.code == code
+    assert [a.dir for a in asked] == ([envs.tool_env(_wheel_cfg()).dir] if backend == "mypyc" else [])
+    if missing:
+        assert str(err.value) == f"wheel: {missing}"
+
+
+@needs_venv
+@pytest.mark.skipif(os.name == "nt", reason="setuptools builds with MSVC there, whatever CC says")
+def test_missing_compiler_asks_the_venv_as_the_build_script_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = envs.tool_env(real({}))
+    monkeypatch.setenv("CC", "/nonexistent/cc")
+    missing = mypyc.missing_compiler(tool)
+    assert missing is not None and "/nonexistent/cc was not found" in missing and missing.endswith(mypyc.has_compiler_hint())
+    if _has_c_compiler():
+        monkeypatch.delenv("CC")
+        assert mypyc.missing_compiler(tool) is None
 
 
 def test_build_a_compiler_that_cannot_start_is_a_missing_requirement(fake_build: FakeCompiler) -> None:
@@ -1668,7 +2845,7 @@ def test_real_compile_with_a_missing_cc_is_a_missing_requirement(src_tree: Path,
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
     monkeypatch.setenv("CC", "/nonexistent/clang-99")
     with pytest.raises(PytError) as err:
-        mypyc.build(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}}), "dev")
+        mypyc.build(real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}}), "dev")
     assert err.value.code == 3 and "the C compiler cannot start" in str(err.value)
 
 
@@ -1801,6 +2978,18 @@ def test_hidden_imports_of_an_unparsable_file_is_a_pyt_error(src_tree: Path, tmp
     assert err.value.code == 2
 
 
+def test_hidden_imports_of_an_unreadable_file_is_a_pyt_error(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _project(src_tree, {"myapp/__init__.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": "import json\n"})
+
+    def unreadable(path: Path, *_args: Any, **_kwargs: Any) -> list[str]:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(mypyc, "imports_of", unreadable)
+    with pytest.raises(PytError, match=r"src[/\\]myapp[/\\]core[/\\]m\.py: cannot read it: Permission denied") as err:
+        mypyc.hidden_imports(make({}), tmp_path / "stage")
+    assert err.value.code == 2
+
+
 def test_exe_stage_removes_only_the_compiled_sources(src_tree: Path, tmp_path: Path) -> None:
     _project(src_tree, {"main.py": "", "myapp/__init__.py": "", "myapp/ui.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": ""})
     stage = tmp_path / "stage"
@@ -1849,7 +3038,7 @@ def test_real_compile_roundtrip(src_tree: Path, tmp_path: Path, monkeypatch: pyt
         },
     )
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
-    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}})
+    cfg = real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}})
     stage = mypyc.build(cfg, "dev")
     ext = next(p for p in mypyc.extension_files(stage) if p.name.startswith("m."))
     out = _import_from(stage, "import pkg.core.m as m, pkg.core.n as n; print(m.__file__); print(m.HERE); print(n.twice())", tmp_path)
@@ -1863,8 +3052,37 @@ def test_real_compile_roundtrip(src_tree: Path, tmp_path: Path, monkeypatch: pyt
     mypyc.build(cfg, "dev")
     assert ext.stat().st_mtime_ns == mtime  # incremental: nothing rebuilt
     size = lib.stat().st_size
-    mypyc.build(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "opt_level": "0"}}), "dev")
+    mypyc.build(real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "opt_level": "0"}}), "dev")
     assert lib.stat().st_size != size  # -O0 really rebuilt the shared lib
+
+
+@needs_venv
+@pytest.mark.skipif(not _has_mypyc(), reason="needs mypyc (run through ./pyt selftest)")
+def test_real_report_with_separate_covers_every_module_every_time(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """compile.separate makes mypy incremental: a module it loads from its cache gets no IR, and
+    mypyc annotates only the modules it built IR for. ./pyt report (and compile.annotate) wrote an
+    empty page after an unchanged run, one module after an edit of one, with the success line."""
+    _project(
+        src_tree,
+        {
+            "main.py": "",
+            "pkg/__init__.py": "",
+            "pkg/core/__init__.py": "",
+            "pkg/core/m.py": "def alpha_first() -> int:\n    return 1\n",
+            "pkg/core/n.py": "def beta_second() -> int:\n    return 2\n",
+        },
+    )
+    monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
+    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "separate": True}})
+    html = tmp_path / "report.html"
+    for edit in ("", "\n# edited\n"):  # the later runs find mypy's cache of the earlier ones
+        with (src_tree / "pkg" / "core" / "n.py").open("a", encoding="utf-8") as f:
+            f.write(edit)
+        for _ in range(2):
+            html.unlink(missing_ok=True)
+            mypyc.build(cfg, "dev", annotate=html, compile_c=False)
+            text = html.read_text(encoding="utf-8")
+            assert "alpha_first" in text and "beta_second" in text
 
 
 @needs_venv
@@ -1884,7 +3102,7 @@ def test_real_compile_names_namespace_modules_as_python_imports_them(src_tree: P
         },
     )
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
-    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core", "nsx"]}})
+    cfg = real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core", "nsx"]}})
     stage = mypyc.build(cfg, "dev")
     stems = sorted(p.relative_to(stage).as_posix().split(".")[0] for p in mypyc.extension_files(stage))
     assert stems == ["nsx/fast", "pkg/core/bench", "pkg__mypyc"]
@@ -1899,7 +3117,7 @@ def test_real_compile_separate_names_one_lib_per_module(src_tree: Path, tmp_path
     remove_stale_extensions keeps); a second build deletes none of them."""
     _project(src_tree, {"main.py": "", "pkg/__init__.py": "", "pkg/core/__init__.py": "", "pkg/core/m.py": "X = 1\n", "pkg/core/n.py": "Y = 2\n"})
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
-    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "separate": True}})
+    cfg = real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "separate": True}})
     stage = mypyc.build(cfg, "dev")
     stems = sorted(p.relative_to(stage).as_posix().split(".")[0] for p in mypyc.extension_files(stage))
     assert stems == ["pkg/core/m", "pkg/core/m__mypyc", "pkg/core/n", "pkg/core/n__mypyc"]
@@ -1916,7 +3134,7 @@ def test_real_compile_single_top_level_module_sees_a_relative_file(src_tree: Pat
     after a mypy bump, mypyc fixed it: drop the rule (lintc.relative_file_at_import)."""
     _project(src_tree, {"main.py": "", "solo.py": FILE_PROBE})
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
-    cfg = make({"app": {"name": "solo-app"}, "compile": {"modules": ["solo"]}})
+    cfg = real({"app": {"name": "solo-app"}, "compile": {"modules": ["solo"]}})
     assert lintc.relative_file_at_import(cfg)
     stage = mypyc.build(cfg, "dev")
     here, inside = _import_from(stage, "import solo; print(solo.HERE); print(solo.inside())", tmp_path).splitlines()
@@ -2052,6 +3270,57 @@ def test_mypy_with_the_generated_ini_accepts_any_in_an_excluded_module(tmp_path:
     (root / "src/myapp/core/uses.py").write_text("from myapp.core.loose import g\n\n\ndef h(n: int) -> int:\n    return int(g(n))\n", encoding="utf-8")
     r = mypy()  # the compiled modules stay strict
     assert r.returncode == 1 and 'uses.py:5: error: Expression has type "Any"' in r.stdout, r.stdout
+
+
+def _mypy_from(root: Path, ini: Path) -> subprocess.CompletedProcess[str]:
+    argv = [str(TOOL_PYTHON), "-m", "mypy", "--config-file", str(ini), "--no-incremental"]
+    return subprocess.run(argv, cwd=root, env=proc.base_env(), capture_output=True, text=True, check=False)
+
+
+@needs_venv
+def test_mypy_names_a_namespace_folder_of_compile_modules_as_python_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A namespace folder in compile.modules (src/nsx/fast.py, no __init__.py): mypy named the
+    module after its nearest folder, `fast`, so the [mypy-nsx.*] section never applied, and
+    `check mypyc` and the editor's mypy passed an Any that the mypyc compile then rejected. The
+    generated configs name modules from src, as mypyc_build.py does (--explicit-package-bases)."""
+    root = _project(
+        tmp_path,
+        {
+            "src/myapp/__init__.py": "",
+            "src/myapp/core/__init__.py": "",
+            "src/myapp/core/bench.py": "def n() -> int:\n    return 1\n",
+            "src/nsx/fast.py": "from typing import Any\n\n\ndef double(x: Any) -> Any:\n    return x * 2\n",
+            "tests/__init__.py": "",
+        },
+    )
+    monkeypatch.setattr(render, "ROOT", root)
+    cfg = make({"compile": {"modules": ["myapp.core", "nsx"]}})
+    for profile in ("off", "warn", "strict", "mypyc"):
+        assert _ini(render.mypy_ini(cfg, profile)).getboolean("mypy", "explicit_package_bases") is True
+    ini = root / "mypy.ini"
+    ini.write_text(render.mypy_ini(cfg, "mypyc"), encoding="utf-8")
+    r = _mypy_from(root, ini)
+    assert r.returncode == 1 and 'src/nsx/fast.py:4: error: Explicit "Any" is not allowed' in r.stdout.replace("\\", "/"), r.stdout + r.stderr
+
+
+@needs_venv
+def test_mypy_checks_an_app_package_without_init_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An app package without __init__.py runs, tests and compiles (mypyc names it from src),
+    but mypy named src/myapp/app.py `app` too: "Source file found twice under different module
+    names", and `check` and the checks of `build` failed under every profile that runs mypy."""
+    root = _project(
+        tmp_path,
+        {
+            "src/myapp/app.py": "from .core import bench\n\n\ndef main() -> int:\n    return bench.n()\n",
+            "src/myapp/core/bench.py": "def n() -> int:\n    return 1\n",
+            "tests/test_app.py": "import myapp.app\n\n\ndef test_main() -> None:\n    assert myapp.app.main() == 1\n",
+        },
+    )
+    monkeypatch.setattr(render, "ROOT", root)
+    ini = root / "mypy.ini"
+    ini.write_text(render.mypy_ini(make({}), "strict"), encoding="utf-8")
+    r = _mypy_from(root, ini)
+    assert r.returncode == 0, r.stdout + r.stderr
 
 
 @pytest.fixture
@@ -2215,7 +3484,7 @@ def _wheel_cfg(**extra: Any) -> Config:
 
 
 @pytest.mark.parametrize("backend", ["cpython", "mypyc", "pypy"])
-def test_wheel_builds_in_the_locked_tools_env(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+def test_wheel_builds_in_the_locked_tools_env(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], backend: str) -> None:
     from runner.cmd_build import BuildRequest
     from runner.methods import wheel
 
@@ -2245,7 +3514,12 @@ def test_wheel_builds_in_the_locked_tools_env(wheel_project: Path, monkeypatch: 
     assert build[build.index("--python") + 1] == str(tool.python)  # never uv's own pick (./.venv, WSL)
     work = wheel_project / ".build" / "wheel" / backend
     assert build[-1] == str(work)
-    assert (work / "setup.py").is_file() is (backend == "mypyc") and (work / "mypy.ini").is_file() is (backend == "mypyc")
+    assert (work / "setup.py").is_file() and (work / "mypy.ini").is_file() is (backend == "mypyc")
+    assert ("mypycify" in (work / "setup.py").read_text(encoding="utf-8")) is (backend == "mypyc")
+    # uv tool install takes the newest CPython it has, whatever the wheel's Requires-Python: a
+    # mypyc wheel (cp314 only) needs the request, and the printed line failed without it
+    hint = "install it with: uv tool install " + ("--python 3.14 " if backend == "mypyc" else "")
+    assert hint + "dist" + os.sep in capsys.readouterr().err.replace(str(wheel_project) + os.sep, "")
 
 
 def test_wheel_keeps_the_previous_wheel_when_the_sync_fails(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2277,12 +3551,57 @@ def test_wheel_pyproject_is_exact_and_ships_the_package_data(wheel_project: Path
         assert requires == [f"setuptools=={_locked('setuptools')}", *([f"mypy=={_locked('mypy')}"] if compiled else [])]
         assert data["project"]["description"] == 'Say "hi" \\ caf' + chr(0xE9)  # quotes, a backslash, non-ASCII
         assert data["project"]["dependencies"] == ["rich>=15"]
+        # a mypyc wheel loads only in its CPython minor: uv tool install took the newest one it
+        # had (3.14 for a 3.13 project) and found no wheel for it
+        assert data["project"]["requires-python"] == ("==3.14.*" if compiled else ">=3.14")
         assert data["project"]["scripts"] == {"pkg": "pkg.app:main"} and "gui-scripts" not in data["project"]
         assert data["tool"]["setuptools"]["package-data"] == {"pkg": ["**/*"]}
     gui = tomllib.loads(wheel._pyproject(_wheel_cfg(gui=True), False))
     assert gui["project"]["gui-scripts"] == {"pkg": "pkg.app:main"} and "scripts" not in gui["project"]
     entry = tomllib.loads(wheel._pyproject(make({"app": {"name": "pkg"}, "deploy": {"wheel": {"entry": "pkg.ui:run"}}}), False))
     assert entry["project"]["scripts"] == {"pkg": "pkg.ui:run"}
+
+
+def test_wheel_pyproject_holds_a_description_with_any_character(wheel_project: Path) -> None:
+    # json.dumps left DEL raw, which a TOML basic string cannot hold: the description of a valid
+    # pyproject.toml ("Tab\tand DEL\u007f end": tomllib, uv and ./pyt lock accept it) made uv refuse
+    # the build project of every wheel build, at a column that showed no character
+    from runner.methods import wheel
+
+    description = "Tab\tand DEL\x7f end, \x00 \x1f \x80 \u2028 \"q\" \\"
+    pyproject = wheel.PYPROJECT
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(f"description = {json.dumps(data['project']['description'])}", f"description = {config.toml_value(description)}"),
+        encoding="utf-8",
+    )
+    assert tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["description"] == description
+    for compiled in (False, True):
+        assert tomllib.loads(wheel._pyproject(_wheel_cfg(), compiled))["project"]["description"] == description
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="a name that is not UTF-8: Linux keeps a file name's bytes (macOS and Windows refuse it)")
+@pytest.mark.parametrize("name", [b"caf\xe9.txt", b".caf\xe9.txt"])
+def test_wheel_refuses_a_file_name_that_is_not_utf8_naming_it_in_src(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, name: bytes) -> None:
+    # A wheel holds UTF-8 names only: an ordinary data file named otherwise ended the build in
+    # setuptools' UnicodeEncodeError traceback, with uv's generic "build failures" hint; a hidden
+    # one was refused, but named by its copy under .build/wheel/ with a \udce9 escape
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    data = os.fsencode(wheel_project / "src" / "pkg" / "data")
+    try:
+        with open(os.path.join(data, name), "wb") as f:
+            f.write(b"x")
+    except OSError as e:
+        pytest.skip(f"this file system refuses a name that is not UTF-8: {e}")
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", lambda *a, **k: pytest.fail("uv build ran"))
+    with pytest.raises(PytError, match=r"its name is not valid UTF-8, which a wheel cannot hold: rename it") as e:
+        wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", wheel_project / "src"))
+    shown = str(e.value)
+    assert e.value.code == 2 and ".build" not in shown
+    assert shown.startswith("wheel: ") and shown.split(": ")[1].endswith("src/pkg/data/" + name.decode("ascii", "backslashreplace"))
 
 
 def test_wheel_names_a_missing_lock_entry(wheel_project: Path) -> None:
@@ -2292,6 +3611,24 @@ def test_wheel_names_a_missing_lock_entry(wheel_project: Path) -> None:
     lock.write_text('version = 1\n[[package]]\nname = "mypy"\nversion = "2.3.1"\n', encoding="utf-8")
     with pytest.raises(PytError, match=r"setuptools is not in uv.lock.*\./pyt add setuptools --dev --cpython-only"):
         wheel._pyproject(_wheel_cfg(), False)
+
+
+def test_wheel_names_a_pyproject_or_lock_that_is_not_toml(wheel_project: Path) -> None:
+    # wheel.check reads pyproject.toml before cmd_build.check_lock: a broken one ended every
+    # wheel build, --dry-run included, in an internal-error traceback
+    from runner.methods import wheel
+
+    good = wheel.PYPROJECT.read_bytes()
+    with wheel.PYPROJECT.open("ab") as f:
+        f.write(b"x = [\n")
+    for step in (lambda: wheel.check(_wheel_cfg()), lambda: wheel._pyproject(_wheel_cfg(), False)):
+        with pytest.raises(PytError, match=r"^wheel: pyproject.toml is not valid TOML: ") as caught:
+            step()
+        assert caught.value.code == 2
+    wheel.PYPROJECT.write_bytes(good)
+    (wheel.PYPROJECT.parent / "uv.lock").write_bytes(b"\xff\xfe")
+    with pytest.raises(PytError, match=r"^wheel: uv.lock is not valid TOML: "):
+        wheel._pyproject(_wheel_cfg(), True)
 
 
 def test_wheel_copies_the_package_files(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2312,6 +3649,96 @@ def test_wheel_copies_the_package_files(wheel_project: Path, monkeypatch: pytest
     assert files == [
         "__init__.py", "app.py", "assets/img.txt", "core/__init__.py", "core/m.py", "data/x.json", "native/libfoo.so", "py.typed",
     ]  # fmt: skip
+
+
+def _symlink(link: Path, target: Path | str, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError as e:  # Windows without Developer Mode or admin rights
+        pytest.skip(f"cannot create a symbolic link here: {e}")
+
+
+def test_wheel_copies_through_links_like_the_stage(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # A dangling link, or a link back up its own path (a cycle), in src/<pkg>/: copytree stopped
+    # in shutil.Error, an internal-error traceback, where the stage and every payload warn and build
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        out = Path(str(args[args.index("--out-dir") + 1]))
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "pkg-0.1.0-py3-none-any.whl").write_bytes(b"")
+        return _done([])
+
+    src = wheel_project / "src"
+    shared = wheel_project / "shared"
+    shared.mkdir()
+    (shared / "s.txt").write_text("s", encoding="utf-8")
+    _symlink(src / "pkg" / "gone.json", wheel_project / "nonexistent.json")
+    _symlink(src / "pkg" / "data" / "up", "..", directory=True)
+    _symlink(src / "pkg" / "linked", shared, directory=True)
+    _symlink(src / "assets" / "again", src / "assets", directory=True)
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", fake_uv)
+    wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", src))
+    pkg = wheel_project / ".build" / "wheel" / "cpython" / "src" / "pkg"
+    files = sorted(p.relative_to(pkg).as_posix() for p in pkg.rglob("*") if p.is_file())
+    assert files == [
+        "__init__.py", "app.py", "assets/img.txt", "core/__init__.py", "core/m.py", "data/x.json", "linked/s.txt",
+        "native/libfoo.so", "py.typed",
+    ]  # fmt: skip
+    assert "gone.json: broken symbolic link, not copied" in capsys.readouterr().err
+
+
+def test_wheel_names_a_file_it_cannot_copy(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import errno
+
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    real = mypyc.copy_writable
+
+    def copy(source: str, target: str) -> str:
+        if source.endswith("x.json"):
+            raise PermissionError(errno.EACCES, "Permission denied", source)
+        return real(source, target)
+
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.mypyc, "copy_writable", copy)
+    with pytest.raises(PytError, match=r"wheel: cannot copy .*x\.json: Permission denied$"):
+        wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", wheel_project / "src"))
+
+
+@pytest.mark.parametrize("how", ["denied", "named pipe"])
+def test_wheel_names_a_lone_module_it_cannot_copy(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """A lone top-level module of compile.modules (src/fastbench.py) was copied without the error
+    handling of the package's files: one it cannot read (another user's file, a named pipe, on
+    Windows one another program holds open) ended in an internal-error traceback."""
+    import errno
+
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    src = wheel_project / "src"
+    _add_top_level_modules(src)
+    if how == "named pipe":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("no named pipes here")
+        (src / "fastbench.py").unlink()
+        os.mkfifo(src / "fastbench.py")
+    else:
+        real = mypyc.copy_writable
+
+        def copy(source: str, target: str) -> str:
+            if source.endswith("fastbench.py"):
+                raise PermissionError(errno.EACCES, "Permission denied", source)
+            return real(source, target)
+
+        monkeypatch.setattr(wheel.mypyc, "copy_writable", copy)
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    with pytest.raises(PytError, match=r"wheel: cannot copy .*fastbench\.py: ") as e:
+        wheel.build(BuildRequest(_top_level_cfg(), "cpython", "wheel", src))
+    assert e.value.code == 2
 
 
 def _top_level_cfg() -> Config:
@@ -2446,6 +3873,75 @@ def test_real_pure_wheel(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -
     assert "[gui_scripts]" in entry_points and "pkg = pkg.app:main" in entry_points
 
 
+# Files whose path holds a name that starts with a dot, in the package and in src/assets/
+# (relative to src/, and where the wheel puts them); "[" is a glob character
+HIDDEN = {
+    "pkg/data/.keep": "pkg/data/.keep",
+    "pkg/.config/deep/.env": "pkg/.config/deep/.env",
+    "pkg/data/.w[1].txt": "pkg/data/.w[1].txt",
+    "assets/.hidden.txt": "pkg/assets/.hidden.txt",
+    "assets/.fonts/a.ttf": "pkg/assets/.fonts/a.ttf",
+}
+
+
+def test_wheel_package_data_names_every_hidden_file(tmp_path: Path) -> None:
+    # setuptools expands package-data with the stdlib glob, whose "**/*" skips every name that
+    # starts with a dot and every folder that does: those files are named one by one, escaped
+    from runner.methods import wheel
+
+    package = _project(tmp_path / "pkg", {"a.py": "", "data/x.json": "{}", **{k.removeprefix("pkg/"): "x" for k in HIDDEN if k.startswith("pkg/")}})
+    patterns = wheel._package_data(package)
+    assert patterns == ["**/*", ".config/deep/.env", "data/.keep", "data/.w[[]1].txt"]
+    matched = {Path(p).as_posix() for pattern in patterns for p in glob.glob(pattern, root_dir=package, recursive=True) if (package / p).is_file()}
+    assert matched == {"a.py", "data/x.json", ".config/deep/.env", "data/.keep", "data/.w[1].txt"}  # glob as setuptools runs it
+    assert wheel._package_data(_project(tmp_path / "plain", {"a.py": ""})) == ["**/*"]
+
+
+@needs_venv
+def test_real_pure_wheel_holds_hidden_files(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The wheel left out src/assets/.fonts/, data/.keep and every other name that starts with a
+    # dot, without a word, while the other methods ship them
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    _project(wheel_project / "src", dict.fromkeys(HIDDEN, "hidden"))
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    names = _wheel_names(wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", wheel_project / "src")))
+    assert set(HIDDEN.values()) <= set(names), names
+    assert {"pkg/data/x.json", "pkg/assets/img.txt", "pkg/app.py"} <= set(names)  # the others as before
+
+
+@needs_venv
+def test_real_wheel_builds_under_a_folder_named_like_a_variable(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # setuptools' install step (bdist_wheel runs it) expands $NAME and {NAME} in its prefix,
+    # sys.prefix: the .venv of a project folder such as app$v2 or br{x} stopped every wheel
+    # build ("invalid variable 'v2'"). The .venv is reached through such a folder here.
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    folder = wheel_project / "app$v2 {x}"
+    folder.mkdir()
+    venv = folder / ".venv"
+    _symlink(venv, TOOL_PYTHON.parent.parent, directory=True)
+    monkeypatch.setattr(wheel.envs, "tool_env", lambda cfg: envs.PyEnv("cpython", venv, cfg.python.cpython, "only-managed"))
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    names = _wheel_names(wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", wheel_project / "src")))
+    assert {"pkg/app.py", "pkg/data/x.json"} <= set(names)
+
+
+def test_every_wheel_setup_py_installs_with_a_plain_prefix(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Both build projects run bdist_wheel's install step with INSTALL_CLASS (setuptools ignores a
+    # prefix of setup.cfg inside a virtual environment)
+    from runner.methods import wheel
+
+    monkeypatch.setattr(mypyc, "compiled_sources", lambda cfg: [wheel_project / "src" / "pkg" / "core" / "m.py"])
+    for compiled in (False, True):
+        text = wheel.setup_py(_wheel_cfg(), compiled)
+        compile(text, "setup.py", "exec")
+        assert wheel.INSTALL_CLASS in text and 'cmdclass={"install": Install}' in text
+        assert ("mypycify" in text) is compiled
+
+
 @needs_venv
 @needs_compiler
 def test_real_mypyc_wheel_compiles_code_that_imports_a_dependency(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2535,6 +4031,8 @@ def _fake_modules(monkeypatch: pytest.MonkeyPatch, compiler: str, extensions: li
     fake_build_mod.mypycify = lambda args, **kw: extensions  # type: ignore[attr-defined]
     fake_setuptools = types.ModuleType("setuptools")
     fake_setuptools.setup = lambda **kw: setups.append(kw)  # type: ignore[attr-defined]
+    fake_install = types.ModuleType("setuptools.command.install")
+    fake_install.install = type("install", (), {"finalize_options": lambda self: None})  # type: ignore[attr-defined]
     fake_ccompiler = types.ModuleType("distutils.ccompiler")
     fake_ccompiler.new_compiler = lambda: types.SimpleNamespace(compiler_type=compiler)  # type: ignore[attr-defined]
     fake_sysconfig = types.ModuleType("distutils.sysconfig")
@@ -2546,6 +4044,8 @@ def _fake_modules(monkeypatch: pytest.MonkeyPatch, compiler: str, extensions: li
         "mypyc": types.ModuleType("mypyc"),
         "mypyc.build": fake_build_mod,
         "setuptools": fake_setuptools,
+        "setuptools.command": types.ModuleType("setuptools.command"),
+        "setuptools.command.install": fake_install,
         "distutils": fake_distutils,
         "distutils.ccompiler": fake_ccompiler,
         "distutils.sysconfig": fake_sysconfig,
@@ -2571,7 +4071,7 @@ def test_wheel_setup_py_adds_the_same_flags_as_the_stage(
     assert flags == _load_build_script().extra_cflags(compiler, platform, nsi)
     assert [e.extra_compile_args for e in extensions] == [["-O3", *flags]] * 2
     assert extensions[0].extra_compile_args is not extensions[1].extra_compile_args
-    assert setups == [{"ext_modules": extensions}]
+    assert len(setups) == 1 and setups[0]["ext_modules"] == extensions and set(setups[0]["cmdclass"]) == {"install"}
 
 
 INLINE_PROBE = """\
@@ -2649,7 +4149,7 @@ def test_real_compile_adds_the_c_flags_and_inlines_compiled_calls(
     through the PLT; switching the option really rebuilds (only a C flag changed)."""
     _project(src_tree, {"main.py": "", "pkg/__init__.py": "", "pkg/core/__init__.py": "", "pkg/core/m.py": INLINE_PROBE})
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
-    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}})
+    cfg = real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}})
     assert cfg.compile.no_semantic_interposition is True  # the default
     stage = mypyc.build(cfg, "dev")
     _check_flags(logging_cc(), nsi=True)
@@ -2659,7 +4159,7 @@ def test_real_compile_adds_the_c_flags_and_inlines_compiled_calls(
     objdump = shutil.which("objdump") if sys.platform == "linux" else None
     if objdump:
         assert not _caller_calls_callee(objdump, lib)
-    mypyc.build(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "no_semantic_interposition": False}}), "dev")
+    mypyc.build(real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "no_semantic_interposition": False}}), "dev")
     _check_flags(logging_cc(), nsi=False)
     if objdump and _is_gcc(os.environ["PT_REAL_CC"]):
         # Pins gcc's behaviour: if this fails, gcc inlines these calls by itself and the option is moot

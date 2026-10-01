@@ -165,7 +165,9 @@ _pt_entry_in() {
 # $1 = this file as the shell named it. Sets _pt_root when its directory
 # holds a runner (_pt_entry_in). A symlink (~/bin/mypyt -> proj/pyt) is
 # followed to the launcher it names, at most 40 links; a relative target is
-# joined to its link's folder, and the kernel resolves the '..' in it.
+# joined to its link's folder, and the kernel resolves the '..' in it. A name
+# that is no file here (the shell itself, dash for a file sourced under
+# dash -c) names no folder of this file.
 _pt_from_launcher() {
     _pt_slashes "$1"
     _pt_link=$_pt_r
@@ -187,6 +189,9 @@ _pt_from_launcher() {
                 esac ;;
         esac
     done
+    if [ ! -f "$_pt_link" ]; then
+        return 1
+    fi
     case $_pt_link in
         */*) _pt_c=${_pt_link%/*} ;;
         *) _pt_c=. ;;
@@ -205,18 +210,50 @@ _pt_from_launcher() {
 # $1 = a folder holding .pytemplate/$_pt_entry, found by walking up from $PWD
 # (or the installed template). Its code is not run when another user owns it:
 # anyone may create /tmp/.pytemplate/pyt.py (on Windows, whose owners are not
-# read here: a drive root, where any user may create folders).
+# read here: a drive root, where any user may create folders, and so the root
+# of a network share, //server/share, or its server). The folder .pytemplate
+# counts too, where the runner's package is imported from: a hard link keeps
+# the owner of the file it links, and on macOS any user may link a pyt.py of
+# yours into a .pytemplate of theirs, next to a runner of theirs.
 _pt_foreign() {
     if [ -n "$_pt_win" ]; then
         case $1 in
             / | [A-Za-z]: | [A-Za-z]:/ | /[A-Za-z] | /cygdrive/[A-Za-z]) return 0 ;;
+            //*/*/?*) ;;
+            //*) return 0 ;;
         esac
         return 1
     fi
-    if [ -O "${1%/}/.pytemplate/$_pt_entry" ]; then
+    if [ -O "${1%/}/.pytemplate" ] && [ -O "${1%/}/.pytemplate/$_pt_entry" ]; then
         return 1
     fi
     return 0
+}
+
+# $1 = a folder: walk up from it to the first folder that holds a runner
+# (_pt_entry_in). Sets _pt_root, or _pt_other when it is not the caller's
+# (_pt_foreign); returns 1 when no folder up to the root holds one.
+_pt_walk() {
+    _pt_d=$1
+    while :; do
+        if _pt_entry_in "$_pt_d"; then
+            if _pt_foreign "$_pt_d"; then
+                _pt_other=$_pt_d
+            else
+                _pt_root=$_pt_d
+            fi
+            return 0
+        fi
+        _pt_n=${_pt_d%/*}
+        case $_pt_n in
+            '') _pt_n=/ ;;
+            [A-Za-z]:) _pt_n=$_pt_n/ ;;
+        esac
+        if [ "$_pt_n" = "$_pt_d" ]; then
+            return 1
+        fi
+        _pt_d=$_pt_n
+    done
 }
 
 # The copy of the template that `pyt install` made (the runner's
@@ -257,35 +294,34 @@ _pt_other=
 _pt_entry=pyt.py
 _pt_global=
 
-# bash and niubash name this file in $BASH_SOURCE (niubash's $0 is the
-# caller's); zsh in $_pt_self; everything else in $0; else walk up from $PWD.
-if [ -n "${BASH_SOURCE:-}" ] && _pt_from_launcher "$BASH_SOURCE"; then
-    :
-elif [ -n "$_pt_self" ] && _pt_from_launcher "$_pt_self"; then
-    :
-elif _pt_from_launcher "$0"; then
+# The shell names this file: zsh in $_pt_self, bash and niubash in
+# $BASH_SOURCE, the others in $0. Only the first name it gives counts: in a run
+# inside the calling shell (niubash, a sourced file) $0 is the caller's (niu,
+# or a script of another project), and its folder is not this file's. When
+# that folder holds no runner, walk up from $PWD.
+_pt_t=$_pt_self
+if [ -z "$_pt_t" ] && [ -n "${BASH_SOURCE:-}" ]; then
+    _pt_t=$BASH_SOURCE
+fi
+if [ -z "$_pt_t" ]; then
+    _pt_t=$0
+fi
+if _pt_from_launcher "$_pt_t"; then
     :
 else
-    _pt_d=$_pt_pwd
-    while :; do
-        if _pt_entry_in "$_pt_d"; then
-            if _pt_foreign "$_pt_d"; then
-                _pt_other=$_pt_d
-            else
-                _pt_root=$_pt_d
-            fi
-            break
-        fi
-        _pt_n=${_pt_d%/*}
-        case $_pt_n in
-            '') _pt_n=/ ;;
-            [A-Za-z]:) _pt_n=$_pt_n/ ;;
+    _pt_walk "$_pt_pwd" || :
+    # $PWD is logical: from a folder reached through a symlink into a project
+    # (~/game-src -> ~/code/game/src) no logical parent holds it. Walk up
+    # again from the physical folder, where the kernel is (POSIX only).
+    if [ -z "$_pt_root" ] && [ -z "$_pt_other" ] && [ -z "$_pt_win" ]; then
+        _pt_t=$(pwd -P 2>/dev/null) || _pt_t=
+        case $_pt_t in
+            /*)
+                if [ "$_pt_t" != "$_pt_pwd" ]; then
+                    _pt_walk "$_pt_t" || :
+                fi ;;
         esac
-        if [ "$_pt_n" = "$_pt_d" ]; then
-            break
-        fi
-        _pt_d=$_pt_n
-    done
+    fi
     # No project: the installed template, in its global mode (pyt new...),
     # under the same ownership rule as a folder found by walking up.
     if [ -z "$_pt_root" ] && [ -z "$_pt_other" ]; then
@@ -403,8 +439,23 @@ _pt_find_uv_dirs() {
     return 1
 }
 
+# $1 = a variable name -> its value in _pt_v (empty when unset). A Windows
+# name sh cannot spell, ProgramFiles(x86), is read with printenv (never eval)
+# from the environment the shell hands its children: bash, ksh, yash and zsh
+# keep such a name there; dash, busybox and mksh drop it when they start, and
+# then it reads as unset (pyt.cmd and pyt.ps1 expand it).
+_pt_getenv() {
+    _pt_v=
+    case $1 in
+        '' | [0-9]* | *[!A-Za-z0-9_\(\)]*) ;;
+        *[\(\)]*) _pt_v=$(printenv "$1" 2>/dev/null) || _pt_v= ;;
+        *) eval "_pt_v=\${$1-}" ;;
+    esac
+}
+
 # %NAME% -> its value (exact name, then upper case: MSYS2/Cygwin upper-case
-# SYSTEMROOT, PROGRAMFILES...). Fails on an unknown name.
+# SYSTEMROOT, PROGRAMFILES...). Fails on a name with no value here: unset, or
+# one _pt_getenv cannot read.
 _pt_expand() {
     _pt_r=
     _pt_s=$1
@@ -419,19 +470,11 @@ _pt_expand() {
         _pt_s=${_pt_s#*%}
         _pt_n=${_pt_s%%\%*}
         _pt_s=${_pt_s#*%}
-        _pt_v=
-        case $_pt_n in
-            '' | [0-9]* | *[!A-Za-z0-9_]*) ;;
-            *)
-                eval "_pt_v=\${$_pt_n-}"
-                if [ -z "$_pt_v" ] && command -v tr >/dev/null 2>&1; then
-                    _pt_n=$(printf '%s' "$_pt_n" | tr '[:lower:]' '[:upper:]') || _pt_n=
-                    case $_pt_n in
-                        '' | [0-9]* | *[!A-Za-z0-9_]*) ;;
-                        *) eval "_pt_v=\${$_pt_n-}" ;;
-                    esac
-                fi ;;
-        esac
+        _pt_getenv "$_pt_n"
+        if [ -z "$_pt_v" ] && command -v tr >/dev/null 2>&1; then
+            _pt_n=$(printf '%s' "$_pt_n" | tr '[:lower:]' '[:upper:]') || _pt_n=
+            _pt_getenv "$_pt_n"
+        fi
         if [ -z "$_pt_v" ]; then
             return 1
         fi
@@ -451,8 +494,14 @@ _pt_uv_in_list() {
         # Some installers write quoted entries ("C:\Program Files\x").
         _pt_e=${_pt_e#\"}
         _pt_e=${_pt_e%\"}
+        # Only an absolute folder (X:\..., X:/..., a share \\server\...): a
+        # relative entry names one below the current folder, a root-relative
+        # one (\bin) one at the drive root, which any user may create
+        # (pyt.cmd and pyt.ps1 skip both too).
         if _pt_expand "$_pt_e"; then
-            _pt_try_dir "$_pt_r" "" && return 0
+            case $_pt_r in
+                [A-Za-z]:[\\/]* | [\\/][\\/]*) _pt_try_dir "$_pt_r" "" && return 0 ;;
+            esac
         fi
     done
     return 1
@@ -488,7 +537,7 @@ EOF
 _pt_rc=
 _pt_uv=
 if [ -n "$_pt_other" ]; then
-    printf '%s\n' "pyt: ${_pt_other%/}/.pytemplate/$_pt_entry is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run ${_pt_other%/}/${_pt_entry%.py} yourself." >&2
+    printf '%s\n' "pyt: ${_pt_other%/}/.pytemplate/$_pt_entry is not yours (another user owns it or its folder, or it is at a drive root): not run. If you trust it, run ${_pt_other%/}/${_pt_entry%.py} yourself." >&2
     _pt_rc=2
 elif [ -z "$_pt_root" ]; then
     printf '%s\n' "pyt: no .pytemplate/pyt.py next to this launcher, in $_pt_pwd or in any parent directory." \
@@ -616,8 +665,8 @@ else
 fi
 
 unset -f _pt_slashes _pt_backslashes _pt_drive _pt_winpath _pt_entry_in _pt_from_launcher \
-    _pt_foreign _pt_installed _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_expand _pt_uv_in_list \
-    _pt_uv_from_registry
+    _pt_foreign _pt_walk _pt_installed _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_getenv _pt_expand \
+    _pt_uv_in_list _pt_uv_from_registry
 unset _pt_self _pt_r _pt_s _pt_p _pt_t _pt_d _pt_c _pt_n _pt_link _pt_pwd _pt_root _pt_other _pt_win \
     _pt_entry _pt_global _pt_exe _pt_uv _pt_h _pt_l _pt_f _pt_a _pt_g _pt_v _pt_rest _pt_e _pt_cr _pt_k \
     _pt_o _pt_launcher _pt_script _pt_cwd _pt_py _pt_pref _pt_rc

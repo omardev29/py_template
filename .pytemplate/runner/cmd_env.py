@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import os
 import shlex
 import shutil
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import cmd_install, cmd_nvim, envs, hooks, mypyc, proc, project, render, shells, ui
-from .cmd_dev import only_flags
+from .cmd_dev import basedpyright_problem, only_flags
 from .config import Config
 from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, PYPROJECT, ROOT, rel, write_whole
 from .ui import PytError
@@ -85,13 +86,15 @@ def _pypy_precheck(cfg: Config) -> None:
     cmd_apply.cmd_mode_precheck(cfg)
 
 
-def _refuse_a_frozen_lock() -> None:
-    """Refuse a re-lock that the user's UV_FROZEN or UV_LOCKED would turn into a no-op."""
-    frozen = _lock_read_only([])
+def _refuse_a_frozen_lock(why: str = "", *, names: tuple[str, ...] = ()) -> None:
+    """Refuse a re-lock that the user's UV_FROZEN or UV_LOCKED would turn into a no-op; `why`
+    names the change that needs it (apply and rename refuse it before their first write);
+    `names`: only these of the two variables."""
+    frozen = next((n for n in names if _set_true(n)), "") if names else _lock_read_only([])
     if frozen:
         raise PytError(
-            f"uv.lock must follow pyproject.toml, but {frozen} is set, and with it `uv lock` writes "
-            f"nothing: unset {frozen} and run the command again"
+            f"uv.lock must follow pyproject.toml{f' ({why})' if why else ''}, but {frozen} is set, and with it "
+            f"`uv lock` writes nothing: unset {frozen} and run the command again"
         )
 
 
@@ -124,14 +127,15 @@ def _fix_exec_bit() -> None:
                         # record; `sh ./pyt` works without the bit
                         ui.warn(f"cannot make {launcher} executable: {e.strerror or e}. Its owner can: chmod +x {launcher}")
     # rev-parse, not ROOT/.git: the project may live in a subfolder of a bigger repository
-    if not shutil.which("git"):
+    git = proc.find_program("git")
+    if not git:
         return
-    if proc.run(["git", "rev-parse", "--is-inside-work-tree"], capture=True, check=False, echo=False).returncode != 0:
+    if proc.run([git, "rev-parse", "--is-inside-work-tree"], capture=True, check=False, echo=False).returncode != 0:
         return
     for launcher in LAUNCHERS_X:
-        r = proc.run(["git", "ls-files", "-s", launcher], capture=True, check=False, echo=False)
+        r = proc.run([git, "ls-files", "-s", launcher], capture=True, check=False, echo=False)
         if r.stdout.startswith("100644"):
-            proc.run(["git", "update-index", "--chmod=+x", launcher], check=False)
+            proc.run([git, "update-index", "--chmod=+x", launcher], check=False)
 
 
 def cmd_sync(cfg: Config, args: list[str]) -> int:
@@ -151,14 +155,19 @@ LOCK_READ_ONLY_ENV = ("UV_LOCKED", "UV_FROZEN")
 LOCK_INFO = ("-h", "--help", "-V", "--version")
 
 
+def _set_true(name: str) -> bool:
+    """Whether the user set uv's boolean variable `name` (1/true/yes/on)."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on", "y", "t")
+
+
 def _lock_read_only(args: list[str]) -> str:
     """The argument or variable that keeps `uv lock` from writing uv.lock, or "" (--script
     locks a script's own `<script>.lock`)."""
     for a in args:
         if a.split("=", 1)[0] in LOCK_READ_ONLY:
             return a
-    for name in LOCK_READ_ONLY_ENV:  # uv's boolean variables: 1/true/yes/on
-        if os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on", "y", "t"):
+    for name in LOCK_READ_ONLY_ENV:
+        if _set_true(name):
             return name
     return ""
 
@@ -172,7 +181,7 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
     place: a full disk left it cut short, invalid TOML, next to the old pyproject.toml.
     """
     if any(a in LOCK_INFO for a in args):  # `./pyt lock --help` shows uv's help, changes nothing
-        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False)
+        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False, keep_lock_mode=True)
         return 0
     before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
     gains_pypy = render.gains_pypy(cfg)
@@ -189,7 +198,9 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
             ui.info(f"{' and '.join(restored)}: put back as {they} ({why})")
 
     try:
-        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False)  # -q keeps its summary and warnings
+        # -q keeps its summary and warnings; the user's UV_FROZEN or UV_LOCKED reaches it (then
+        # it writes no uv.lock, and both files are put back below)
+        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False, keep_lock_mode=True)
     except BaseException:  # a failed uv lock (Ctrl+C too) may have written part of uv.lock
         restore("uv lock did not finish")
         raise
@@ -226,6 +237,10 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     # by then: when the sync fails (a package that locks but cannot be built) or is
     # interrupted, both get their old bytes back, as a plain `uv add` does when its own sync
     # fails. Otherwise every `uv run --locked` tried to build that package again.
+    # uv refuses that --no-sync next to the user's UV_FROZEN ("cannot be used with"), an argument
+    # the user never typed, and add and remove re-lock: refused as mode, apply and rename refuse
+    # it, naming the variable (under UV_LOCKED uv's own message says what is wrong)
+    _refuse_a_frozen_lock(f"./pyt {verb} re-locks it", names=("UV_FROZEN",))
     argv: list[str] = [verb, "--no-sync"]
     if ns.dev:
         argv.append("--dev")
@@ -237,7 +252,9 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     tool = envs.tool_env(cfg)
     before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
     try:
-        envs.uv(tool, argv, quiet=False)  # -q keeps uv's warnings about the packages typed
+        # -q keeps uv's warnings about the packages typed; the user's UV_FROZEN or UV_LOCKED
+        # reaches it (the sync after it is the runner's own: envs.LOCK_MODE)
+        envs.uv(tool, argv, quiet=False, keep_lock_mode=True)
         envs.sync(tool)
     except BaseException:  # a failed or interrupted sync (uv add/remove revert their own failures)
         restored = _put_back(before)
@@ -342,8 +359,24 @@ def _make_writable(root: Path) -> None:
                     os.chmod(path, mode | stat.S_IWRITE | (stat.S_IRWXU if stat.S_ISDIR(mode) else 0))
 
 
+def _only_a_mount_point_left(path: Path) -> bool:
+    """Whether what rmtree left of `path` is only the empty folder something is mounted on (a
+    dev container's named volume for .venv, a bind mount of dist/), which no rmdir removes: it
+    says EBUSY there (Linux, macOS; os.path.ismount misses a bind mount of the same file system).
+    Windows says EACCES for a folder in use, never taken for one. An empty folder that rmdir
+    removes after all counts too."""
+    try:
+        if not path.is_dir() or any(path.iterdir()):
+            return False
+        os.rmdir(path)
+    except OSError as e:
+        return e.errno == errno.EBUSY
+    return True
+
+
 def _remove(path: Path) -> bool:
-    """Remove a folder, or only the link when it is a symlink/junction; return whether it is gone."""
+    """Remove a folder, or only the link when it is a symlink/junction; return whether it is gone
+    (a mount point it emptied counts: _only_a_mount_point_left)."""
     if _is_link(path):
         with contextlib.suppress(OSError):
             os.unlink(path)  # on Windows this also removes a directory symlink or a junction
@@ -353,7 +386,7 @@ def _remove(path: Path) -> bool:
     if os.path.lexists(path):  # read-only files (Windows) or folders (POSIX): once more, writable
         _make_writable(path)
         shutil.rmtree(path, ignore_errors=True)
-    return not os.path.lexists(path)
+    return not os.path.lexists(path) or _only_a_mount_point_left(path)
 
 
 def _shown(path: Path) -> str:
@@ -384,6 +417,8 @@ def cmd_clean(cfg: Config, args: list[str]) -> int:
         ui.info(f"removing {_shown(t)}")
         if not _remove(t):
             failed.append(_shown(t))
+        elif os.path.lexists(t):  # it reported a folder it had emptied as one in use, at every run
+            ui.info(f"{_shown(t)} is a mount point: emptied (the folder itself stays)")
     if failed:
         again = "./pyt clean --envs" if "--envs" in flags else "./pyt clean"
         ui.error(
@@ -458,7 +493,7 @@ def _c_compiler(platform: str = "", cc: str = "") -> tuple[bool, str]:
         words = []
     if not words:
         return False, f"no C compiler ({source})"
-    found = shutil.which(words[0])  # "ccache gcc" runs ccache
+    found = proc.find_program(words[0])  # "ccache gcc" runs ccache
     if not found:
         return False, f"{words[0]} not found ({source})"
     if IS_MACOS and os.path.dirname(found) == "/usr/bin":
@@ -517,7 +552,7 @@ def _machine(check: Check, python: Path | None = None) -> None:
     """doctor outside a project: git, the C compiler mypyc would use, the launcher of this run and
     the shell. What is missing is a note: uv is the one requirement of every project, and a
     project's own doctor says what that project needs."""
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git:
         version = proc.run([git, "--version"], capture=True, check=False, echo=False).stdout.strip()
         check(True, f"git: {version or 'found'} ({git})")
@@ -609,7 +644,9 @@ def _project_files(cfg: Config, check: Check, python_ok: bool) -> None:
     ui.step("project")
     changed, edited = render.apply(cfg, check=True)
     if changed or not edited:  # each hand-edited file gets its own line below: count every problem once
-        check(not changed, "generated files up to date", f"outdated: {', '.join(changed)}\nThey update with any command (or ./pyt render)")
+        # without python.cpython nothing is rendered (.python-version would name it: render.NoPython)
+        when = "once python.cpython is fixed (above), with" if not python_ok else "with"
+        check(not changed, "generated files up to date", f"outdated: {', '.join(changed)}\nThey update {when} any command (or ./pyt render)")
     for path in edited:
         check(
             False,
@@ -618,6 +655,10 @@ def _project_files(cfg: Config, check: Check, python_ok: bool) -> None:
             "(./pyt render --diff shows it), or drop it: ./pyt render --force",
         )
     check(not render.pyproject_outdated(cfg), "pyproject.toml matches pytemplate.toml", "./pyt apply")
+    if cfg.typing.editor == "basedpyright":  # ./pyt check refuses to run it there (section 15.1)
+        problem, way_out = basedpyright_problem()
+        if problem:
+            check(False, problem, way_out)
     from . import cmd_apply  # lazy: cmd_apply imports this module
 
     cmd_apply.doctor(cfg, check)  # app.name, app.preset, [preset.*], hooks.pre_commit edited but not applied

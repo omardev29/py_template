@@ -10,6 +10,7 @@ of one module (skipped when Cosmic Ray's environment cannot be made: offline, no
 from __future__ import annotations
 
 import _thread
+import errno
 import json
 import os
 import shutil
@@ -29,7 +30,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import config, mutation, nvimtest, proc  # noqa: E402
+from runner import config, mutation, nvimtest, presets, proc  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.mutation import KILLED, NOT_RUN, SURVIVED, TIMEOUT, Baseline, Mutant, Options, Report, Runs, Worker  # noqa: E402
 from runner.project import ROOT  # noqa: E402
@@ -54,6 +55,10 @@ def _write(root: Path, files: dict[str, str]) -> Path:
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(text, encoding="utf-8", newline="\n")
     return root
+
+
+# The suite's own pytest settings, which every copy of a project holds (Runs.run passes them)
+SUITE_INI = {f"{mutation.TESTS}/pytest.ini": (Path(__file__).parent / "pytest.ini").read_text(encoding="utf-8")}
 
 
 # --- options ------------------------------------------------------------------------------------
@@ -247,6 +252,19 @@ def test_changed_lines_against_a_commit(tmp_path: Path) -> None:
     with pytest.raises(PytError, match="'nope' names no commit here") as e:
         mutation.changed_lines(root, "nope", env)
     assert e.value.code == 2
+
+
+@needs_git
+def test_diff_in_a_folder_git_cannot_read_says_why(tmp_path: Path) -> None:
+    """--diff in a folder that is no repository (or one git refuses: dubious ownership) said the
+    BASE "names no commit here (fetch it first)", which cannot help (A10-06): git's own reason,
+    exit 3, as the run without --diff gives it."""
+    root = _write(tmp_path / "p", {f"{mutation.SCOPE}/a.py": "x = 1\n"})
+    env = {**_git_env(tmp_path), "GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    with pytest.raises(PytError, match="not a git repository") as e:
+        mutation.changed_lines(root, "origin/main", env)
+    assert e.value.code == 3
+    assert "fetch" not in str(e.value)
 
 
 @needs_git
@@ -568,6 +586,14 @@ def test_made(answer: dict[str, Any], status: str, detail: str) -> None:
     assert got[2] == (answer.get("code") if status == NOT_RUN or detail.startswith("the mutant is no valid") else None)
 
 
+def test_made_takes_the_mutant_of_a_module_with_a_bom() -> None:
+    """Python imports a module that starts with a UTF-8 BOM, and Cosmic Ray's mutant of one keeps
+    it (U+FEFF first), which compile() refuses in a str: every such mutant read as "no valid
+    Python" (A10-05). made compiles the bytes Python would read."""
+    status, detail, code = mutation.made({"code": "\ufeffx = 2\n"}, b"\xef\xbb\xbfx = 1\n", "m.py")
+    assert (status, detail, code) == (NOT_RUN, "", "\ufeffx = 2\n")
+
+
 def test_made_on_a_python_that_refuses_a_nul_byte_with_a_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
     _nul_as_up_to_python_3_11_3(monkeypatch)
     assert mutation.made({"code": "x = 1\0\n"}, b"x = 1\n", "m.py") == (
@@ -645,13 +671,26 @@ def test_classify_a_run_that_was_ended() -> None:
 
 def test_a_detail_is_cut_to_200_characters() -> None:
     """The line of the failing test, of the place a KeyboardInterrupt ended the tests, or the last
-    one of a crash: one line of the report each, however long (a test id with a long parameter)."""
+    one of a crash: one line of the report each, however long (a test id with a long parameter).
+    The place keeps its end, the file and line: pytest names the file by its absolute path, whose
+    first 200 characters under a long folder were folders only (A10-04)."""
     long = "x" * 300
     failed = f"FAILED t.py::test_x[{long}] - assert 0"
     assert mutation.classify(1, f"{failed}\n1 failed in 1.00s\n") == (KILLED, failed[:200])
-    where, banner = f"/w0/{long}.py:4: KeyboardInterrupt", f"{'!' * 30} KeyboardInterrupt {'!' * 30}"
-    assert mutation.classify(2, f"{banner}\n{where}\n1 passed in 1.00s\n") == (KILLED, f"a KeyboardInterrupt ended the tests: {where[:200]}")
+    where, banner = f"/w0/{long}/test_x.py:4: KeyboardInterrupt", f"{'!' * 30} KeyboardInterrupt {'!' * 30}"
+    status, detail = mutation.classify(2, f"{banner}\n{where}\n1 passed in 1.00s\n")
+    assert (status, detail) == (KILLED, f"a KeyboardInterrupt ended the tests: ...{where[-197:]}")
+    assert detail.endswith("/test_x.py:4: KeyboardInterrupt") and len(detail.split(": ", 1)[1]) == 200
+    short = "/w0/t/test_x.py:4: KeyboardInterrupt"
+    assert mutation.classify(2, f"{banner}\n{short}\n1 passed in 1.00s\n") == (KILLED, f"a KeyboardInterrupt ended the tests: {short}")
     assert mutation.classify(0, f"{long}\n") == (mutation.ERROR, f"exit code 0 without pytest's summary line: {long[:200]}")
+
+
+def test_a_run_with_no_summary_reports_pytests_error_line() -> None:
+    """A pytest usage error (exit 4: an unknown option) prints its `pytest: error:` line and then
+    the `rootdir:` line, which says nothing. classify names the error line, not the last one."""
+    out = "ERROR: usage: pytest [options] [file_or_dir]\npytest: error: unrecognized arguments: --hypothesis-seed=0\n\nrootdir: /home/me/proj\n"
+    assert mutation.classify(4, out) == (mutation.ERROR, "exit code 4 without pytest's summary line: pytest: error: unrecognized arguments: --hypothesis-seed=0")
 
 
 def test_pytest_counts() -> None:
@@ -862,6 +901,18 @@ def test_prepare_base(tmp_path: Path) -> None:
     assert (tmp_path / "pt" / "mut" / mutation.MARKER).is_file()
 
 
+def test_prepare_base_refuses_a_base_git_cannot_be_kept_inside(tmp_path: Path) -> None:
+    """The workers' git is kept inside the base (e2e.child_env: its parent is the ceiling), which
+    a parent path holding os.pathsep (a TMPDIR below `a:b`) cannot be: refused before anything
+    is made."""
+    root = tmp_path / "project"
+    root.mkdir()
+    base = tmp_path / f"a{os.pathsep}b" / "mut"
+    with pytest.raises(PytError, match="GIT_CEILING_DIRECTORIES") as e:
+        mutation.prepare_base(base, root)
+    assert e.value.code == 2 and not base.parent.exists()
+
+
 def test_default_base_is_short_and_per_user(monkeypatch: pytest.MonkeyPatch) -> None:
     tmp = Path(tempfile.gettempdir())
     monkeypatch.setattr(mutation, "IS_WINDOWS", True)
@@ -883,10 +934,32 @@ def test_one_run_at_a_time_per_base(tmp_path: Path) -> None:
         pass
 
 
+def test_a_base_whose_file_system_takes_no_lock_is_named_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """mutation.base_lock is project.base_lock's copy: a lock call that fails for another reason
+    than another holder (ENOSYS, a file system without locks) said "another run is using" (A10-06)."""
+
+    def refuse(*_args: object) -> None:
+        raise OSError(errno.ENOSYS, os.strerror(errno.ENOSYS))
+
+    if sys.platform == "win32":
+        import msvcrt
+
+        monkeypatch.setattr(msvcrt, "locking", refuse)
+    else:
+        import fcntl
+
+        monkeypatch.setattr(fcntl, "flock", refuse)
+    with pytest.raises(PytError) as e:
+        with mutation.base_lock(tmp_path):
+            pass
+    assert str(e.value).startswith(f"selftest --mutation: cannot lock {tmp_path / 'lock'}: ") and "another run" not in str(e.value)
+
+
 def test_worker_env_moves_home_and_temp_but_keeps_uv(tmp_path: Path) -> None:
     base_env = {
         "PATH": os.pathsep.join(["/usr/bin", "/bin"]), "HOME": "/home/me", "XDG_DATA_HOME": "/home/me/.data", "KEEP": "1",
         "PYTEST_ADDOPTS": "-n auto --lf", "PYTEST_PLUGINS": "mine",  # they would change what every run means
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",  # drops Hypothesis's --hypothesis-seed: every run would exit 4
     }  # fmt: skip
     keep = {"UV_CACHE_DIR": "/home/me/.cache/uv", "UV_PYTHON_INSTALL_DIR": "/home/me/.local/share/uv/python"}
     copy, home, tmp = tmp_path / "w0", tmp_path / "h0", tmp_path / "t0"
@@ -897,6 +970,23 @@ def test_worker_env_moves_home_and_temp_but_keeps_uv(tmp_path: Path) -> None:
     assert env["PATH"].split(os.pathsep)[0] == str(mutation.venv_python(copy / ".venv").parent)
     assert env["VIRTUAL_ENV"] == env["UV_PROJECT_ENVIRONMENT"] == str(copy / ".venv") and env["UV"] == "/opt/uv"
     assert env["PYTHONDONTWRITEBYTECODE"] == "1" and env["UV_PYTHON"] == _cfg().python.cpython
+
+
+def test_the_driver_and_the_workers_never_get_the_users_lock_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cosmic Ray's side starts with `uv run --locked --script`, which uv 0.10.12 to 0.12.8
+    refused next to the user's UV_FROZEN (exit 2), and a worker's pytest gets what `./pyt
+    selftest` gives it: no UV_FROZEN nor UV_LOCKED (envs.LOCK_MODE)."""
+    for name in ("UV_FROZEN", "UV_LOCKED"):
+        monkeypatch.setenv(name, "1")
+    code = "import json, os, sys; sys.stdin.readline(); print(json.dumps({'seen': [k for k in ('UV_FROZEN', 'UV_LOCKED') if k in os.environ]}), flush=True)"
+    driver = mutation.Driver("uv", _cfg(), tmp_path / "driver.log", argv=[sys.executable, "-c", code])
+    try:
+        assert driver.ask({"op": "version"}) == {"seen": []}
+    finally:
+        driver.close()
+    base_env = {"PATH": os.pathsep.join(["/usr/bin", "/bin"]), "UV_FROZEN": "1", "UV_LOCKED": "1", "KEEP": "1"}
+    env = mutation.worker_env(tmp_path / "w0", tmp_path / "h0", tmp_path / "t0", base_env, {}, _cfg(), "/opt/uv")
+    assert "UV_FROZEN" not in env and "UV_LOCKED" not in env and env["KEEP"] == "1"
 
 
 def test_every_write_of_a_module_gets_a_time_of_its_own(tmp_path: Path) -> None:
@@ -995,6 +1085,84 @@ def test_make_copy_is_a_repository_of_the_listed_files(tmp_path: Path) -> None:
     assert status == ""  # every file committed
 
 
+@needs_git
+def test_a_submodule_and_a_nested_repository_reach_the_copy_as_folders(tmp_path: Path) -> None:
+    """git lists a submodule, and a repository nested in the project, as one folder, which
+    make_copy left out: a local library kept in a submodule (`./pyt add ./libs/mylib`) was
+    missing from every worker, whose `uv sync --locked` failed and stopped the run (A10-02).
+    Their own files are listed in their place, as `new` copies a submodule, each repository's
+    ignores its own, and the copy commits them as files."""
+    env = _git_env(tmp_path)
+    lib = _write(tmp_path / "lib", {
+        "pyproject.toml": '[project]\nname = "mylib"\nversion = "0.1"\n', "src/mylib/__init__.py": "VALUE = 1\n",
+        ".gitignore": "build/\n",
+    })  # fmt: skip
+    _git(lib, env, "init", "-q")
+    _git(lib, env, "add", "-A")
+    _git(lib, env, "commit", "-qm", "lib")
+    root = _write(tmp_path / "p", {"a.py": "x\n"})
+    _git(root, env, "init", "-q")
+    _git(root, env, "add", "-A")
+    _git(root, env, "commit", "-qm", "p")
+    _git(root, env, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "libs/mylib")
+    _write(root, {"libs/mylib/build/x.o": "junk\n", "libs/mylib/notes.txt": "n\n", "libs/inner/b.txt": "b\n"})
+    _git(root / "libs" / "inner", env, "init", "-q")
+    files = mutation.listed_files(root, env)
+    assert {"libs/mylib/pyproject.toml", "libs/mylib/src/mylib/__init__.py", "libs/mylib/notes.txt", "libs/inner/b.txt"} <= set(files), files
+    assert not [f for f in files if f.rstrip("/") in ("libs/mylib", "libs/inner") or "/build/" in f or ".git" in f.split("/")], files
+    copy = tmp_path / "copy"
+    mutation.make_copy(root, copy, files, env)
+    assert (copy / "libs" / "mylib" / "src" / "mylib" / "__init__.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert (copy / "libs" / "inner" / "b.txt").is_file() and not (copy / "libs" / "mylib" / ".git").exists()
+    index = subprocess.run(["git", "ls-files", "-s"], cwd=copy, env=env, capture_output=True, text=True, check=True).stdout
+    assert "160000" not in index and "libs/mylib/pyproject.toml" in index and "libs/inner/b.txt" in index, index
+
+
+@needs_git
+def test_make_copy_keeps_the_executables_of_the_projects_index(tmp_path: Path) -> None:
+    """Git for Windows' `git init` writes core.filemode = false (NTFS keeps no x bit), and `git
+    add` then records every new file as 100644: a worker's pyt and pyt.ps1 lost the 100755 of the
+    project's index, which test_launcher_sh and test_launcher_win read, and the baselines of
+    runner.project and runner.cmd_install failed on Windows. Simulated here with that setting on
+    the copy's git (only the real Windows runner proves what its `git init` writes)."""
+    env = _git_env(tmp_path)
+    root = _write(tmp_path / "p", {"pyt": "#!/bin/sh\n", "pyt.ps1": "#!/usr/bin/env pwsh\n", "a.py": "x\n", "tools/new.sh": "#!/bin/sh\n"})
+    _git(root, env, "init", "-q")
+    _git(root, env, "add", "pyt", "pyt.ps1", "a.py")
+    _git(root, env, "update-index", "--chmod=+x", "pyt", "pyt.ps1")  # tools/new.sh: untracked, as the working tree has it
+    windows = {**env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.filemode", "GIT_CONFIG_VALUE_0": "false"}
+    copy = tmp_path / "copy"
+    mutation.make_copy(root, copy, mutation.listed_files(root, env), windows)
+    staged = subprocess.run(["git", "ls-files", "-s"], cwd=copy, env=windows, capture_output=True, text=True, check=True).stdout
+    modes = {line.split("\t")[1]: line.split()[0] for line in staged.splitlines()}
+    assert modes == {"a.py": "100644", "pyt": "100755", "pyt.ps1": "100755", "tools/new.sh": "100644"}
+    assert sorted(mutation.executables(root, env)) == ["pyt", "pyt.ps1"]
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert mutation.executables(plain, {**env, "GIT_CEILING_DIRECTORIES": str(tmp_path)}) == []  # no repository: nothing to mark
+
+
+@needs_git
+def test_make_copy_takes_an_executable_the_project_tracks_past_its_gitignore(tmp_path: Path) -> None:
+    """A vendored native library is `git add -f`ed past the .gitignore (*.so), often with its x
+    bit: the copy's `git add -A` leaves it out, and marking it executable in the copy's index
+    (`git update-index --chmod=+x`) failed with "cannot add to the index", which stopped every
+    worker of selftest --mutation. Only what the copy's index holds is marked."""
+    env = _git_env(tmp_path)
+    root = _write(tmp_path / "p", {".gitignore": "*.so\n", "pyt": "#!/bin/sh\n", "src/libfoo.so": "ELF\n"})
+    _git(root, env, "init", "-q")
+    _git(root, env, "add", ".gitignore", "pyt")
+    _git(root, env, "add", "-f", "src/libfoo.so")
+    _git(root, env, "update-index", "--chmod=+x", "pyt", "src/libfoo.so")
+    assert sorted(mutation.executables(root, env)) == ["pyt", "src/libfoo.so"]
+    windows = {**env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.filemode", "GIT_CONFIG_VALUE_0": "false"}
+    copy = tmp_path / "copy"
+    mutation.make_copy(root, copy, mutation.listed_files(root, env), windows)
+    staged = subprocess.run(["git", "ls-files", "-s"], cwd=copy, env=windows, capture_output=True, text=True, check=True).stdout
+    assert {line.split("\t")[1]: line.split()[0] for line in staged.splitlines()} == {".gitignore": "100644", "pyt": "100755"}
+    assert (copy / "src" / "libfoo.so").read_text(encoding="utf-8") == "ELF\n"  # in the copy, as in the project's working tree
+
+
 def _symlinks(root: Path) -> None:
     try:
         os.symlink("a.py", root / "link.py")
@@ -1015,6 +1183,42 @@ def test_make_copy_keeps_links_as_links(tmp_path: Path) -> None:
     copy = tmp_path / "copy"
     mutation.make_copy(root, copy, files, env)
     assert os.readlink(copy / "link.py") == "a.py" and os.readlink(copy / "linkdir") == "sub"
+
+
+@needs_git
+def test_make_copy_names_what_lies_outside_the_project_from_the_copy(tmp_path: Path) -> None:
+    """A library next to the project (`./pyt add ../mylib`: pyproject.toml and uv.lock name it
+    from the project) and a link that leaves the project named other folders from <base>/w<i>:
+    every worker's `uv sync --locked` failed ("Distribution not found at <base>/mylib") and the
+    run stopped. The copy names them from its own folder, both files alike; what lies inside
+    the project (a library, a link) stays as it is, and the project itself is never touched."""
+    env = _git_env(tmp_path)
+    side = tmp_path / "side"
+    _write(side / "mylib", {"pyproject.toml": '[project]\nname = "mylib"\n'})
+    _write(side / "shared", {"logo.txt": "logo\n"})
+    pyproject = '[project]\nname = "proj"\ndependencies = ["inner", "mylib"]\n\n[tool.uv.sources]\nmylib = { path = "../mylib" }\ninner = { path = "libs/inner" }\n'
+    lock = (
+        'version = 1\n\n[[package]]\nname = "inner"\nversion = "0.1.0"\nsource = { directory = "libs/inner" }\n\n'
+        '[[package]]\nname = "mylib"\nversion = "0.1.0"\nsource = { directory = "../mylib" }\n\n'
+        '[[package]]\nname = "proj"\nversion = "0.1.0"\nsource = { virtual = "." }\n\n[package.metadata]\n'
+        'requires-dist = [\n    { name = "inner", directory = "libs/inner" },\n    { name = "mylib", directory = "../mylib" },\n]\n'
+    )
+    root = _write(side / "proj", {"pyproject.toml": pyproject, "uv.lock": lock, "libs/inner/pyproject.toml": '[project]\nname = "inner"\n', "src/a.py": "x\n"})
+    try:
+        os.symlink(os.path.join("..", "shared"), root / "assets", target_is_directory=True)
+        os.symlink("src", root / "code", target_is_directory=True)
+    except OSError as e:  # Windows without the right to make links
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+    _git(root, env, "init", "-q")
+    copy = tmp_path / "base" / "w0"
+    mutation.make_copy(root, copy, mutation.listed_files(root, env), env)
+    text = (copy / "pyproject.toml").read_text(encoding="utf-8")
+    assert text == pyproject.replace('"../mylib"', '"../../side/mylib"')
+    assert (copy / "uv.lock").read_text(encoding="utf-8") == lock.replace('"../mylib"', '"../../side/mylib"')
+    assert (copy / "assets" / "logo.txt").read_text(encoding="utf-8") == "logo\n" and os.readlink(copy / "code") == "src"
+    assert (root / "pyproject.toml").read_text(encoding="utf-8") == pyproject and os.readlink(root / "assets") == os.path.join("..", "shared")
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=copy, env=env, capture_output=True, text=True, check=True).stdout
+    assert status == ""  # what the copy names is what it committed
 
 
 @needs_git
@@ -1048,7 +1252,7 @@ def test_make_copy_copies_what_a_link_names_where_links_cannot_be_made(tmp_path:
 
 
 def _worker(tmp_path: Path, tests: dict[str, str]) -> Worker:
-    copy = _write(tmp_path / "copy", tests)
+    copy = _write(tmp_path / "copy", {**SUITE_INI, **tests})
     (tmp_path / "pytest").mkdir()
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     return Worker(0, copy, Path(sys.executable), tmp_path / "pytest", tmp_path / "w0.log", env)
@@ -1065,10 +1269,68 @@ def test_run_reports_pytests_result(tmp_path: Path) -> None:
     assert mutation.classify(code, output)[0] == KILLED
 
 
+def test_a_leftover_in_the_basetemp_never_fails_the_next_run(tmp_path: Path, unprivileged_python: Path) -> None:
+    """A run that its time limit or a stop killed, or a test that a mutant made fail before it
+    put a folder's mode back, leaves an unreadable folder in the worker's --basetemp, which
+    pytest's own cleanup cannot remove: the next run errored at setup (FileExistsError), a kill
+    for classify, of a mutant that survives (A10-01). Runs.run empties the basetemp first."""
+    worker = _worker(tmp_path, {"test_ok.py": "def test_ok(tmp_path):\n    assert tmp_path.is_dir()\n"})
+    worker = Worker(worker.index, worker.copy, unprivileged_python, worker.tmp, worker.log, worker.env)
+    left = worker.tmp / "test_killed_run0" / "locked"
+    left.mkdir(parents=True)
+    (left / "f.txt").write_text("x", encoding="utf-8")
+    left.chmod(0)
+    try:
+        code, output, _ = Runs().run(worker, ["test_ok.py"], 120)
+    finally:
+        if left.exists():
+            left.chmod(0o700)
+    assert mutation.classify(code, output) == (SURVIVED, ""), output
+
+
+def test_the_cleanup_never_loses_the_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The workers' folders and the logs go in run()'s finally: whatever stops their removal is a
+    warning, never an error that loses the report of hours of runs (rmtree raised TypeError on a
+    folder a test left unreadable, A10-01)."""
+    for name in ("w0", "t0", "logs"):
+        (tmp_path / name).mkdir()
+
+    def broken(path: Path) -> None:
+        raise TypeError("open() missing required argument 'flags' (pos 2)")
+
+    monkeypatch.setattr(mutation, "rmtree", broken)
+    mutation._remove_workers(tmp_path)
+    mutation._remove_logs(tmp_path)
+    err = capsys.readouterr().err
+    assert "could not remove the workers' folders" in err and "could not remove" in err.split("workers' folders", 1)[1], err
+
+
+def test_run_uses_the_suites_own_pytest_settings(tmp_path: Path) -> None:
+    """The copy is the project: its pyproject.toml gives its app's tests their settings (a
+    coverage gate: every baseline failed, here an unknown option, exit 4) and so does its root
+    conftest.py. Runs.run passes the suite's own (-c); the test ids and the JUnit classnames
+    junit_seconds reads stay the project's (.pytemplate/tests/...)."""
+    rel = f"{mutation.TESTS}/test_ok.py"
+    worker = _worker(tmp_path, {
+        rel: "def test_ok():\n    assert True\n",
+        "pyproject.toml": '[tool.pytest.ini_options]\naddopts = ["--cov=src", "--cov-fail-under=50"]\npython_files = ["*_check.py"]\n',
+        "conftest.py": 'raise RuntimeError("the project conftest reached the suite")\n',
+    })  # fmt: skip
+    code, output, _ = Runs().run(worker, [rel], 120, junit=tmp_path / "junit.xml")
+    assert mutation.classify(code, output) == (SURVIVED, ""), output
+    assert mutation.junit_seconds(tmp_path / "junit.xml", [rel]).keys() == {rel}
+
+
+@pytest.mark.usefixtures("default_signals")
 def test_a_test_run_that_a_keyboard_interrupt_ends_is_a_kill(tmp_path: Path) -> None:
     """For real: a test that sends itself SIGINT (a mutant switched off the handler it counted
-    on), first or after others. The runs were not stopped: the tests' own interrupt."""
-    worker = _worker(tmp_path, {
+    on), first or after others. The runs were not stopped: the tests' own interrupt. The copy
+    lies deep enough that pytest's "path:line: KeyboardInterrupt" line passes 200 characters
+    whatever TMPDIR is: the detail kept its first 200 (folders) and lost the file and line, and
+    this test failed under a long TMPDIR (A10-04). It stays under Windows' 260 for the file."""
+    deep = tmp_path / ("d" * max(1, 170 - len(str(tmp_path)) - 1))
+    deep.mkdir()
+    worker = _worker(deep, {
         "test_first.py": "import signal\n\ndef test_sig():\n    signal.raise_signal(signal.SIGINT)\n",
         "test_later.py": "def test_ok():\n    pass\n\ndef test_ki():\n    raise KeyboardInterrupt\n",
     })  # fmt: skip
@@ -1380,6 +1642,7 @@ def test_run_all_stops_at_the_first_failure(tmp_path: Path) -> None:
     assert runs.stopped.is_set()
 
 
+@pytest.mark.usefixtures("default_signals")
 def test_run_all_goes_on_as_an_interrupt(tmp_path: Path) -> None:
     """Ctrl+C reaches the main thread only: the runs stop, the workers end (a mutant written into
     a copy gets its module's bytes back), and then the interrupt goes on."""
@@ -1675,6 +1938,35 @@ def test_selftest_exit_code(
     assert (f"logs kept for inspection: {tmp_path / 'logs'}" in err) is report.kept
 
 
+def test_selftest_final_line_names_untested_mutants(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A mutant of a module no test file imports is never run and never judged: the closing line
+    must say so (exit 0: survivors and untested ones are the report, not a failure), never the
+    false 'every mutant judged'; with none untested it says 'every mutant judged'."""
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    monkeypatch.setattr(mutation, "run", lambda *a: _report(tmp_path, [KILLED, SURVIVED, mutation.UNTESTED, mutation.UNTESTED]))
+    assert mutation.selftest(_cfg(), []) == 0
+    err = capsys.readouterr().err
+    assert "2 untested (no test file imports their module)" in err and "every mutant judged" not in err, err
+    monkeypatch.setattr(mutation, "run", lambda *a: _report(tmp_path, [KILLED, SURVIVED]))
+    assert mutation.selftest(_cfg(), []) == 0
+    assert "every mutant judged" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("statuses", "said"), [([], "no mutant judged"), ([mutation.SKIPPED, mutation.SKIPPED], "no mutant judged (2 skipped)")])
+def test_selftest_final_line_says_when_no_mutant_was_judged(
+    statuses: list[str], said: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No runner line changed since --diff's BASE (no mutant), or every mutant skipped: the report
+    said "no mutant to test" and the closing line then claimed "every mutant judged" (A10-08)."""
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    report = _report(tmp_path, statuses)
+    report.note = "no runner line changed since HEAD"
+    monkeypatch.setattr(mutation, "run", lambda *a: report)
+    assert mutation.selftest(_cfg(), []) == 0
+    err = capsys.readouterr().err
+    assert f"selftest --mutation: {said}\n" in err and "every mutant judged" not in err, err
+
+
 def test_selftest_prints_the_report_before_the_error_that_stopped_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1748,7 +2040,11 @@ def test_an_interrupt_during_the_cleanup_waits_for_it(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(mutation, "_run_locked", passes)
     monkeypatch.setattr(mutation, "_remove_workers", remove_workers)
-    report = mutation.run(_cfg(), Options(None, 1, False), "uv", _toy(tmp_path), base)
+    before = signal.signal(signal.SIGINT, signal.default_int_handler)  # as a terminal has it (a background job ignores it)
+    try:
+        report = mutation.run(_cfg(), Options(None, 1, False), "uv", _toy(tmp_path), base)
+    finally:
+        signal.signal(signal.SIGINT, signal.SIG_DFL if before is None else before)
     assert removed == [True] and report.interrupted and report.kept and (base / "logs").is_dir()
 
 
@@ -1772,6 +2068,27 @@ def test_deferred_interrupts_wait_for_the_block_and_put_the_handlers_back(name: 
             signal.raise_signal(number)
             time.sleep(0.01)  # a signal's Python handler runs between two bytecodes
         assert got == [number] and signal.getsignal(number) is mine
+    finally:
+        signal.signal(number, signal.SIG_DFL if before is None else before)
+
+
+@pytest.mark.parametrize("name", ["SIGINT", "SIGTERM", "SIGHUP"])
+def test_deferred_interrupts_leave_an_ignored_signal_ignored(name: str) -> None:
+    """A run started with a signal ignored (SIGHUP under nohup, which uv hands the runner; SIGINT
+    in a background job) goes on through it: recorded during the cleanup or the report, a
+    hang-up made that run `interrupted` (130)."""
+    import signal
+
+    number = getattr(signal, name, None)
+    if number is None:
+        pytest.skip(f"no {name} here")
+    before = signal.signal(number, signal.SIG_IGN)
+    try:
+        with mutation.deferred_interrupts() as got:
+            assert signal.getsignal(number) is signal.SIG_IGN
+            signal.raise_signal(number)
+            time.sleep(0.01)
+        assert got == [] and signal.getsignal(number) is signal.SIG_IGN
     finally:
         signal.signal(number, signal.SIG_DFL if before is None else before)
 
@@ -1890,6 +2207,30 @@ def h(extra):
 """
 
 
+def test_a_module_with_a_bom_is_mutated_like_any_other(cosmic_ray: Any, tmp_path: Path) -> None:
+    """A runner module saved with a UTF-8 BOM (a Windows editor, PowerShell 5.1), which Python
+    imports: list_mutants decoded it with the BOM, and ast refused U+FEFF, so the whole run
+    stopped with "is no Python the runner can read" (A10-05). Its mutants are those of the same
+    module without the BOM (Cosmic Ray, through parso, leaves the BOM out of line 1's columns, as
+    ast does without it), each made and judged alike, the BOM kept."""
+    rel = f"{mutation.SCOPE}/calc.py"
+    body = "x = 1 + 2\n" + PASS_THROUGH
+    found: dict[bool, list[tuple[Any, ...]]] = {}
+    for bom in (False, True):
+        root = tmp_path / ("bom" if bom else "plain")
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_bytes((b"\xef\xbb\xbf" if bom else b"") + body.encode("utf-8"))
+        mutants, originals = mutation.list_mutants(cosmic_ray, root, [rel], None, root / "snapshot")
+        made = []
+        for m in mutants:
+            status, _, code = mutation.make_mutant(m, originals[rel], root / "snapshot", cosmic_ray)
+            assert code is None or code.startswith("\ufeff") == bom, (m, code)
+            made.append((m.operator, m.occurrence, m.line, m.column, m.end_line, m.end_column, status, code and code.removeprefix("\ufeff")))
+        found[bom] = made
+    assert found[True] == found[False] and len(found[False]) > 5
+    assert NOT_RUN in {status for *_, status, _ in found[True]}, found[True]  # mutants to test, not "no valid Python"
+
+
 def test_cosmic_rays_defects_that_the_runner_works_around(cosmic_ray: Any, tmp_path: Path) -> None:
     """Pins of Cosmic Ray 8.7.0's defects (CLAUDE.md 15.1): its ExceptionReplacer turns an exception
     that goes through the handler into a NameError, and fails on a dotted class in a tuple (the
@@ -1993,9 +2334,34 @@ def test_a_real_run_kills_what_the_tests_check_and_finds_what_they_miss(tmp_path
     finally:
         probe.close()
     env = _git_env(tmp_path)
-    toy = _write(tmp_path / "toy", {".pytemplate/runner/__init__.py": "", ".pytemplate/runner/calc.py": CALC, ".pytemplate/tests/test_calc.py": TEST_CALC})
+    toy = _write(tmp_path / "toy", {".pytemplate/runner/__init__.py": "", ".pytemplate/runner/calc.py": CALC, ".pytemplate/tests/test_calc.py": TEST_CALC, **SUITE_INI})
     for name in ("pyproject.toml", "uv.lock", ".python-version", ".gitignore"):
         shutil.copyfile(ROOT / name, toy / name)  # uv sync --locked of the workers: the project's own lock
+    # A project with local libraries (CLAUDE.md 10: ./pyt add ./libs/x, ./wheels/x.whl or ../x)
+    # names them from the project in pyproject.toml and uv.lock. A real run's workers get those
+    # inside it from make_copy (git ls-files) and name those outside it from their own folder: the
+    # toy gets the first, a folder or a file (a local wheel was left out, and every mutant stayed
+    # "not run"), and names the others from its folder. The template's own lock has none.
+    import tomllib
+
+    presets.rebase_local_sources(ROOT, toy)
+    real_root = os.path.realpath(ROOT)
+    for pkg in tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8")).get("package", []):
+        source = pkg.get("source") or {}
+        rel = next((source[k] for k in ("directory", "editable", "virtual", "path") if isinstance(source.get(k), str)), None)
+        if rel is None or os.path.isabs(rel):
+            continue  # a package of an index, or a library named by its absolute path
+        local = os.path.normpath(os.path.join(real_root, rel))
+        if not local.startswith(real_root.rstrip(os.sep) + os.sep):
+            continue  # the project itself, or outside it (named from the toy above)
+        if os.path.isdir(local):
+            shutil.copytree(
+                local, toy / rel, dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(".venv*", ".build", "dist", "__pycache__", ".git", ".flet"),
+            )  # fmt: skip
+        elif os.path.isfile(local):
+            (toy / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local, toy / rel)
     _git(toy, env, "init", "-q")
     _git(toy, env, "add", "-A")
     _git(toy, env, "commit", "-q", "-m", "toy")

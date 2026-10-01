@@ -1,7 +1,9 @@
 """pyz: a single zipapp file that runs on any compatible CPython or PyPy.
 
     myapp.pyz
-      __main__.py             bootstrap (extracts to a cache the first time)
+      __main__.py             bootstrap, first stage: the Python version check, in code any
+                              Python compiles (2.7 too), then _pyz_bootstrap.main()
+      _pyz_bootstrap.py       bootstrap (extracts to a cache the first time)
       _pyz.json               build_id, minimum version, targets, host, deps
       common/app/             your code as .py (works on any interpreter)
       common/lib/             the dependencies, when they are the same everywhere ("pure")
@@ -17,12 +19,14 @@ mypyc does not compile for other OSes: there the .py is used (slower, same resul
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import shutil
 import stat
 import tempfile
 import zipfile
+import zlib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -35,6 +39,7 @@ from ..ui import PytError
 from . import common
 
 INFO_KEYS = ("name", "build_id", "min_python", "targets", "pure")
+BOOTSTRAP = ("__main__.py", "_pyz_bootstrap.py")  # templates/pyz/, at the root of the archive
 
 
 def _build_id(root: Path) -> str:
@@ -57,22 +62,27 @@ def _write_archive(root: Path, out: Path, modes: Mapping[str, int] | None = None
     OS's files say.
     """
     tmp = out.with_name(out.name + ".tmp")
-    with tmp.open("wb") as fd:
-        fd.write(b"#!/usr/bin/env python3\n")
-        with zipfile.ZipFile(fd, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as z:
-            for path in sorted(root.rglob("*")):
-                if not path.is_file():
-                    continue
-                name = path.relative_to(root).as_posix()
-                if modes and name in modes:
-                    info = zipfile.ZipInfo.from_file(path, name, strict_timestamps=False)
-                    info.create_system = 3
-                    info.external_attr = (stat.S_IFREG | modes[name]) << 16
-                    info.compress_type = zipfile.ZIP_DEFLATED
-                    with path.open("rb") as src, z.open(info, "w") as dst:
-                        shutil.copyfileobj(src, dst)
-                else:
-                    z.write(path, name)
+    try:
+        with tmp.open("wb") as fd:
+            fd.write(b"#!/usr/bin/env python3\n")
+            with zipfile.ZipFile(fd, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as z:
+                for path in sorted(root.rglob("*")):
+                    if not path.is_file():
+                        continue
+                    name = path.relative_to(root).as_posix()
+                    if modes and name in modes:
+                        info = zipfile.ZipInfo.from_file(path, name, strict_timestamps=False)
+                        info.create_system = 3
+                        info.external_attr = (stat.S_IFREG | modes[name]) << 16
+                        info.compress_type = zipfile.ZIP_DEFLATED
+                        with path.open("rb") as src, z.open(info, "w") as dst:
+                            shutil.copyfileobj(src, dst)
+                    else:
+                        z.write(path, name)
+    except BaseException:  # never a half-written .tmp left next to the output
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     try:
         tmp.replace(out)
     except OSError as e:  # Windows: the previous .pyz is in use
@@ -162,9 +172,9 @@ def build(req: BuildRequest) -> Path:
     varies = native or any(skipped.values()) or len({common.installed(s) for s in sites.values()}) > 1
     if varies:
         for key, site in sites.items():
-            shutil.copytree(site, root / "targets" / key / "lib")
+            common.copy_tree(site, root / "targets" / key / "lib")  # a full disk: one error line, no traceback
     else:
-        shutil.copytree(sites[host.key], root / "common" / "lib")
+        common.copy_tree(sites[host.key], root / "common" / "lib")
 
     if req.compiled:
         _copy_extensions(req.app_dir, root / "targets" / host.key / "app")
@@ -182,9 +192,11 @@ def build(req: BuildRequest) -> Path:
         "host": host.key,  # pyz-merge: the platform a pure part's common/lib was resolved for
         "deps": common.requirements_digest(requirements),  # pyz-merge: parts of one build lock the same set
         "abi": _target_abis(root, target_keys),  # the bootstrap: a key alone misses PyPy 8, 3.14t
+        "floor": _target_floors(root, target_keys),  # ...and a musl Python, an older glibc or macOS
     }
     (root / "_pyz.json").write_text(json.dumps(info, indent=2), encoding="utf-8", newline="\n")
-    shutil.copy2(TEMPLATES / "pyz" / "__main__.py", root / "__main__.py")
+    for name in BOOTSTRAP:
+        shutil.copy2(TEMPLATES / "pyz" / name, root / name)
     if any(p.name.endswith(EXT_SUFFIXES) for p in (root / "common").rglob("*")):
         raise PytError("bug: the pyz has compiled extensions in common/")
 
@@ -213,11 +225,28 @@ def build(req: BuildRequest) -> Path:
 
 
 def _target_abis(root: Path, keys: list[str]) -> dict[str, list[str]]:
-    """_pyz.json "abi": the extension ABIs of each target's binaries (lib/ and the mypyc overlay),
-    for the keys that hold any. The bootstrap takes a target only when its interpreter has one of
-    them: a PyPy 8 (pp80) took the pp311 target of a PyPy 7.3 build (pp73) and died in an
-    ImportError, where a missing build gives a clear message."""
-    return {key: abis for key in keys if (abis := common.extension_abis(root / "targets" / key))}
+    """_pyz.json "abi": the extension ABIs of each target's binaries (lib/ and the mypyc overlay:
+    their file names, and the WHEEL tags of lib/, where an abi3 wheel stands for the key's own
+    CPython, common.wheel_abis), for the keys that hold any. The bootstrap takes a target only when
+    its interpreter has one of them: a PyPy 8 (pp80) took the pp311 target of a PyPy 7.3 build
+    (pp73), and a free-threaded 3.14t the target of an abi3-only one, and died in an ImportError or
+    a segmentation fault, where a missing build gives a clear message."""
+    out: dict[str, list[str]] = {}
+    for key in keys:
+        folder = root / "targets" / key
+        abis = sorted({*common.extension_abis(folder), *common.wheel_abis(folder / "lib", key)})
+        if abis:
+            out[key] = abis
+    return out
+
+
+def _target_floors(root: Path, keys: list[str]) -> dict[str, str]:
+    """_pyz.json "floor": what the wheels of each target's lib/ need of the machine (the C library
+    and its oldest version, the oldest macOS: common.platform_floor), for the keys whose wheels
+    need anything. The bootstrap takes a target only where they load: a musl Python (Alpine) took
+    the target of a glibc build, and a glibc older than its manylinux wheels, and died in an
+    ImportError of a dependency, where a missing build gives a clear message."""
+    return {key: floor for key in keys if (floor := common.platform_floor(root / "targets" / key / "lib"))}
 
 
 # --- pyz-merge ------------------------------------------------------------------------------------
@@ -259,12 +288,32 @@ def _part_host(part: Path, info: dict[str, Any]) -> str:
     )
 
 
-def _app_digest(archive: zipfile.ZipFile) -> str:
+def _app_digest(archive: zipfile.ZipFile, part: Path) -> str:
     """The app code of a part (common/app), line endings normalised: a Windows checkout is CRLF."""
     h = hashlib.sha256()
     for name in sorted(n for n in archive.namelist() if n.startswith("common/app/") and not n.endswith("/")):
-        h.update(name.encode() + b"\0" + archive.read(name).replace(b"\r\n", b"\n") + b"\0")
+        h.update(name.encode() + b"\0" + _member(archive, name, part).replace(b"\r\n", b"\n") + b"\0")
     return h.hexdigest()
+
+
+def _member(archive: zipfile.ZipFile, item: zipfile.ZipInfo | str, part: Path) -> bytes:
+    """A member of a part, whole: a damaged part (a CI artifact cut short or altered: a bad CRC, a
+    broken deflate stream) is one error naming it, never an internal-error traceback."""
+    try:
+        return archive.read(item)
+    except (zipfile.BadZipFile, zlib.error, EOFError, OSError) as e:
+        name = item if isinstance(item, str) else item.filename
+        raise PytError(f"pyz-merge: {part} is damaged ({name}: {e}): download or build it again", 2) from None
+
+
+def _cannot_write(path: Path, e: OSError) -> Exception:
+    """--out is the user's (another user's folder, a read-only one, /sys): one error line, never an
+    internal-error traceback. A full disk stays itself: cli.main names the file (exit 1)."""
+    from ..cli import NO_ROOM  # lazily: the runner's entry point
+
+    if e.errno in NO_ROOM:
+        return e
+    return PytError(f"pyz-merge: cannot write {path}: {e.strerror or e}", 2)
 
 
 def wrapper_path(out: Path) -> Path:
@@ -308,9 +357,9 @@ def check_parts(parts: list[Path], out: Path) -> list[dict[str, Any]]:
 def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
     """Merge several .pyz files of the same project (one per OS, e.g. from CI) into a multi-platform one.
 
-    common/app and __main__.py come from the first part (every part must carry the same app);
-    targets/ from all of them, each targets/<key>/lib from ONE part (the one built on that
-    platform when there is one) and each compiled overlay targets/<key>/app from exactly one.
+    common/app and the bootstrap (BOOTSTRAP) come from the first part (every part must carry the
+    same app); targets/ from all of them, each targets/<key>/lib from ONE part (the one built on
+    that platform when there is one) and each compiled overlay targets/<key>/app from exactly one.
     When every part is pure the result is pure (common/lib of the first part). Otherwise a pure
     part's common/lib moves to targets/<its host>/lib and no common/lib is kept: one platform's
     dependencies must not be extracted on every other one. The <stem>.cmd wrapper for Windows
@@ -342,7 +391,7 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
         modes: dict[str, int] = {}  # the parts' executables keep their mode (see _write_archive)
         for n, part in enumerate(parts):
             with zipfile.ZipFile(part) as archive:
-                digest = _app_digest(archive)
+                digest = _app_digest(archive, part)
                 if n == 0:
                     app_digest = digest
                 elif digest != app_digest:
@@ -373,7 +422,7 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                             )
                         name = member
                     elif n == 0:
-                        name = member  # common/app and __main__.py from the first part
+                        name = member  # common/app and the bootstrap from the first part
                     else:
                         if member.startswith("common/app/") and _executable(item):
                             # the same file as the first part's, which may come from Windows (no modes)
@@ -381,16 +430,31 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                         continue
                     target = root / name
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(archive.read(item))
+                    target.write_bytes(_member(archive, item, part))
                     if _executable(item):
                         modes[name] = stat.S_IMODE(item.external_attr >> 16)
         targets = sorted(p.name for p in (root / "targets").iterdir()) if (root / "targets").is_dir() else []
         merged = {k: v for k, v in infos[0].items() if k != "host"}
-        merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root), "merged": True, "abi": _target_abis(root, targets)})
+        merged.update(
+            {
+                "targets": targets,
+                "pure": pure,
+                "build_id": _build_id(root),
+                "merged": True,
+                "abi": _target_abis(root, targets),
+                "floor": _target_floors(root, targets),
+            }
+        )
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        _write_archive(root, out, modes)
-    wrapper_path(out).write_bytes(wrapper)
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            _write_archive(root, out, modes)
+        except OSError as e:
+            raise _cannot_write(out, e) from None
+    try:
+        wrapper_path(out).write_bytes(wrapper)
+    except OSError as e:
+        raise _cannot_write(wrapper_path(out), e) from None
     if pure:  # targets/ holds only mypyc overlays: the .py runs everywhere else
         detail = f"pure: works with Python >= {min_python} on any OS" + (f"; compiled code for {', '.join(targets)}" if targets else "")
     else:

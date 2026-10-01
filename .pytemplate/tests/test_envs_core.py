@@ -10,6 +10,7 @@ configuration) and this Python for interpreter_info.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import stat
@@ -94,6 +95,17 @@ def test_env_vars_pin_the_environment_and_the_interpreter_together(which: str, m
     for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):
         assert key not in e
     assert envs.env_vars(env, {"FLET_WEB": "1"})["FLET_WEB"] == "1"  # extra variables go on top
+
+
+@pytest.mark.parametrize(("pin", "minor"), [("pypy@3.11.15", "3.11"), ("pypy@3.12.14", "3.12")])
+def test_an_unsupported_pypy_names_the_python_of_its_pin(pin: str, minor: str) -> None:
+    """The hint said "lowers the syntax to Python 3.11" whatever python.pypy pins: a project on
+    pypy@3.12.x (README's plan once raylib ships PyPy 8 wheels) is prechecked as 3.12."""
+    cfg = make({"python": {"pypy": pin}})
+    with pytest.raises(PytError) as e:
+        envs.ensure_supported(cfg, "pypy")
+    assert f"./pyt mode --supports +pypy  (lowers the syntax to Python {minor} and re-locks uv.lock)" in str(e.value)
+    envs.ensure_supported(make({"backend": {"supported": ["cpython", "pypy"]}}), "pypy")  # supported: no error
 
 
 @pytest.mark.parametrize("suffix", ["", "-wsl"])
@@ -492,8 +504,10 @@ def test_quiet_keeps_the_output_of_the_uv_commands_the_user_drives(tmp_path: Pat
 
 def test_a_polluted_uv_environment_still_selects_the_project_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Real uv, offline, in this project's .venv: an exported UV_PROJECT_ENVIRONMENT, UV_PYTHON
-    or VIRTUAL_ENV (another project, an activated venv) never reaches uv."""
-    tool = envs.tool_env(make())
+    or VIRTUAL_ENV (another project, an activated venv) never reaches uv. The environment is the
+    project's own (its python.cpython): the template's default 3.14 made uv replace the .venv of a
+    project on another minor with an empty one under the running suite."""
+    tool = envs.tool_env(config.load(set()))
     if not tool.python.is_file():
         pytest.skip("no .venv (./pyt setup)")
     try:
@@ -988,6 +1002,122 @@ def test_ensure_lock_refuses_a_relock_the_environment_makes_a_no_op(monkeypatch:
     cmd_env.ensure_lock(make())
 
 
+def _true(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on", "y", "t")
+
+
+class OldUv(Calls):
+    """Fakes proc.run as uv 0.10.12 to 0.12.8 answer (measured with each of 0.10.12, 0.11.0,
+    0.12.0, 0.12.8; 0.12.9 changed it): under UV_FROZEN `uv lock --check` only checks the lock's
+    validity and exits 0, whatever pyproject.toml says; `--locked` next to UV_FROZEN and
+    `--frozen` next to UV_LOCKED are refused, exit 2. `stale`: uv.lock lags pyproject.toml."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, stale: bool) -> None:
+        super().__init__(monkeypatch)
+        self.stale = stale
+
+    def _run(self, argv: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        if args[1:] == ["--version"]:
+            return done(args, 0, "uv 0.12.8 (x86_64-unknown-linux-gnu)\n")
+        self.argvs.append(args)
+        self.kwargs.append(kw)
+        env = kw.get("env") or {}
+        frozen, locked = _true(env.get("UV_FROZEN")), _true(env.get("UV_LOCKED"))
+        words = [a for a in args[1:] if a != "--quiet"]
+        if "--locked" in words and frozen:
+            r = done(args, 2, err="error: the argument `--locked` cannot be used with `UV_FROZEN` (environment variable)\n")
+        elif "--frozen" in words and locked:
+            r = done(args, 2, err="error: the argument `UV_LOCKED` (environment variable) cannot be used with `--frozen`\n")
+        elif words[:2] == ["lock", "--check"] and frozen:
+            r = done(args, 0, err="warning: The lockfile at `uv.lock` was only checked for validity, not whether it is up-to-date, because `UV_FROZEN=1` was provided; use `--check` instead\n")
+        elif self.stale and (words[:2] == ["lock", "--check"] or (words[:1] in (["run"], ["sync"]) and "--locked" in words)):
+            r = done(args, 1, err="error: The lockfile at `uv.lock` needs to be updated, but `--check` was provided.\n")
+        else:
+            r = done(args)
+        if kw.get("check", True) and r.returncode != 0:
+            raise proc.CommandFailed(args, r.returncode)
+        return r
+
+
+@pytest.mark.parametrize("name", ["UV_FROZEN", "UV_LOCKED"])
+def test_the_runners_own_uv_calls_never_get_the_users_lock_mode(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """They pass --locked, --frozen or --check themselves: the user's UV_FROZEN and UV_LOCKED
+    reach only the uv commands the user drives with their own arguments."""
+    monkeypatch.setenv(name, "1")
+    tool = envs.tool_env(make())
+    assert name not in envs.env_vars(tool) and name not in envs.without_lock_mode(proc.base_env())
+    assert envs.env_vars(tool, keep_lock_mode=True)[name] == "1"
+    assert proc.base_env()[name] == "1"  # what is no uv call of the runner's (a task's program) keeps it
+
+
+def test_a_stale_lock_is_stale_under_the_users_uv_frozen_with_every_uv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With uv 0.10.12 to 0.12.8, `uv lock --check` under the user's UV_FROZEN passed a stale
+    uv.lock: the hook let a commit through with a dependency uv.lock lacks, doctor said "uv.lock up
+    to date", and ensure_lock neither re-locked nor made the refusal its docstring promises."""
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    monkeypatch.setattr(render, "write_pyproject", lambda cfg: False)
+    monkeypatch.setenv("UV_FROZEN", "1")
+    uv = OldUv(monkeypatch, stale=True)
+    code, out = hooks.uv_lock_check(make())
+    assert code == 1 and "needs to be updated" in out
+    with pytest.raises(PytError, match="UV_FROZEN is set") as e:
+        cmd_env.ensure_lock(make())  # the refusal, before any `uv lock`
+    assert e.value.code == 2 and all(a[1:] != ["lock"] for a in uv.argvs)
+    assert all("UV_FROZEN" not in kw["env"] for kw in uv.kwargs)
+
+
+@pytest.mark.parametrize("name", ["UV_FROZEN", "UV_LOCKED"])
+def test_the_runners_locked_and_frozen_calls_work_under_the_users_lock_mode(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """uv 0.10.12 to 0.12.8 refused `--locked` next to the user's UV_FROZEN and `--frozen` next to
+    UV_LOCKED (exit 2): run, test, check, sync, setup and the hook's ruff failed with every
+    command."""
+    monkeypatch.setenv(name, "1")
+    uv = OldUv(monkeypatch, stale=False)
+    tool = envs.tool_env(make())
+    assert envs.uv_run(tool, ["ruff", "--version"]).returncode == 0
+    envs.sync(tool)
+    assert hooks.ruff(make(), ["check"], ["src/x.py"])[0] == 0
+    assert len(uv.argvs) == 3 and all(name not in kw["env"] for kw in uv.kwargs)
+
+
+def test_the_uv_commands_the_user_drives_keep_the_users_lock_mode(lock_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`./pyt lock ARGS` and the `uv add|remove` of add/remove answer the user's own arguments:
+    the user's lock mode reaches them (under UV_FROZEN uv lock writes nothing, and lock puts
+    pyproject.toml back; add and remove refuse UV_FROZEN themselves, which uv refuses next to their
+    --no-sync, and UV_LOCKED reaches them); the sync after add is the runner's own."""
+    monkeypatch.setenv("UV_FROZEN", "1")
+    uv = OldUv(monkeypatch, stale=False)
+    monkeypatch.setattr(envs, "left_out", lambda env: [])
+    cmd_env.cmd_lock(make(), [])
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+    monkeypatch.delenv("UV_FROZEN")
+    monkeypatch.setenv("UV_LOCKED", "1")
+    cmd_env.cmd_add(make(), ["x"])
+    sent = {a[1]: any(name in kw["env"] for name in cmd_env.LOCK_READ_ONLY_ENV) for a, kw in zip(uv.argvs, uv.kwargs, strict=True)}
+    assert sent == {"lock": True, "add": True, "sync": False}
+
+
+@pytest.mark.parametrize("verb", ["add", "remove"])
+def test_add_and_remove_refuse_the_users_uv_frozen_before_uv_runs(monkeypatch: pytest.MonkeyPatch, verb: str) -> None:
+    """uv refuses the --no-sync of add and remove next to the user's UV_FROZEN: `./pyt remove
+    rich` said "the argument `--no-sync` cannot be used with `UV_FROZEN`", an argument the user
+    never typed. Refused before uv runs, naming the variable and the way out, as mode, apply and
+    rename refuse a re-lock under it; in a dry run too."""
+    calls = fake_uv(monkeypatch)
+    monkeypatch.setenv("UV_FROZEN", "1")
+    for dry in (False, True):
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        with pytest.raises(PytError, match=r"UV_FROZEN is set.*unset UV_FROZEN") as e:
+            getattr(cmd_env, f"cmd_{verb}")(make(), ["x"])
+        assert e.value.code == 2 and f"./pyt {verb} re-locks it" in str(e.value)
+    assert calls == []
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    monkeypatch.setenv("UV_FROZEN", "0")  # a false value is no lock mode
+    getattr(cmd_env, f"cmd_{verb}")(make(), ["x"])
+    assert calls[0] == [verb, "--no-sync", "x"]
+
+
 # --- clean ---------------------------------------------------------------------------------------------
 
 
@@ -1051,6 +1181,56 @@ def test_clean_reports_a_folder_it_could_not_remove(tree: Path, monkeypatch: pyt
     err = capsys.readouterr().err
     assert "error: could not remove .venv completely" in err and "Close" in err and "./pyt clean --envs" in err
     assert not (tree / ".venv-pypy").exists() and not (tree / "dist").exists()  # the others still go
+
+
+@pytest.mark.parametrize("code", [errno.EBUSY, errno.EACCES], ids=["mount point", "in use"])
+def test_clean_empties_a_folder_something_is_mounted_on(tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], code: int) -> None:
+    """A .venv or dist/ that is a mount point (a dev container's named volume) is emptied, but no
+    rmdir removes the folder itself: clean said "could not remove dist completely: a file in it is
+    in use", exit 1, at every run. rmdir says EBUSY for a mount point (Linux, macOS); Windows says
+    EACCES for a folder in use, which stays an error. (The kernel's own answer:
+    test_clean_empties_a_real_bind_mount.)"""
+    real_rmtree, real_rmdir = shutil.rmtree, os.rmdir
+    dist = tree / "dist"
+
+    def mounted(path: Any, ignore_errors: bool = False, **kw: Any) -> None:
+        if Path(path) != dist:
+            real_rmtree(path, ignore_errors=ignore_errors)
+            return
+        for entry in dist.iterdir():  # what a mount point holds goes, the folder stays
+            real_rmtree(entry)
+
+    def rmdir(path: Any, *args: Any, **kw: Any) -> None:
+        if Path(path) == dist:
+            raise OSError(code, os.strerror(code), str(path))
+        real_rmdir(path, *args, **kw)
+
+    monkeypatch.setattr(cmd_env.shutil, "rmtree", mounted)
+    monkeypatch.setattr(cmd_env.os, "rmdir", rmdir)
+    rc = cmd_env.cmd_clean(make(), [])
+    err = capsys.readouterr().err
+    assert dist.is_dir() and not any(dist.iterdir()) and not (tree / ".build").exists()
+    if code == errno.EBUSY:
+        assert rc == 0 and "dist is a mount point: emptied (the folder itself stays)" in err and "error" not in err, err
+    else:
+        assert rc == 1 and "error: could not remove dist completely" in err, err
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="bind mounts: Linux")
+def test_clean_empties_a_real_bind_mount(tree: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The kernel's own answer for a mount point (EBUSY), where this user may bind-mount (root)."""
+    volume = tmp_path / "volume"
+    (volume / "sub").mkdir(parents=True)
+    (volume / "sub" / "a.txt").write_text("x\n", encoding="utf-8")
+    r = subprocess.run(["mount", "--bind", str(volume), str(tree / "dist")], capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        pytest.skip(f"this user cannot bind-mount: {r.stderr.strip()}")
+    try:
+        assert cmd_env.cmd_clean(make(), []) == 0
+        assert "dist is a mount point: emptied" in capsys.readouterr().err
+        assert (tree / "dist").is_dir() and list(volume.iterdir()) == []
+    finally:
+        subprocess.run(["umount", str(tree / "dist")], check=False)
 
 
 def test_clean_retries_read_only_contents(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1466,6 +1646,11 @@ def test_doctor_says_where_python_cpython_is(doctor: Doctor) -> None:
     assert doctor.line("environments not checked")[0] is None and doctor.line("uv.lock not checked")[0] is None
     assert not [line for line in doctor.lines if line[1].startswith(("CPython 3.14.7 in", "PyPy", "C compiler", "uv.lock up to date"))]
     assert doctor.reached == ["apply", "shells", "hooks", "nvim", "install"] * 3  # the other checks still run
+    doctor.lines.clear()
+    doctor.render_result = ([".python-version", ".mypy.ini"], [])  # python.cpython edited: render writes nothing
+    assert cmd_env.cmd_doctor(make(PYPY), []) == 1
+    passed, _label, hint = doctor.line("generated files up to date")
+    assert passed is False and "They update once python.cpython is fixed (above), with any command" in hint
 
 
 def test_doctor_missing_environment(doctor: Doctor, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1511,6 +1696,23 @@ def test_doctor_counts_each_generated_file_problem_once(doctor: Doctor, changed:
         assert all("any command" not in hint for _, _, hint in doctor.problems())
     else:
         assert ".mypy.ini" in doctor.line("generated files up to date")[2]
+
+
+def test_doctor_says_basedpyright_cannot_check_a_folder_pyright_reads_as_a_pattern(doctor: Doctor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """./pyt check refuses basedpyright in a project folder whose path holds '*' or '?' (CLAUDE.md
+    15.1: pyright found no file there, and check passed): doctor names it with the ways out, only
+    when basedpyright is the editor."""
+    from runner import cmd_dev
+
+    monkeypatch.setattr(cmd_dev, "ROOT", tmp_path / "q?x" / "proj")
+    assert cmd_env.cmd_doctor(make(), []) == 0  # the Pylance editor: ./pyt check runs no basedpyright
+    assert cmd_env.cmd_doctor(make({"typing": {"editor": "basedpyright"}}), []) == 1
+    ((_passed, label, hint),) = doctor.problems()
+    assert "basedpyright: the project's folder holds '?'" in label and "a wildcard" in label
+    assert "Move the project" in hint and "./pyt mode --editor pylance" in hint
+    doctor.lines.clear()
+    monkeypatch.setattr(cmd_dev, "ROOT", tmp_path / "plain" / "proj")
+    assert cmd_env.cmd_doctor(make({"typing": {"editor": "basedpyright"}}), []) == 0 and doctor.problems() == []
 
 
 def test_doctor_flags_an_old_uv(doctor: Doctor, capsys: pytest.CaptureFixture[str]) -> None:

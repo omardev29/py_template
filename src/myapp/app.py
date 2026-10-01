@@ -8,9 +8,9 @@ import platform
 import time
 
 from rich.console import Console
-from rich.table import Table
+from rich.table import Column, Table
 
-from myapp.core import bench
+from .core import bench
 
 
 def _backend() -> str:
@@ -27,10 +27,12 @@ def main() -> int:
     number, steps = bench.collatz_max(bench.COLLATZ_LIMIT)
     t2 = time.perf_counter()
 
-    table = Table(title=f"myapp: {_backend()}")
-    table.add_column("Task")
-    table.add_column("Result", justify="right")
-    table.add_column("Time", justify="right")
+    table = Table(
+        "Task",
+        Column("Result", justify="right"),
+        Column("Time", justify="right"),
+        title=f"myapp: {_backend()}",
+    )
     table.add_row(f"Primes <= {bench.SIEVE_LIMIT:,}", f"{primes:,}", f"{t1 - t0:.3f} s")
     table.add_row(
         f"Longest Collatz < {bench.COLLATZ_LIMIT:,}",

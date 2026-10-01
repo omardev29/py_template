@@ -7,14 +7,20 @@ __pycache__/
 .pytest_cache/
 .hypothesis/
 
-# Environments (one per backend: .venv, .venv-pypy, and their -wsl variants)
+# Environments (one per backend: .venv, .venv-pypy, and their -wsl variants): their folders
+# anywhere, and at the root also a link to one on another disk, which ./pyt clean supports (git
+# reads a pattern ending in / as folders only: a committed link broke every other clone); a
+# file such as .venvrc stays the project's. The outputs below have no trailing slash either
 .venv*/
+/.venv
+/.venv-*
 
-# ./pyt outputs (mypyc stage, PyInstaller, runtimes, reports) and artifacts
-.build/
-dist/
-build/
-*.spec
+# ./pyt outputs (mypyc stage, PyInstaller, runtimes, reports) and artifacts: the root's own
+# only (a leading /), since src/<pkg>/build/ or tests/dist/ is source like any other
+/.build
+/dist
+/build
+/*.spec
 
 # Compiled extensions: mypyc's live in .build/ (one in src/ is a stray build); a vendored
 # native .so/.pyd in src/ must be added with `git add -f` (builds ship it; a pure pyz cannot)

@@ -36,6 +36,7 @@ from runner.project import BUILD, DIST, ROOT, SRC  # noqa: E402
 from runner.ui import PytError  # noqa: E402
 
 PYT_PY = TEMPLATE_DIR / "pyt.py"
+TEMPLATE_REPO = (TEMPLATE_DIR / "template-repo").is_file()  # the shipped content is pinned here only
 IS_WINDOWS = os.name == "nt"
 posix = pytest.mark.skipif(IS_WINDOWS, reason="POSIX signals, pipes and exec bits")
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None and not os.environ.get("UV"), reason="uv not found")
@@ -296,6 +297,30 @@ def test_render_runs_before_builtins_and_tasks_unless_disabled(monkeypatch: pyte
     assert calls == [("lint", ["--fix"]), ("t", ["x"]), ("clean", []), ("lint", []), ("t", [])]
 
 
+@pytest.mark.parametrize("dry", [True, False], ids=["dry-run", "real"])
+def test_a_tasks_deps_print_each_render_line_once(dry: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """dispatch renders before a task and again before each builtin among its deps (a dep such as
+    `mode` may change pytemplate.toml): the dry run's "render: would update" line and the warnings
+    came once more per builtin dep, three times for every preset's `ci`. Each comes once per task
+    now; a real write is still reported each time it happens, and a single command keeps them."""
+    cfg = make({"tasks": {"two": {"deps": ["lint", "check all"]}}})
+    monkeypatch.setattr(config, "load", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr(render, "apply", lambda *_a, **_kw: (["x.json"], ["y.json"]))
+    monkeypatch.setattr(render, "pyproject_outdated", lambda _cfg: True)
+    monkeypatch.setattr(proc, "DRY_RUN", dry)
+    monkeypatch.setattr(cmd_dev, "cmd_lint", lambda _cfg, _args: 0)
+    monkeypatch.setattr(cmd_dev, "cmd_check", lambda _cfg, _args: 0)
+    assert cli.dispatch(["two"]) == 0
+    err = capsys.readouterr().err
+    assert err.count("render: would update x.json") == (1 if dry else 0)
+    assert err.count("render: updated x.json") == (0 if dry else 3)  # the task's render and each dep's
+    assert err.count("not overwriting hand-edited generated files: y.json") == 1
+    assert err.count("pyproject.toml does not match pytemplate.toml") == 1
+    assert cli.dispatch(["lint"]) == 0 and cli.dispatch(["lint"]) == 0  # a single command: every time
+    err = capsys.readouterr().err
+    assert err.count("pyproject.toml does not match pytemplate.toml") == 2
+
+
 def test_a_projects_task_keeps_a_name_a_later_builtin_took(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """Rule 1.11: a [tasks.install] of a project made before `pyt install` existed stopped every
     command. There the task runs for `./pyt install` (-h goes to its program), `help install`
@@ -525,6 +550,17 @@ def test_every_command_rejects_an_unknown_argument(name: str, bogus: str, monkey
     args, _ = MINIMAL.get(name, ([], False))
     monkeypatch.setattr(proc, "DRY_RUN", True)  # in case the check is broken: nothing is written
     monkeypatch.setitem(cli._OPTS, "no_render", True)
+    load = config.load
+
+    def builtin_only(builtin_commands: set[str] | None = None) -> Config:
+        """The project's config without a [tasks] entry named like the command: one may have the
+        name of a builtin added after the contract (install, uninstall: CLAUDE.md 5.2), and
+        dispatch runs that task there, with any argument. The builtin is what this test checks."""
+        cfg = load(builtin_commands)
+        cfg.tasks.pop(name, None)
+        return cfg
+
+    monkeypatch.setattr(config, "load", builtin_only)
     code = cli.main([name, *args, bogus])
     err = capsys.readouterr().err
     assert code == 2, err
@@ -646,6 +682,49 @@ def test_a_script_whose_interpreter_is_missing_names_it(tmp_path: Path) -> None:
         proc.run(["no-such-tool"], env=env, echo=False)
 
 
+@posix
+def test_a_script_with_windows_line_endings_says_so(tmp_path: Path) -> None:
+    """A script checked out with CRLF (a Windows checkout used from WSL): exec looks for the
+    interpreter "/bin/sh\\r", and the message named /bin/sh, which exists."""
+    (tmp_path / "tools").mkdir()
+    gen = tmp_path / "tools" / "gen"
+    gen.write_bytes(b"#!/bin/sh\r\necho generated\r\n")
+    gen.chmod(0o755)
+    with pytest.raises(PytError) as e:
+        proc.run(["tools/gen"], cwd=tmp_path, echo=False)
+    assert e.value.code == 3
+    assert "carriage return (Windows line endings)" in str(e.value) and "LF line endings" in str(e.value), str(e.value)
+    assert "was not found: /bin/sh" not in str(e.value)
+
+
+@posix
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_the_crlf_hint_names_a_gitattributes_line_git_applies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A task's program reaches proc.run absolute (run_task anchors tools/crlf to the task's
+    cwd), and the hint said to add `/home/.../tools/crlf text eol=lf` to .gitattributes, a pattern
+    git never matches (patterns are relative to their .gitattributes). It names the file
+    relative to the project; git applies the line it suggests. The real proc.run: the script
+    fails to start."""
+    monkeypatch.setattr(project, "ROOT", tmp_path)
+    monkeypatch.setattr(tasks, "ROOT", tmp_path)
+    (tmp_path / "tools").mkdir()
+    script = tmp_path / "tools" / "crlf"
+    script.write_bytes(b"#!/bin/sh\r\necho crlf\r\n")
+    script.chmod(0o755)
+    cfg = make({"tasks": {"t5": {"cmd": ["tools/crlf"], "uv": False}}})
+    with pytest.raises(PytError) as e:
+        tasks.run_task(cfg, "t5", [], lambda argv: 0)
+    message = str(e.value)
+    assert e.value.code == 3 and message.startswith("cannot run tools/crlf: its #! line ends with a carriage return"), message
+    line = re.search(r"a line such as `([^`]+)` in \.gitattributes", message)
+    assert line is not None and line.group(1) == "tools/crlf text eol=lf", message
+    git = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "no-gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, env=git, check=True)
+    (tmp_path / ".gitattributes").write_text(line.group(1) + "\n", encoding="utf-8")
+    attrs = subprocess.run(["git", "check-attr", "eol", "--", "tools/crlf"], cwd=tmp_path, env=git, capture_output=True, text=True, check=True).stdout
+    assert attrs.strip() == "tools/crlf: eol: lf", attrs
+
+
 @pytest.mark.parametrize(("name", "message"), [("missing", "folder not found"), ("a-file", "not a folder")])
 def test_a_bad_working_folder_is_named(name: str, message: str, tmp_path: Path) -> None:
     (tmp_path / "a-file").write_text("x", encoding="utf-8")
@@ -654,6 +733,97 @@ def test_a_bad_working_folder_is_named(name: str, message: str, tmp_path: Path) 
     assert e.value.code == 2
     assert message in str(e.value) and name in str(e.value)
     assert "program not found" not in str(e.value)
+
+
+@pytest.mark.parametrize("windows", [False, True], ids=["posix", "windows"])
+def test_a_working_folder_it_cannot_enter_is_named(windows: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A working folder the child cannot enter (not searchable: another user's, mode 000): the
+    message blamed the program, "cannot run ls: Permission denied  (is it executable? a script
+    needs a #! line)". Popen raises what CPython raises there: on POSIX an OSError whose filename
+    is the cwd (the child's chdir failed), on Windows ERROR_DIRECTORY (267)."""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+
+    class DirectoryError(NotADirectoryError):
+        winerror = 267  # ERROR_DIRECTORY (Windows sets winerror; POSIX has no such attribute)
+
+    def popen(args: list[str], **kwargs: Any) -> Any:
+        if windows:
+            raise DirectoryError(errno.ENOTDIR, "The directory name is invalid")
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), kwargs["cwd"])
+
+    monkeypatch.setattr(proc, "IS_WINDOWS", windows)
+    monkeypatch.setattr(proc.subprocess, "Popen", popen)
+    # the lookup of a bare name on Windows: test_a_bare_program_never_runs_from_the_callers_folder_on_windows
+    monkeypatch.setattr(proc, "program", lambda name: name)
+    with pytest.raises(PytError) as e:
+        proc.run(["ls"], cwd=locked, echo=False)
+    assert e.value.code == 2
+    assert str(e.value).startswith(f"cannot enter the working folder {proc.rel(locked)}: "), str(e.value)
+    assert str(e.value).endswith("(the working folder of ls)") and "#! line" not in str(e.value)
+
+
+def test_folder_problem_answers_for_every_path(tmp_path: Path) -> None:
+    (tmp_path / "a-file").write_text("x", encoding="utf-8")
+    assert proc.folder_problem(tmp_path, "X") is None
+    assert proc.folder_problem(tmp_path / "missing", "X") == "folder not found: X"
+    assert proc.folder_problem(tmp_path / "a-file", "X") == "not a folder: X"
+    assert proc.folder_problem(tmp_path / "a-file" / "x", "X") == "folder not found: X"
+    assert (proc.folder_problem(tmp_path / "a\0b", "X") or "").startswith("cannot access X: ")  # a NUL: ValueError
+
+
+def _below_a_locked_folder(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    """os.stat(path) fails as it does for a path below a folder this user may not search (another
+    user's, mode 000): EACCES. The tests may run as root, which searches any folder."""
+    real = os.stat
+
+    def fake(p: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if not isinstance(p, int) and os.fspath(p) == os.fspath(path):  # an int is a file descriptor
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), os.fspath(p))
+        return real(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", fake)
+
+
+def test_a_working_folder_below_a_folder_it_cannot_search_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path.is_dir raises that PermissionError before Python 3.14 (an internal-error traceback)
+    and says False on 3.14, which read as "not a folder"."""
+    inner = tmp_path / "locked" / "inner"
+    inner.mkdir(parents=True)
+    _below_a_locked_folder(monkeypatch, inner)
+    with pytest.raises(PytError) as e:
+        proc.run([sys.executable, "-V"], cwd=inner, echo=False)
+    assert e.value.code == 2
+    assert str(e.value) == f"cannot access {proc.rel(inner)}: {os.strerror(errno.EACCES)}  (the working folder of {proc.show([sys.executable])})"
+
+
+@posix
+def test_a_working_folder_it_cannot_enter_is_named_for_real(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.X_OK):
+            pytest.skip("this user enters any folder (root)")
+        with pytest.raises(PytError, match=re.escape(f"cannot enter the working folder {proc.rel(locked)}: Permission denied")):
+            proc.run([sys.executable, "-V"], cwd=locked, echo=False)
+    finally:
+        locked.chmod(0o755)
+
+
+def test_a_file_windows_cannot_start_gets_the_windows_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `uv = false` task whose program is a .sh or .py: CreateProcess says WinError 193, and
+    the hint asked for an exec bit or a #! line, which change nothing there."""
+
+    def popen(args: list[str], **kwargs: Any) -> Any:
+        raise OSError(errno.ENOEXEC, "%1 is not a valid Win32 application")
+
+    monkeypatch.setattr(proc, "IS_WINDOWS", True)
+    monkeypatch.setattr(proc.subprocess, "Popen", popen)
+    with pytest.raises(PytError) as e:
+        proc.run(["tools\\gen.sh"], echo=False)
+    assert e.value.code == 2 and "#! line" not in str(e.value)
+    assert str(e.value) == f"cannot run tools\\gen.sh: %1 is not a valid Win32 application  ({proc.WINDOWS_START_HINT})"
 
 
 def test_a_dry_run_does_not_need_the_working_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -686,13 +856,197 @@ def test_find_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("UV", str(fake))
     assert proc.find_uv() == str(fake)
     monkeypatch.setenv("UV", str(tmp_path))  # a folder is not uv
-    monkeypatch.setattr(proc.shutil, "which", lambda _name: "/elsewhere/uv")
-    assert proc.find_uv() == "/elsewhere/uv"
+    elsewhere = str(tmp_path / "elsewhere" / "uv")  # absolute on every OS (a drive on Windows)
+    monkeypatch.setattr(proc.shutil, "which", lambda _name: elsewhere)
+    assert proc.find_uv() == elsewhere
     monkeypatch.delenv("UV")
     monkeypatch.setattr(proc.shutil, "which", lambda _name: None)
     with pytest.raises(PytError, match="uv not found") as e:
         proc.find_uv()
     assert e.value.code == 3
+
+
+# --- programs by name, never from the caller's folder (Windows) ---------------------------------
+
+
+def _windows_which(cmd: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
+    """CPython's shutil.which on Windows (3.11; 3.12+ without NoDefaultCurrentDirectoryInExePath):
+    the current folder first, then PATH, each with the extensions of PATHEXT; it returns the
+    relative .\\git.bat it finds in the current folder."""
+    value = os.environ.get("PATH", "") if path is None else path
+    if not value:  # PATH='' finds nothing, the current folder neither
+        return None
+    entries = value.split(os.pathsep)
+    exts = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+    names = [cmd] if any(cmd.lower().endswith(e.lower()) for e in exts) else [cmd + e for e in exts]
+    for folder in [os.curdir, *entries]:
+        for name in names:
+            if os.path.isfile(os.path.join(folder, name)):
+                return os.path.join(folder, name)
+    return None
+
+
+@pytest.fixture
+def windows_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Windows simulated for proc (its flag, PATHEXT, CPython's shutil.which there), the runner in
+    a caller's folder `here` where another user left a git.bat, git.exe and nvim.cmd, and the real
+    programs in `bin`, on PATH. Returns `bin`."""
+    here, bindir = tmp_path / "here", tmp_path / "bin"
+    for folder, names in ((here, ("git.bat", "git.exe", "nvim.cmd", "pwsh.exe", "only-here.exe")), (bindir, ("git.exe", "nvim.cmd", "pwsh.exe"))):
+        folder.mkdir()
+        for name in names:
+            (folder / name).write_bytes(b"planted" if folder == here else b"real")
+    monkeypatch.chdir(here)
+    monkeypatch.setattr(proc, "IS_WINDOWS", True)
+    monkeypatch.setenv("PATHEXT", ".com;.exe;.bat;.cmd")  # lower case: Linux file names are case-sensitive
+    monkeypatch.setenv("PATH", os.pathsep.join(["", ".", "here-too", str(bindir)]))  # empty and relative entries name the current folder too
+    monkeypatch.delenv("SystemRoot", raising=False)
+    monkeypatch.delenv("windir", raising=False)
+    monkeypatch.setattr(shutil, "which", _windows_which)
+    return bindir
+
+
+def test_find_program_never_takes_the_callers_folder_on_windows(windows_caller: Path) -> None:
+    """shutil.which searches the current folder first on Windows, and the runner's is the
+    caller's (the launchers never cd): `pyt doctor` or `pyt new` typed in a folder where another
+    user left a git.bat (any authenticated user may write into a folder made under C:\\) ran it
+    as the caller. The lookup takes PATH's absolute entries alone, and answers an absolute path."""
+    bindir = windows_caller
+    assert os.path.dirname(shutil.which("git") or "") == os.curdir  # the scenario: CPython's own answer, the planted one
+    assert proc.find_program("git") == str(bindir / "git.exe")
+    assert proc.find_program("nvim", path=os.environ["PATH"]) == str(bindir / "nvim.cmd")  # cmd_nvim.which passes PATH
+    assert proc.find_program("only-here") is None  # found only in the caller's folder: not found
+    assert proc.find_program("git", path="") is None  # an empty PATH holds nothing, as for shutil.which
+
+
+def test_find_program_keeps_an_answer_that_names_no_folder_below_the_current_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only an answer in the current folder or below it (shutil.which's .\\git.bat, an empty or
+    relative PATH entry's) is searched again on Windows; a rooted one is PATH's own and stays,
+    such as the /usr/bin/xvfb-run tests give e2e on every OS."""
+    below = proc._below_the_current_folder
+    for found in (os.path.join(os.curdir, "git.bat"), "git.exe", os.path.join("bin", "git.exe")):
+        assert below(found), found
+    for found in ("/usr/bin/xvfb-run", "\\bin\\git.exe"):
+        assert not below(found), found
+    if sys.platform == "win32":  # drives exist only there
+        assert not below("C:\\x\\git.exe") and not below("\\\\server\\share\\git.exe") and below("C:bin\\git.exe")
+    monkeypatch.setattr(proc, "IS_WINDOWS", True)
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: "/usr/bin/xvfb-run")
+    assert proc.find_program("xvfb-run") == "/usr/bin/xvfb-run"
+
+
+def test_doctors_nvim_and_powershell_never_come_from_the_callers_folder_on_windows(windows_caller: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`pyt doctor` (global mode too) starts nvim (its Neovim step, cmd_nvim.which) and both
+    PowerShells (the execution policies, shells._ps_policies): an nvim.cmd or pwsh.exe left in
+    the folder it was typed in ran instead."""
+    from runner import cmd_nvim
+
+    bindir = windows_caller
+    assert cmd_nvim.which("nvim") == str(bindir / "nvim.cmd")
+    ran: list[str] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        ran.append(argv[0])
+        return subprocess.CompletedProcess(argv, 0, "RemoteSigned\n", "")
+
+    monkeypatch.setattr(shells.subprocess, "run", run)
+    assert shells._ps_policies() == [("PowerShell 7", "Core", "RemoteSigned")]  # no powershell.exe on PATH
+    assert ran == [str(bindir / "pwsh.exe")]
+
+
+def test_a_bare_program_never_runs_from_the_callers_folder_on_windows(windows_caller: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """subprocess hands CreateProcess a bare name (lpApplicationName = NULL), and CreateProcess
+    looks in the folder of the runner's python.exe and the runner's current folder (the caller's)
+    before the system folders and PATH: `proc.run(["git", ...])` (setup's exec-bit fix, the hook,
+    rename) ran a git.exe left there. proc.run hands it the program of the system folders or PATH,
+    and a name found in neither never reaches CreateProcess."""
+    bindir = windows_caller
+    started: list[list[str]] = []
+
+    class Started(Exception):
+        pass
+
+    def popen(args: list[str], **kwargs: Any) -> Any:
+        started.append(list(args))
+        raise Started
+
+    monkeypatch.setattr(proc.subprocess, "Popen", popen)
+    with pytest.raises(Started):
+        proc.run(["git", "rev-parse"], cwd=tmp_path, echo=False)
+    assert started[-1] == [str(bindir / "git.exe"), "rev-parse"]
+    with pytest.raises(PytError, match=r"^program not found: only-here$") as e:
+        proc.run(["only-here"], cwd=tmp_path, echo=False)
+    assert e.value.code == 3 and len(started) == 1  # never handed to CreateProcess bare
+    with pytest.raises(PytError, match="program not found: nvim"):
+        proc.run(["nvim"], cwd=tmp_path, echo=False)  # CreateProcess takes nvim.exe only: nvim.cmd is no candidate
+    # the system folders come first, as for CreateProcess; a name with a folder is no search
+    system32 = tmp_path / "Windows" / "System32"
+    system32.mkdir(parents=True)
+    (system32 / "git.exe").write_bytes(b"system")
+    monkeypatch.setenv("SystemRoot", str(tmp_path / "Windows"))
+    with pytest.raises(Started):
+        proc.run(["git"], cwd=tmp_path, echo=False)
+    assert started[-1] == [str(system32 / "git.exe")]
+    with pytest.raises(Started):
+        proc.run(["tools\\gen.exe"], cwd=tmp_path, echo=False)
+    assert started[-1] == ["tools\\gen.exe"]
+    # taskkill (the harnesses' tree kill) is the system folders' too
+    killed: list[list[str]] = []
+    (system32 / "taskkill.exe").write_bytes(b"system")
+    (Path.cwd() / "taskkill.exe").write_bytes(b"planted")
+    monkeypatch.setattr(proc.subprocess, "run", lambda argv, **kw: killed.append(list(argv)))
+    proc.taskkill(42)
+    assert killed == [[str(system32 / "taskkill.exe"), "/F", "/T", "/PID", "42"]]
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["new: the work tree", "new: git ls-files", "new: git init", "install: git", "doctor: git (global)", "doctor: launcher modes", "setup: exec bits", "hook: find_repo", "rename: git status"],
+)
+def test_the_runners_git_never_comes_from_the_callers_folder_on_windows(windows_caller: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str) -> None:
+    """The commands of A2-01 (`pyt new`, `pyt doctor`, setup, install, the hook, rename), each
+    with a git.exe and a git.bat another user left in the folder they were typed in: every git
+    they start is PATH's (the first one is caught before it runs)."""
+    from runner import cmd_install, hooks, rename
+
+    started: list[str] = []
+
+    class Started(Exception):
+        pass
+
+    def popen(args: list[str], **kwargs: Any) -> Any:
+        started.append(str(args[0]))
+        raise Started
+
+    monkeypatch.setattr(proc.subprocess, "Popen", popen)
+    calls = {
+        "new: the work tree": lambda: cmd_mode._work_tree_top(tmp_path / "game"),
+        "new: git ls-files": lambda: presets._git_files("--cached"),
+        "new: git init": lambda: presets._git_init(tmp_path / "game"),
+        "install: git": lambda: cmd_install._git("rev-parse", "HEAD"),
+        "doctor: git (global)": lambda: cmd_env._machine(lambda passed, label, hint="": None),
+        "doctor: launcher modes": lambda: shells._git_modes(["pyt"]),
+        "setup: exec bits": lambda: cmd_env._fix_exec_bit(),
+        "hook: find_repo": lambda: hooks.find_repo(tmp_path, environ={}, cwd=tmp_path),
+        "rename: git status": lambda: rename.git_changes(tmp_path),
+    }
+    with pytest.raises(Started):
+        calls[where]()
+    assert started == [str(windows_caller / "git.exe")]
+
+
+def test_the_runner_finds_programs_only_through_proc() -> None:
+    """Every lookup of a program by name goes through proc.find_program (never shutil.which,
+    which searches the caller's folder first on Windows), and no process starts from a literal
+    bare name past proc.run's own lookup (taskkill, git: proc.program, proc.taskkill)."""
+    found: list[str] = []
+    for path in sorted((TEMPLATE_DIR / "runner").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        name = path.relative_to(TEMPLATE_DIR).as_posix()
+        if name != "runner/proc.py":
+            found += [f"{name}: shutil.which" for _ in re.finditer(r"\bshutil\.which\(", text)]
+        found += [f"{name}: {m.group(0)}" for m in re.finditer(r"subprocess\.(?:run|Popen|call|check_call|check_output)\(\s*\[\s*[\"']", text)]
+    assert found == []
 
 
 def test_show_is_for_display() -> None:
@@ -905,6 +1259,7 @@ def test_a_child_that_dies_of_the_sigterm_passed_on_leaves_no_orphan(tmp_path: P
 
 
 @posix
+@pytest.mark.usefixtures("default_signals")
 def test_an_ignored_sigterm_is_passed_on_to_the_child() -> None:
     # nohup and supervisors that ignore SIGHUP/SIGTERM: the children keep inheriting SIG_IGN
     code = (
@@ -1029,6 +1384,10 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> Recorder:
     r = Recorder()
     monkeypatch.setattr(tasks.envs, "uv_run", r.uv_run)
     monkeypatch.setattr(tasks.proc, "run", r.run)
+    # The programs recorded here exist nowhere, and on Windows run_task refuses a bare name the
+    # task's PATH lacks before it reaches proc.run: POSIX rules, unless a test of that lookup
+    # sets tasks.IS_WINDOWS itself.
+    monkeypatch.setattr(tasks, "IS_WINDOWS", False)
     return r
 
 
@@ -1129,8 +1488,7 @@ def test_every_placeholder(rec: Recorder) -> None:
 def test_literal_braces_are_written_doubled(rec: Recorder) -> None:
     cfg = make({"tasks": {"t": {"cmd": ["python", "-c", "d = {{}}; print({{'a': 1}})"], "uv": False}}})
     tasks.run_task(cfg, "t", [], rec.dispatch)
-    [(program, *rest)] = rec.runs  # Windows runs the python it finds on PATH (PATHEXT), by its full path
-    assert Path(program).stem.lower() == "python" and rest == ["-c", "d = {}; print({'a': 1})"]
+    assert rec.runs == [["python", "-c", "d = {}; print({'a': 1})"]]
 
 
 BAD_BRACES = ["{}", "{", "}", "x{0}", "{name!r}", "{name:>9}", "{name.upper}", "{name[0]}", "{name[a]}", "{root"]
@@ -1195,6 +1553,41 @@ def test_an_unknown_placeholder_is_refused_before_any_dep_runs(rec: Recorder, ba
     assert rec.runs == [] and rec.dispatched == []  # neither gen nor check all ran
 
 
+@pytest.mark.parametrize(
+    ("task", "message"),
+    [
+        ("typo", r"task 'typo': deps entry 'tset all': unknown command: tset  \(./pyt help"),
+        ("inner-typo", r"task 'inner': deps entry 'chek': unknown command: chek"),  # a task the deps reach
+        ("old", r"task 'old': deps entry 'init script': init is no longer a ./pyt command"),
+        ("bench", r"backend 'pypy' is not in backend.supported"),  # uv = true runs in PyPy's environment
+        ("bench-python", r"backend 'pypy' is not in backend.supported"),  # {python} names its interpreter
+    ],
+)
+def test_a_deps_entry_or_backend_that_cannot_run_is_refused_before_any_dep_runs(rec: Recorder, task: str, message: str) -> None:
+    """A deps entry that names no command (`tset all`) or a task backend the project does not
+    support stopped the task only once the deps before it had run (`fmt --check`, `test all`:
+    minutes), like a placeholder typo did."""
+    cfg = make({"backend": {"supported": ["cpython", "mypyc"]}, "tasks": {
+        "typo": {"deps": ["fmt --check", "tset all"]},
+        "inner-typo": {"deps": ["fmt --check", "inner"]},
+        "inner": {"deps": ["chek"]},
+        "old": {"deps": ["fmt --check", "init script"]},
+        "bench": {"deps": ["fmt --check"], "cmd": ["python", "-c", "print('bench')"], "backend": "pypy"},
+        "bench-python": {"deps": ["fmt --check"], "cmd": ["{python}", "-c", "pass"], "uv": False, "backend": "pypy"},
+    }})  # fmt: skip
+    with pytest.raises(PytError, match=message) as e:
+        tasks.run_task(cfg, task, [], rec.dispatch)
+    assert e.value.code == 2
+    assert rec.runs == [] and rec.dispatched == []  # fmt --check never ran
+
+
+def test_a_task_on_an_unsupported_backend_runs_when_it_needs_no_environment(rec: Recorder) -> None:
+    """A uv = false task without {python} runs no interpreter of its backend: its deps and cmd run."""
+    cfg = make({"backend": {"supported": ["cpython"]}, "tasks": {"t": {"deps": ["fmt --check", "help"], "cmd": ["tool"], "uv": False, "backend": "pypy"}}})
+    assert tasks.run_task(cfg, "t", [], rec.dispatch) == 0
+    assert rec.dispatched == [["fmt", "--check"], ["help"]] and rec.runs == [["tool"]]
+
+
 @pytest.mark.parametrize("key", ["A=B", "", "1X", "A B", "A-B", chr(0xE9)])
 def test_task_env_names_are_validated(key: str) -> None:
     with pytest.raises(PytError, match=r"tasks\.t\.env'?: invalid environment variable name") as e:
@@ -1227,6 +1620,38 @@ def test_a_task_cwd_must_be_a_folder(cwd: str, uv: bool, rec: Recorder) -> None:
     assert e.value.code == 2
     assert cwd in str(e.value) and "program not found" not in str(e.value)
     assert rec.runs == []
+
+
+@pytest.mark.parametrize("uv", [True, False])
+def test_a_task_cwd_below_a_folder_it_cannot_search_is_one_error_line(uv: bool, rec: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A task cwd below a folder this user may not search (a shared data folder, another user's):
+    on Python 3.11-3.13 Path.is_dir raised its PermissionError, an internal-error traceback, and
+    on 3.14 the task's cwd "is not a folder", which it is. One line names it and why, exit 2."""
+    inner = tmp_path / "data" / "inner"
+    inner.mkdir(parents=True)
+    _below_a_locked_folder(monkeypatch, inner)
+    cfg = make({"tasks": {"t": {"cmd": ["tool"], "cwd": str(inner), "uv": uv}}})
+    with pytest.raises(PytError) as e:
+        tasks.run_task(cfg, "t", [], rec.dispatch)
+    assert e.value.code == 2
+    assert str(e.value) == f"task 't': cannot access its cwd {str(inner)!r} ({inner}): {os.strerror(errno.EACCES)}"
+    assert rec.runs == []
+
+
+@posix
+def test_a_task_cwd_below_a_folder_it_cannot_search_is_one_error_line_for_real(rec: Recorder, tmp_path: Path) -> None:
+    locked = tmp_path / "data"
+    (locked / "inner").mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.X_OK):
+            pytest.skip("this user searches any folder (root)")
+        cfg = make({"tasks": {"t": {"cmd": ["tool"], "cwd": str(locked / "inner"), "uv": False}}})
+        with pytest.raises(PytError, match=re.escape(f"cannot access its cwd {str(locked / 'inner')!r}")) as e:
+            tasks.run_task(cfg, "t", [], rec.dispatch)
+        assert e.value.code == 2 and str(e.value).endswith(os.strerror(errno.EACCES)), str(e.value)
+    finally:
+        locked.chmod(0o755)
 
 
 def test_a_dry_run_does_not_check_the_task_cwd(rec: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1331,35 +1756,60 @@ def test_a_relative_program_runs_from_the_task_cwd(rec: Recorder, tmp_path: Path
     assert rec.runs == [["tool"], [f"{ROOT}/tools/x"]]  # a bare name keeps the OS search
 
 
+def _batch(folder: Path, name: str) -> Path:
+    """A stand-in .cmd file (never run: the recorder takes its place)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text("@echo off\r\n", encoding="ascii")
+    return folder / name
+
+
 def test_a_bare_program_is_found_with_pathext_on_windows(rec: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Windows: CreateProcess only tries `npm.exe` for a bare `npm`, so a task running npm, yarn
-    or mvn (.cmd files) failed with "program not found: npm" there and worked elsewhere."""
-    bin_dir = tmp_path / "nodejs"
-    bin_dir.mkdir()
-    looked_up: list[tuple[str, str]] = []
-
-    def which(name: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
-        looked_up.append((name, path or ""))
-        return str(bin_dir / "npm.cmd") if name == "npm" else None  # PATHEXT, as on Windows
-
+    or mvn (.cmd files) failed with "program not found: npm" there and worked elsewhere. The
+    search is the task's PATH alone: shutil.which looked in the current folder first, the
+    caller's (the launchers never cd), and a same-named npm.cmd there ran instead. A name the
+    task's PATH lacks went to CreateProcess bare, which looks in the runner's own folder, the
+    caller's folder and the runner's PATH first: an npm.exe there ran. It is not found now."""
+    npm = _batch(tmp_path / "nodejs", "npm.cmd")
+    _batch(tmp_path / "caller", "npm.cmd")  # the folder ./pyt web was typed in: never searched
+    (tmp_path / "caller" / "npm.exe").write_bytes(b"MZ")  # what CreateProcess finds there for a bare npm
+    monkeypatch.chdir(tmp_path / "caller")
     monkeypatch.setattr(tasks, "IS_WINDOWS", True)
-    monkeypatch.setattr(tasks.shutil, "which", which)
+    monkeypatch.setenv("PATHEXT", ".com;.exe;.bat;.cmd")  # lower case: Linux file names are case-sensitive
+    work = tmp_path / "work"
+    tool = _batch(work / "bin", "tool.bat")
+    script = tmp_path / "scripts" / "gen.py"
+    script.parent.mkdir()
+    script.write_text("print('gen')\n", encoding="utf-8")
     cfg = make({"tasks": {
-        "web": {"cmd": ["npm", "run", "build"], "uv": False, "env": {"PATH": str(bin_dir)}},
-        "missing": {"cmd": ["no-such-tool"], "uv": False},
+        "web": {"cmd": ["npm", "run", "build"], "uv": False, "env": {"PATH": str(npm.parent)}},
+        "missing": {"cmd": ["npm"], "uv": False, "env": {"PATH": str(tmp_path / "empty")}},
         "rel": {"cmd": ["tools/x.cmd"], "uv": False},
+        "named": {"cmd": ["npm.cmd"], "uv": False, "env": {"PATH": str(npm.parent)}},
+        "relpath": {"cmd": ["tool"], "uv": False, "env": {"PATH": "bin"}, "cwd": str(work)},
+        "script": {"cmd": ["gen.py"], "uv": False, "env": {"PATH": str(script.parent)}},
     }})
     tasks.run_task(cfg, "web", ["--prod"], rec.dispatch)
-    assert rec.runs[-1] == [str(bin_dir / "npm.cmd"), "run", "build", "--prod"]
-    assert looked_up[-1] == ("npm", str(bin_dir))  # the task's own PATH
+    assert rec.runs[-1] == [str(npm), "run", "build", "--prod"]  # the task's own PATH, never the caller's folder
+    ran = len(rec.runs)
+    with pytest.raises(PytError, match=r"^program not found: npm  \(looked for on the task's PATH") as e:
+        tasks.run_task(cfg, "missing", [], rec.dispatch)
+    assert e.value.code == 3 and len(rec.runs) == ran  # never handed to CreateProcess bare
+    monkeypatch.setattr(tasks.proc, "DRY_RUN", True)
     tasks.run_task(cfg, "missing", [], rec.dispatch)
-    assert rec.runs[-1] == ["no-such-tool"]  # not found: proc.run reports it
-    count = len(looked_up)
+    assert rec.runs[-1] == ["npm"]  # a dry run shows it (a dep may make the program)
+    monkeypatch.setattr(tasks.proc, "DRY_RUN", False)
+    tasks.run_task(cfg, "script", [], rec.dispatch)
+    assert rec.runs[-1] == [str(script)]  # an extension outside PATHEXT: as it is (CreateProcess then says it cannot start it)
     tasks.run_task(cfg, "rel", [], rec.dispatch)
-    assert len(looked_up) == count and Path(rec.runs[-1][0]) == ROOT / "tools" / "x.cmd"  # a path is no PATH lookup
+    assert Path(rec.runs[-1][0]) == ROOT / "tools" / "x.cmd"  # a path is no PATH lookup
+    tasks.run_task(cfg, "named", [], rec.dispatch)
+    assert rec.runs[-1] == [str(npm)]  # a name with its extension, as it is
+    tasks.run_task(cfg, "relpath", [], rec.dispatch)
+    assert rec.runs[-1] == [str(tool)]  # a relative PATH entry is the task cwd's, as on POSIX
     monkeypatch.setattr(tasks, "IS_WINDOWS", False)
     tasks.run_task(cfg, "web", [], rec.dispatch)
-    assert rec.runs[-1][0] == "npm" and len(looked_up) == count  # POSIX: execvp searches PATH itself
+    assert rec.runs[-1][0] == "npm"  # POSIX: execvp searches PATH itself
 
 
 @pytest.mark.parametrize(
@@ -1378,8 +1828,9 @@ def test_a_batch_file_gets_only_arguments_cmd_passes_unchanged(
     ran `b`, and %VAR% expands even inside quotes. Such an argument is refused (exit 2) instead
     of reaching the program changed; one that list2cmdline quotes (a space) is passed."""
     monkeypatch.setattr(tasks, "IS_WINDOWS", True)
-    monkeypatch.setattr(tasks.shutil, "which", lambda name, mode=0, path=None: str(tmp_path / "npm.cmd"))
-    cfg = make({"tasks": {"web": {"cmd": ["npm", "install"], "uv": False}, "bat": {"cmd": ["tools/build.BAT"], "uv": False}}})
+    monkeypatch.setenv("PATHEXT", ".com;.exe;.bat;.cmd")
+    _batch(tmp_path, "npm.cmd")
+    cfg = make({"tasks": {"web": {"cmd": ["npm", "install"], "uv": False, "env": {"PATH": str(tmp_path)}}, "bat": {"cmd": ["tools/build.BAT"], "uv": False}}})
     for task in ("web", "bat"):
         before = len(rec.runs)
         if refused is None:
@@ -1393,6 +1844,27 @@ def test_a_batch_file_gets_only_arguments_cmd_passes_unchanged(
     monkeypatch.setattr(tasks, "IS_WINDOWS", False)  # POSIX: no cmd.exe in between
     tasks.run_task(cfg, "web", [arg], rec.dispatch)
     assert rec.runs[-1][-1] == arg
+
+
+@pytest.mark.parametrize(("folder", "refused"), [("R&D", "&"), ("a^b", "^"), ("50%", "%"), ("R & D", None)])
+def test_a_batch_file_whose_path_cmd_would_change_is_refused(
+    rec: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str, refused: str | None
+) -> None:
+    """The batch file's own path reaches cmd.exe on the same line as its arguments, and
+    list2cmdline quotes it only for a blank: C:\\Users\\R&D\\AppData\\Roaming\\npm\\eslint.cmd ran
+    as `C:\\Users\\R` and a second command. Only the arguments were checked."""
+    monkeypatch.setattr(tasks, "IS_WINDOWS", True)
+    program = tmp_path / folder / "eslint.cmd"
+    cfg = make({"tasks": {"lint": {"cmd": [str(program), "src"], "uv": False}}})
+    if refused is None:
+        tasks.run_task(cfg, "lint", [], rec.dispatch)
+        assert rec.runs[-1] == [str(program), "src"]
+        return
+    before = len(rec.runs)
+    with pytest.raises(PytError) as e:
+        tasks.run_task(cfg, "lint", [], rec.dispatch)
+    assert e.value.code == 2 and len(rec.runs) == before  # nothing ran
+    assert f"its path {str(program)!r} ({refused!r})" in str(e.value) and "Move it to a folder" in str(e.value), str(e.value)
 
 
 def test_the_task_list_is_shown_with_quiet(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1475,6 +1947,51 @@ def test_check_all_runs_each_profile_once_and_the_mypyc_rules_once(checks: FakeC
     assert checks.calls == [("cpython", True)]
 
 
+def _profile_flags(name: str) -> tuple[bool, bool, bool]:
+    """(blocking, ruff's exit_zero, skip_mypy) of the typing profile `name` as the project has it,
+    read as cmd_dev.run_checks reads them: README lets a project edit
+    .pytemplate/templates/typing/<profile>.toml, and the tests that pinned the shipped values
+    failed in a project that had (`exit_zero = false` in warn.toml: 5 of them)."""
+    data = render.load_profile(name)
+    return bool(data.get("blocking", False)), bool(data.get("ruff", {}).get("exit_zero")), bool(data.get("skip_mypy"))
+
+
+# The shipped profiles' flags, pinned in the template repository
+SHIPPED_PROFILE_FLAGS = {"off": (False, False, True), "warn": (False, True, False), "strict": (True, False, False), "mypyc": (True, False, False)}
+
+
+@pytest.mark.parametrize("name", sorted(SHIPPED_PROFILE_FLAGS))
+def test_the_shipped_typing_profiles_keep_their_flags(name: str) -> None:
+    if not TEMPLATE_REPO:
+        pytest.skip("the shipped profiles: a project may edit its own (README)")
+    assert _profile_flags(name) == SHIPPED_PROFILE_FLAGS[name]
+
+
+def test_a_dry_run_of_check_names_only_what_it_skipped(checks: FakeChecks, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The dry-run line of `check` was fixed text: it said the mypyc rules had run in a project
+    that does not support mypyc (they run only then), and named basedpyright with the pylance
+    editor and mypy under a profile that skips it."""
+
+    def line(*tools: str) -> str:
+        return "(--dry-run) check: " + (f"{', '.join(tools[:-1])} and {tools[-1]} were" if len(tools) > 1 else f"{tools[0]} was") + " not run"
+
+    def mypy(*profiles: str) -> tuple[str, ...]:  # mypy is skipped where every profile skips it
+        return () if all(_profile_flags(p)[2] for p in profiles) else ("mypy",)
+
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert cmd_dev.cmd_check(make({"backend": {"supported": ["cpython"]}}), []) == 0  # profile off: no mypy (shipped)
+    assert line("ruff", *mypy("off")) + "\n" in capsys.readouterr().err
+    strict = {"typing": {"relaxed": "strict"}}
+    assert cmd_dev.cmd_check(make({**strict, "backend": {"supported": ["cpython", "pypy"]}}), ["all"]) == 0
+    assert line("ruff", *mypy("strict")) + "\n" in capsys.readouterr().err
+    both = {"backend": {"supported": ["cpython", "mypyc"]}, "typing": {"editor": "basedpyright"}}
+    assert cmd_dev.cmd_check(make(both), ["all"]) == 0
+    assert line("ruff", *mypy("off", "mypyc"), "basedpyright") + " (the mypyc rules were)\n" in capsys.readouterr().err
+    if TEMPLATE_REPO:  # the shipped profiles: off skips mypy, the others run it
+        assert (mypy("off"), mypy("strict"), mypy("off", "mypyc")) == ((), ("mypy",), ("mypy",))
+        assert line("ruff", "mypy", "basedpyright") == "(--dry-run) check: ruff, mypy and basedpyright were not run"
+
+
 def test_check_rejects_extra_arguments_and_unsupported_backends(checks: FakeChecks) -> None:
     for args, message in ((["all", "extra"], "unrecognized arguments: extra"), (["foo"], "unrecognized arguments: foo"), (["pypy"], "not in backend.supported")):
         with pytest.raises(PytError, match=message) as e:
@@ -1531,12 +2048,18 @@ def _checks_with(monkeypatch: pytest.MonkeyPatch, cfg: Config, backend: str = "c
 )
 @pytest.mark.usefixtures("isolated_checks")
 def test_run_checks_blocking_matrix(relaxed: str, ruff: int, mypy: int, passed: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`passed` is the shipped profiles' answer; the project's own profile decides (README: a
+    project may edit it): ruff's failure always blocks, mypy's exit 1 only under a blocking one."""
+    blocking, exit_zero, skip_mypy = _profile_flags(relaxed)
+    expected = ruff == 0 and (skip_mypy or mypy == 0 or (mypy == 1 and not blocking))
+    if TEMPLATE_REPO:
+        assert expected is passed
     ok, fake = _checks_with(monkeypatch, make({"typing": {"relaxed": relaxed}}), ruff=ruff, mypy=mypy)
-    assert ok is passed
+    assert ok is expected
     ruff_argv = fake.tool("ruff")
-    assert ruff_argv is not None and ("--exit-zero" in ruff_argv) == (relaxed == "warn")
-    assert (fake.tool("mypy") is None) == (relaxed == "off")  # the off profile skips mypy
-    if relaxed == "warn" and mypy == 1:
+    assert ruff_argv is not None and ("--exit-zero" in ruff_argv) == exit_zero  # shipped: warn only
+    assert (fake.tool("mypy") is None) == skip_mypy  # shipped: the off profile skips mypy
+    if not blocking and not skip_mypy and mypy == 1:
         assert "non-blocking" in capsys.readouterr().err
 
 
@@ -1565,8 +2088,11 @@ def test_the_mypyc_rules_block_only_under_the_mypyc_profile(backend: str, passed
 @pytest.mark.usefixtures("isolated_checks")
 def test_basedpyright_runs_with_every_pin(relaxed: str, passed: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = make({"typing": {"editor": "basedpyright", "relaxed": relaxed}})
+    blocking = _profile_flags(relaxed)[0]  # `passed`: the shipped profile's answer
+    if TEMPLATE_REPO:
+        assert passed is not blocking
     ok, fake = _checks_with(monkeypatch, cfg, basedpyright=1)
-    assert ok is passed  # a failure only blocks under a blocking profile
+    assert ok is not blocking  # a failure only blocks under a blocking profile
     (argv,) = [c for c in fake.calls if "basedpyright" in c]
     withs = [argv[i + 1] for i, a in enumerate(argv) if a == "--with"]
     assert withs == [cmd_dev.BASEDPYRIGHT, cmd_dev.BASEDPYRIGHT_NODE]
@@ -1591,8 +2117,16 @@ def test_basedpyright_that_cannot_run_always_fails(
     relaxed: str, ready: int, code: int, passed: bool, message: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Offline with a cold cache, `uv run --with basedpyright==...` failed (exit 1: No solution
-    found), and under the non-blocking `warn` profile check said `ok check: no errors`."""
+    found), and under the non-blocking `warn` profile check said `ok check: no errors`. Findings
+    (exit 1 once the pins are installed) block as the project's own profile says (`passed` and
+    `message`: the shipped profile's answer)."""
     cfg = make({"typing": {"editor": "basedpyright", "relaxed": relaxed}})
+    if not ready and code == 1:
+        blocking = _profile_flags(relaxed)[0]
+        found = (not blocking, "" if blocking else f"warning: basedpyright: type warnings (profile '{relaxed}', non-blocking)")
+        if TEMPLATE_REPO:
+            assert found == (passed, message)
+        passed, message = found
     calls: list[list[str]] = []
 
     def uv(_env: envs.PyEnv, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
@@ -1618,6 +2152,125 @@ def test_basedpyright_that_cannot_run_always_fails(
         assert "No solution found" in err  # uv's own reason
 
 
+@pytest.mark.parametrize(
+    ("folder", "char", "reads"),
+    [
+        ("q?x", "?", "a wildcard"),
+        ("st*r", "*", "a wildcard"),
+        pytest.param("bs\\x", "\\", "a path separator", marks=pytest.mark.skipif(IS_WINDOWS, reason="Windows' own separator")),
+    ],
+)
+@pytest.mark.usefixtures("isolated_checks")
+def test_basedpyright_never_runs_where_pyright_reads_the_folder_as_a_pattern(
+    folder: str, char: str, reads: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """pyright reads '*' and '?' in the paths of its configuration as wildcards, and on POSIX a
+    backslash as a separator (CLAUDE.md 15.1): in a project folder named like `qq?` basedpyright
+    found no file, said "0 errors", and check and the checks of build passed code that had errors
+    only basedpyright reports; under `bs\\x` it stopped (exit 3). check fails before it runs,
+    naming the character and the ways out; ruff and mypy still run."""
+    root = tmp_path / folder / "proj"
+    monkeypatch.setattr(cmd_dev, "ROOT", root)
+    ok, fake = _checks_with(monkeypatch, make({"typing": {"editor": "basedpyright", "relaxed": "warn"}}), basedpyright=0)
+    assert ok is False
+    assert not [c for c in fake.calls if "basedpyright" in c] and not list(tmp_path.glob("cfg/pyright-*.json"))
+    assert fake.tool("ruff") is not None and fake.tool("mypy") is not None
+    err = capsys.readouterr().err
+    assert f"error: basedpyright: the project's folder holds '{char}' ({root}), which pyright reads as {reads}" in err
+    assert "./pyt mode --editor pylance" in err
+    monkeypatch.setattr(cmd_dev, "ROOT", tmp_path / "plain" / "proj")  # the same project elsewhere runs it
+    ok, fake = _checks_with(monkeypatch, make({"typing": {"editor": "basedpyright", "relaxed": "warn"}}), basedpyright=0)
+    assert ok is True and [c for c in fake.calls if "basedpyright" in c]
+
+
+def test_the_pattern_rule_reads_the_path_after_its_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Windows path may start with `\\\\?\\C:\\` (an extended-length path): that '?' is no part
+    of a folder's name, and basedpyright runs there."""
+    from pathlib import PureWindowsPath
+
+    monkeypatch.setattr(cmd_dev, "ROOT", PureWindowsPath("\\\\?\\C:\\dev\\game"))
+    monkeypatch.setattr(cmd_dev, "PYRIGHT_UNSAFE", re.compile(r"[*?]"))  # Windows' rule
+    assert cmd_dev.basedpyright_problem() == ("", "")
+    monkeypatch.setattr(cmd_dev, "ROOT", PureWindowsPath("\\\\?\\C:\\dev\\ga?me"))
+    assert "holds '?'" in cmd_dev.basedpyright_problem()[0]
+
+
+def _pinned_basedpyright(project_file: Path, cwd: Path) -> dict[str, Any]:
+    """The pinned basedpyright's JSON report of `--project project_file`, run in `cwd` as check
+    runs it; skip when uv or the pins (uv's cache, offline) are missing."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("UV_PROJECT", "UV_PYTHON", "VIRTUAL_ENV", "PYTEMPLATE_"))}
+    argv = [uv, "tool", "run", "--offline", "--from", cmd_dev.BASEDPYRIGHT, "--with", cmd_dev.BASEDPYRIGHT_NODE]
+    argv += ["basedpyright", "--outputjson", "--project", str(project_file)]
+    r = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", timeout=300, check=False)
+    try:
+        report: dict[str, Any] = json.loads(r.stdout)
+    except ValueError:
+        pytest.skip(f"{cmd_dev.BASEDPYRIGHT} is not in the uv cache: {(r.stdout + r.stderr).strip()[-200:]}")
+    return report
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="a Windows folder name cannot hold '?'")
+def test_pyright_reads_a_wildcard_in_the_project_folder_pin(tmp_path: Path) -> None:
+    """The defect basedpyright_problem refuses (CLAUDE.md 15.1), pinned: the pinned basedpyright
+    finds the file of a project in `plain/` and none of the same project in `q?x/`. When this
+    fails, pyright escapes its configuration's paths and the refusal can go."""
+    found = {}
+    for folder in ("plain", "q?x"):
+        root = tmp_path / folder / "proj"
+        (root / "src" / "pk").mkdir(parents=True)
+        (root / "src" / "pk" / "a.py").write_text('x: int = "a"\n', encoding="utf-8")
+        (root / "cfg").mkdir()
+        conf = {"include": [(root / "src").as_posix()], "exclude": [(root / "node_modules").as_posix()], "pythonVersion": "3.11"}
+        (root / "cfg" / "pyright.json").write_text(json.dumps(conf), encoding="utf-8")
+        found[folder] = _pinned_basedpyright(Path("cfg") / "pyright.json", root)["summary"]
+    assert found["plain"]["filesAnalyzed"] == 1 and found["plain"]["errorCount"] == 1, found
+    assert found["q?x"]["filesAnalyzed"] == 0 and found["q?x"]["errorCount"] == 0, found
+
+
+def test_check_gives_basedpyright_the_files_the_editor_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """pyright reads the paths of a configuration against the file's own folder: the copy that
+    ./pyt check writes to .build/cfg kept `**/__pycache__` and `**/.*` relative, so they matched
+    below .build/cfg only, and check failed on a JupyterLab checkpoint copy in a dot folder of src/
+    that the editor's pyrightconfig.json skips; a profile's own [pyright] paths (`ignore`) pointed
+    into .build/cfg too. The pinned basedpyright (uv's cache) on both: the same findings."""
+    root = tmp_path / "proj"
+    bad = 'x: int = "a"\n'
+    files = {
+        "src/pk/__init__.py": "",
+        "src/pk/bad.py": bad,  # the one both must report
+        "src/pk/core/.ipynb_checkpoints/bench-checkpoint.py": bad,
+        "tests/test_ok.py": "",
+        "tests/.hidden/test_x.py": bad,
+        "src/pk/legacy.py": bad,  # the profile's `ignore`
+    }
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(config, "SRC", root / "src")
+    real_profile = render.load_profile
+
+    def load_profile(name: str) -> dict[str, Any]:
+        data = real_profile(name)
+        return {**data, "pyright": {**data.get("pyright", {}), "ignore": ["src/pk/legacy.py"]}}
+
+    monkeypatch.setattr(render, "load_profile", load_profile)
+    cfg = make({"typing": {"editor": "basedpyright", "relaxed": "strict"}, "compile": {"modules": ["pk.core"]}})
+    editor = root / "pyrightconfig.json"
+    editor.write_text(json.dumps(render.pyright_config(cfg, "strict")), encoding="utf-8")
+    copy = root / ".build" / "cfg" / "pyright-strict.json"  # as run_checks writes it
+    copy.parent.mkdir(parents=True)
+    copy.write_text(json.dumps(render.pyright_config(cfg, "strict", absolute=True)), encoding="utf-8")
+    seen = {}
+    for name, conf in (("editor", editor), ("check", copy)):
+        report = _pinned_basedpyright(conf.relative_to(root), root)
+        seen[name] = sorted({d["file"].replace("\\", "/").rsplit("/proj/", 1)[-1] for d in report["generalDiagnostics"]})
+    assert seen == {"editor": ["src/pk/bad.py"], "check": ["src/pk/bad.py"]}, seen
+
+
 def test_tools_are_pinned_exactly() -> None:
     assert re.fullmatch(r"basedpyright==\d+\.\d+\.\d+", cmd_dev.BASEDPYRIGHT)
     assert re.fullmatch(r"nodejs-wheel-binaries==\d+\.\d+\.\d+", cmd_dev.BASEDPYRIGHT_NODE)
@@ -1631,16 +2284,121 @@ def test_profile_files_are_the_rendered_configs(tmp_path: Path) -> None:
     assert mypy_ini == tmp_path / "cfg" / "mypy-strict.ini"
     assert mypy_ini.read_text(encoding="utf-8") == render.mypy_ini(cfg, "strict")
     assert ruff_toml == tmp_path / "cfg" / "ruff-warn.toml"
-    assert ruff_toml.read_text(encoding="utf-8") == render.to_toml(render.ruff_config(cfg, "warn", absolute=True)) + "\n"
+    assert ruff_toml.read_text(encoding="utf-8") == render.to_toml(render.ruff_config(cfg, "warn", relative_to=ROOT)) + "\n"
+
+
+def _venv_ruff() -> Path:
+    return ROOT / ".venv" / ("Scripts/ruff.exe" if sys.platform == "win32" else "bin/ruff")
+
+
+# The shipped `off` typing profile, for the tests about ruff itself (its config paths, the folders it
+# checks) whatever this project's off.toml says: a project may edit its profiles (README), and in one
+# whose `off` reports ruff's findings without blocking (exit_zero) they failed (A9-02).
+SHIPPED_OFF: dict[str, Any] = {
+    "description": "No type checking: only syntax errors and undefined names",
+    "blocking": False,
+    "skip_mypy": True,
+    "mypy": {"ignore_errors": True},
+    "pyright": {"typeCheckingMode": "off"},
+    "ruff": {"select": ["E9", "F63", "F7", "F82"], "ignore": [], "exit_zero": False},
+}
+
+
+def _shipped_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    if TEMPLATE_REPO:  # the copy here follows the template's own file
+        assert {k: v for k, v in render.load_profile("off").items() if k in SHIPPED_OFF} == SHIPPED_OFF
+    real = render.load_profile
+    monkeypatch.setattr(render, "load_profile", lambda name: json.loads(json.dumps(SHIPPED_OFF)) if name == "off" else real(name))
+
+
+@pytest.mark.parametrize("folder", ["app$v2", "a${b}"])
+def test_check_runs_ruff_in_a_project_folder_named_like_a_variable(folder: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ruff expands $NAME and ${NAME} in its --config argument and in the paths of that file
+    (CLAUDE.md 15.1): with absolute paths, `check` (and the checks of `build`) failed in every
+    project folder named like app$v2 ("does not point to a configuration file", "environment
+    variable not found"). The real ruff of .venv runs as the runner starts it: in the project."""
+    ruff = _venv_ruff()
+    if not ruff.is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    root = tmp_path / folder
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    source = root / "src" / "pkg" / "a.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "BUILD", root / ".build")
+    monkeypatch.setattr(project, "ROOT", root)  # code_dirs: the folders ruff checks
+    for name in ("v2", "b"):
+        monkeypatch.delenv(name, raising=False)
+    outputs: list[str] = []
+
+    def uv_run(_env: envs.PyEnv, argv: list[Any], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        if args[0] != "ruff":
+            return completed(args)  # mypy: not the point here
+        r = subprocess.run([str(ruff), *args[1:]], cwd=root, capture_output=True, text=True, timeout=120, check=False)
+        outputs.append(r.stdout + r.stderr)
+        return r
+
+    monkeypatch.setattr(envs, "uv_run", uv_run)
+    _shipped_off(monkeypatch)
+    cfg = make({"typing": {"relaxed": "off"}})
+    assert cmd_dev.run_checks(cfg, "cpython", rules=False) is True, outputs
+    source.write_text("print(undefined_name)\n", encoding="utf-8")
+    assert cmd_dev.run_checks(cfg, "cpython", rules=False) is False
+    assert "F821" in outputs[-1], outputs[-1]
+
+
+def test_check_lint_and_fmt_see_every_folder_below_src_and_tests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ruff read the excludes of the generated configs (the project's typings and dist, its own
+    default venv, _build, node_modules, __pypackages__...) as folder names at ANY depth: `check`
+    (the .build/cfg copy), `lint` and `fmt` (the editors' .ruff.toml) passed a syntax error in a
+    subpackage or a test folder of such a name. The real ruff of .venv, started in the project."""
+    ruff = _venv_ruff()
+    if not ruff.is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    root = tmp_path / "p"
+    broken = [*(f"src/pkg/{d}/__init__.py" for d in ("venv", "typings", "dist", "_build", "node_modules", "__pypackages__")), "tests/typings/test_x.py", "tests/venv/test_y.py"]
+    for rel in ("src/pkg/__init__.py", *broken):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("def broken(:\n    pass\n" if rel in broken else "", encoding="utf-8")
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "BUILD", root / ".build")
+    monkeypatch.setattr(project, "ROOT", root)  # code_dirs: the folders ruff checks
+    _shipped_off(monkeypatch)
+    cfg = make({"typing": {"relaxed": "off"}})
+    (root / ".ruff.toml").write_text(render.to_toml(render.ruff_config(cfg, "off")) + "\n", encoding="utf-8")  # as render writes it
+    outputs: list[str] = []
+
+    def uv_run(_env: envs.PyEnv, argv: list[Any], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        if args[0] != "ruff":
+            return completed(args)  # mypy: skipped by the off profile anyway
+        r = subprocess.run([str(ruff), *args[1:]], cwd=root, capture_output=True, text=True, timeout=120, check=False)
+        outputs.append(r.stdout + r.stderr)
+        return r
+
+    monkeypatch.setattr(envs, "uv_run", uv_run)
+    assert cmd_dev.run_checks(cfg, "cpython", rules=False) is False, outputs
+    assert cmd_dev.cmd_lint(cfg, []) != 0, outputs[-1]
+    assert cmd_dev.cmd_fmt(cfg, ["--check"]) != 0, outputs[-1]
+    for command, out in zip(("check", "lint", "fmt --check"), outputs, strict=True):
+        missed = [rel for rel in broken if rel not in out.replace("\\", "/")]
+        assert not missed, f"./pyt {command} skipped {missed}:\n{out}"
 
 
 @pytest.mark.parametrize(("relaxed", "exit_zero"), [("warn", True), ("strict", False), ("off", False)])
 def test_lint_honours_the_profiles_exit_zero(relaxed: str, exit_zero: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`exit_zero`: the shipped profile's; the project's own decides (README: it may edit it)."""
+    if TEMPLATE_REPO:
+        assert _profile_flags(relaxed)[1] is exit_zero
     calls: list[list[str]] = []
     monkeypatch.setattr(envs, "uv_run", lambda _env, argv, **_kw: calls.append([str(a) for a in argv]) or completed(argv))
     assert cmd_dev.cmd_lint(make({"typing": {"relaxed": relaxed}}), ["--fix"]) == 0
     assert calls[0][:3] == ["ruff", "check", "--fix"]
-    assert ("--exit-zero" in calls[0]) == exit_zero
+    assert ("--exit-zero" in calls[0]) == _profile_flags(relaxed)[1]
 
 
 class FakeTests:
@@ -1832,7 +2590,7 @@ def test_a_dry_run_reports_no_success_for_what_it_skipped(
     err = capsys.readouterr().err
     assert "ok " not in err and "[ok]" not in err and "test summary" not in err
     assert "(--dry-run) would compile the stage" in err and "(--dry-run) would write the mypyc report" in err
-    assert "(--dry-run) would write the Any reports" in err and "(--dry-run) check: ruff, mypy and basedpyright were not run" in err
+    assert "(--dry-run) would write the Any reports" in err and "(--dry-run) check: ruff and mypy were not run (the mypyc rules were)" in err
 
 
 def test_a_dry_run_of_test_all_still_fails_when_a_backend_fails_its_checks(
@@ -1856,6 +2614,9 @@ def test_a_dry_run_of_test_all_still_fails_when_a_backend_fails_its_checks(
 
 @pytest.fixture(scope="module")
 def tasks_project(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A copy of the project with the tasks the tests below run. Every one of them is defined
+    here: the project's own [tasks] belong to its user (the preset's deps-only `ci`, which a test
+    ran, may be renamed, deleted or given a cmd)."""
     dest = tmp_path_factory.mktemp("cli")
     presets.copy_template(dest)
     py = json.dumps(sys.executable)
@@ -1863,6 +2624,9 @@ def tasks_project(tmp_path_factory: pytest.TempPathFactory) -> Path:
 [tasks.exit7]
 cmd = [{py}, "-c", "raise SystemExit(7)"]
 uv = false
+
+[tasks.depsonly]
+deps = ["exit7"]
 
 [tasks.depfail]
 deps = ["exit7"]
@@ -1924,7 +2688,7 @@ def _pyt(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         (["typo"], 2, "unknown placeholder 'nope'"),
         (["badcwd"], 2, "no-such-dir"),
         (["pypyt"], 2, "mode --supports +pypy"),
-        (["ci", "--no-such"], 2, "takes no arguments"),
+        (["depsonly", "--no-such"], 2, "takes no arguments"),
         pytest.param(["killed"], 137, "", marks=posix),
     ],
 )
@@ -1966,8 +2730,8 @@ def test_a_dry_run_of_sync_and_add_changes_nothing(tasks_project: Path) -> None:
 
 @posix
 @uv_on_path
-@pytest.mark.parametrize(("task", "code"), [("exit7", 7), ("killed", 137), ("ci --x", 2)])
-def test_task_exit_codes_cross_the_sh_launcher(tasks_project: Path, task: str, code: int) -> None:
+@pytest.mark.parametrize(("task", "code", "stderr"), [("exit7", 7, ""), ("killed", 137, ""), ("depsonly --x", 2, "takes no arguments")])
+def test_task_exit_codes_cross_the_sh_launcher(tasks_project: Path, task: str, code: int, stderr: str) -> None:
     # pyt -> uv run --script -> pyt.py: nothing on the way may change the code
     r = subprocess.run(
         ["sh", str(tasks_project / "pyt"), "--no-render", *task.split()],
@@ -1980,6 +2744,7 @@ def test_task_exit_codes_cross_the_sh_launcher(tasks_project: Path, task: str, c
         check=False,
     )
     assert r.returncode == code, r.stderr
+    assert stderr in r.stderr  # an unknown command exits 2 as well
 
 
 # === 12. invariants of other modules that the runner's error paths depend on =======================

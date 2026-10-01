@@ -105,6 +105,13 @@ def test_command_text_per_family(tmp_path: Path) -> None:
     wsl = shells.Shell("wsl-u", "wsl", ("wsl.exe", "-d", "U"))
     assert "$(wslpath -u " in shells.command_text(wsl, project, "abs", [])
 
+    # nushell: the launcher's word ended at a quote of the project folder's path (/home/o'brien)
+    nu = shells.Shell("nu", "nu", ("nu", "--no-config-file"))
+    name = "pyt.cmd" if IS_WINDOWS else "pyt"
+    quoted = tmp_path / "o'brien"
+    assert shells.command_text(nu, quoted, "abs", ["x", "a'b"]) == f"run-external {shells.nu_quote(str(quoted / name))} r#'x'# r#'a'b'#"
+    assert shells.command_text(nu, quoted, "root", []) == f"run-external r#'./{name}'#"
+
 
 @pytest.mark.skipif(IS_WINDOWS, reason="a POSIX stand-in launcher")
 def test_xonsh_probe_exit_code_ignores_raise_settings(tmp_path: Path) -> None:
@@ -375,6 +382,25 @@ def test_doctor_counts_an_execution_policy_only_for_the_powershell_in_use(
     policy = [(ok, label, hint) for ok, label, hint in lines if "ExecutionPolicy" in label]
     assert [ok for ok, _, _ in policy] == expected, policy
     assert "Set-ExecutionPolicy" in policy[0][2] and "pyt.cmd" in policy[0][2]
+
+
+def test_ps_policies_answer_what_a_new_window_gets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session started with -ExecutionPolicy Bypass (a way around a blocked pyt.ps1, the VS
+    Code PowerShell console) hands its children PSExecutionPolicyPreference=Bypass, the Process
+    scope: asked with it, both PowerShells said Bypass, and doctor and install hid the Restricted
+    policy of every new window. The query leaves it out (fake PowerShells print it, else
+    Restricted, the policy their "new window" has)."""
+    for name in ("powershell", "pwsh"):
+        if IS_WINDOWS:
+            text = "@if defined PSExecutionPolicyPreference (echo %PSExecutionPolicyPreference%) else (echo Restricted)\r\n"
+            (tmp_path / f"{name}.cmd").write_text(text, encoding="ascii", newline="")
+        else:
+            fake = tmp_path / name
+            fake.write_text('#!/bin/sh\nprintf "%s\\n" "${PSExecutionPolicyPreference:-Restricted}"\n', encoding="ascii")
+            fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("PSExecutionPolicyPreference", "Bypass")
+    assert shells._ps_policies() == [("Windows PowerShell 5.1", "Desktop", "Restricted"), ("PowerShell 7", "Core", "Restricted")]
 
 
 def test_ps_policies_name_the_edition_pyt_ps1_reports() -> None:

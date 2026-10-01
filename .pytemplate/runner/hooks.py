@@ -11,7 +11,8 @@ found from a GUI client, a broken pytemplate.toml, a runner without `hooks run`)
 says so and how to commit anyway. `./pyt setup` installs the hook when `hooks.pre_commit`
 is true in pytemplate.toml (the default).
 
-- A pre-commit hook that is not pytemplate's (no MARKER), or a symlink, is never overwritten:
+- A pre-commit hook that is not pytemplate's (not what hook_script writes, is_ours: a comment
+  that names pytemplate's hook does not make it so), or a symlink, is never overwritten:
   `install` fails, `install --force` keeps it as `pre-commit.local` and the new hook runs it
   first; `uninstall` removes only pytemplate's hook and puts the old one back.
 - Another pytemplate project of the same repository (a monorepo with apps/p and apps/q) is
@@ -28,7 +29,12 @@ is true in pytemplate.toml (the default).
   forced: that repository's commits never contain it.
 - With `core.hooksPath` set (husky, a shared hooks folder...) git ignores `.git/hooks`: the
   hook is not installed there; `install` and `status` print the line to add to that setup
-  (husky 9, core.hooksPath=.husky/_: to `.husky/pre-commit`).
+  (husky 9, core.hooksPath=.husky/_: to `.husky/pre-commit`), unless the hook there runs the
+  checks already: pytemplate's hook of an older version that calls this launcher is "stale"
+  (hooks_path_state), reported as outdated, never as missing. The same for a `.git/hooks` that
+  is a link or junction to another folder (a team's tracked `.githooks`): nothing is written
+  through it, and `uninstall` removes only a hook of pytemplate's there that git does not track,
+  in a folder of this work tree (linked_hands_off).
 - Linked worktrees share one hooks directory: the hook calls the launcher at the same
   relative path in every worktree, and a checkout without it skips the checks. A checkout
   whose runner predates `hooks run` (an old branch) fails the hook: commit there with
@@ -37,10 +43,12 @@ is true in pytemplate.toml (the default).
 `hooks run` checks what the commit contains (`git diff --cached`, deletions included), fast,
 so no mypy (that stays in `./pyt check`, the editors and CI):
   1. ruff check (the active backend's typing profile, like `check`) and ruff format --check
-     on the staged .py/.pyi files under src/ and tests/. A file with unstaged changes is
+     on the staged .py/.pyi/.ipynb files under src/ and tests/. A file with unstaged changes is
      checked in its STAGED version (fed to ruff on stdin), and a staged file deleted from the
      working tree is reported;
-  2. the generated files are up to date (`render --check`) and none has unstaged changes;
+  2. the generated files are up to date (`render --check`) and none has unstaged changes (an
+     untracked one that git ignores, or changes a skip-worktree or assume-unchanged flag hides,
+     count too: the commit needs them whatever git is told to overlook);
   3. pyproject.toml matches pytemplate.toml and uv.lock is up to date (`uv lock --check`);
   4. pytemplate.toml, pyproject.toml, uv.lock and the generated files are committed together:
      once one of them is in the commit, none of the three config files may keep unstaged
@@ -56,8 +64,10 @@ and staged (or stashed). `git commit --no-verify` skips the hook.
 Git runs hooks from the top of the work tree and may export repository variables relative to
 it (GIT_INDEX_FILE=.git/index) or GIT_DIR without GIT_WORK_TREE (linked worktrees: "the cwd is
 the top"). The project may live in a subfolder, so `git_env` pins them as absolute paths for
-the git calls made here, and `run` removes them from the environment of every other tool
-(uv may run git for git dependencies: it must not see the hook's repository).
+the git calls made here (and `_found_from` lets git find a GIT_DIR from the project folder
+itself, whose top a user's hook that ran `cd` first no longer is), and `run` removes them from
+the environment of every other tool (uv may run git for git dependencies: it must not see the
+hook's repository).
 """
 
 from __future__ import annotations
@@ -66,7 +76,7 @@ import functools
 import importlib.util
 import os
 import re
-import shutil
+import shlex
 import subprocess
 import sys
 import time
@@ -76,7 +86,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import envs, lintc, mypyc, proc, render, ui
-from .cmd_dev import _profile_file, only_flags
+from .cmd_dev import _profile_file, config_arg, only_flags
 from .config import Config
 from .project import IS_WINDOWS, ROOT, STATE_FILE, TEMPLATE, native_path
 from .ui import PytError
@@ -86,13 +96,24 @@ Check = Callable[[bool | None, str, str], None]
 HOOK = "pre-commit"
 LOCAL = "pre-commit.local"  # a foreign hook moved aside by `install --force`; ours runs it first
 MARKER = "pytemplate pre-commit hook"
+# The second line of every hook hook_script has written (`./deploy hooks install` before the
+# launchers were renamed). With the `#!/bin/sh` line before it and a `_pt_launcher=` line
+# launcher_of reads, it makes a hook pytemplate's (is_ours): the phrase alone does not, since a
+# hook of the user's that calls the checks names the tool in a comment.
+HEADER = f"# {MARKER}: written by ./pyt hooks install (it rewrites this file: do not edit)"
+_OURS = re.compile(rf"#!/bin/sh\n# {MARKER}: written by \./(?:pyt|deploy) hooks install \(it rewrites this file: do not edit\)\n")
 LAUNCHERS = ("pyt", "pyt.cmd", "pyt.ps1")
-PY_SUFFIXES = (".py", ".pyi")
+# The files ruff checks and formats: notebooks too, as `./pyt check`, `lint`, `fmt` and CI do
+PY_SUFFIXES = (".py", ".pyi", ".ipynb")
 USAGE = "install [--force] | uninstall | run | status"
 # Repository variables git exports to hooks, possibly relative to the top of the work tree
 GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
 # ...and the ones removed from the environment of the tools `run` starts
 GIT_REPO_VARS = (*GIT_LOCATION_VARS, "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX", "GIT_NAMESPACE")
+# The user's pathspec settings, never passed to the git calls made here: they pass
+# --literal-pathspecs (a file named `*.py` is a path), which git refuses next to
+# GIT_GLOB_PATHSPECS or GIT_ICASE_PATHSPECS (exit 128), and check-ignore refuses all four
+PATHSPEC_VARS = ("GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_LITERAL_PATHSPECS")
 ARG_LIMIT = 8000  # characters of file arguments per tool call (Windows command lines: 32767)
 # The sources of the generated files and of the lock: committed together with them
 CONFIG_FILES = ("pytemplate.toml", "pyproject.toml", "uv.lock")
@@ -113,7 +134,7 @@ def git_missing_here(project: Path = ROOT) -> bool:
     repository: the hook can be neither checked nor installed nor removed (GitHub Desktop, Fork
     and SourceTree bring a git of their own, often not on PATH). apply said "not a git work
     tree: nothing to do" and doctor called hooks.pre_commit applied."""
-    return shutil.which("git") is None and any((d / ".git").exists() for d in (project, *project.parents))
+    return proc.find_program("git") is None and any((d / ".git").exists() for d in (project, *project.parents))
 
 
 # --- the repository ------------------------------------------------------------------------------
@@ -144,8 +165,10 @@ def git_env(environ: Mapping[str, str], cwd: Path) -> dict[str, str]:
 
 def _git_process_env(env: Mapping[str, str]) -> dict[str, str]:
     """The environment of the git calls made here: `env` (git_env) is the only source of the
-    repository variables; LC_ALL=C keeps git's messages English (find_repo reads them)."""
-    base = {k: v for k, v in proc.base_env().items() if k not in GIT_REPO_VARS}
+    repository variables; LC_ALL=C keeps git's messages English (find_repo reads them). The
+    user's pathspec settings go (PATHSPEC_VARS): with GIT_ICASE_PATHSPECS=1 every call with a
+    pathspec failed, and the checks it fed passed a commit that left files behind."""
+    base = {k: v for k, v in proc.base_env().items() if k not in GIT_REPO_VARS and k not in PATHSPEC_VARS}
     return {**base, "LC_ALL": "C", **env}
 
 
@@ -170,7 +193,8 @@ def _run_bytes(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], data: 
     need both."""
     ui.detail("$ " + proc.show(argv))
     try:
-        return subprocess.run(list(argv), cwd=cwd, env=dict(env), input=data, capture_output=True, check=False)
+        # Windows: a bare name, never from the folder the commit was made in (proc.program)
+        return subprocess.run([proc.program(argv[0]), *argv[1:]], cwd=cwd, env=dict(env), input=data, capture_output=True, check=False)
     except OSError as e:
         raise PytError(f"cannot run {argv[0]}: {e}", 3) from None
 
@@ -206,14 +230,18 @@ def _drive(path: Path) -> str:
 class Repo:
     project: Path  # the project root (where ./pyt is)
     top: Path  # top of the git work tree
-    hooks_dir: Path  # where git runs hooks from (core.hooksPath, or <common dir>/hooks)
+    hooks_dir: Path  # where git runs hooks from (core.hooksPath, or <common dir>/hooks, or where it links to)
     default_dir: Path  # <common dir>/hooks: where `install` writes
     prefix: str  # the project relative to `top`, POSIX ("" = the top itself)
     env: dict[str, str] = field(default_factory=dict)  # git_env() for every git call
+    hooks_link: bool = False  # default_dir is a link or junction to hooks_dir (_link_target)
 
     @property
     def custom_hooks_path(self) -> bool:
-        """Whether core.hooksPath sends git elsewhere (git then ignores the default dir)."""
+        """Whether git runs the hooks from a folder pytemplate writes nothing into: core.hooksPath
+        sends git elsewhere (git then ignores the default dir), or the default dir is a link to
+        another folder (hooks_link: a team's tracked folder, `ln -s ../.githooks .git/hooks`, or
+        one other repositories share), where install --force changed a tracked file."""
         return not _same(self.hooks_dir, self.default_dir)
 
     @property
@@ -246,13 +274,31 @@ class Repo:
         return self.git("config", "--bool", "core.ignorecase").stdout.strip() == "true"
 
 
+def _found_from(project: Path, env: dict[str, str], environ: Mapping[str, str]) -> dict[str, str]:
+    """`env` (git_env), or git's own discovery from `project` when that finds the repository git
+    exported as GIT_DIR without GIT_WORK_TREE. git's rule then makes the cwd the top of the work
+    tree: right where git runs a hook (the top), wrong after the `cd` of a hook of the user's
+    (`cd apps/a && ./pyt hooks run`, README) in a checkout whose .git is a file (a linked
+    worktree, a submodule, a --separate-git-dir clone, where git exports an absolute GIT_DIR):
+    the project folder became the top, its staged files read as none and every generated file as
+    untracked, so every commit was refused. From the project folder git finds that very
+    repository through the .git file, and the real top; the index git exported stays."""
+    if "GIT_DIR" not in env or native_path(environ.get("GIT_WORK_TREE", "")):
+        return env
+    found = {k: v for k, v in env.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    r = _git(["rev-parse", "--absolute-git-dir"], project, found)
+    where = native_path(r.stdout.strip()) if r.returncode == 0 else ""
+    return found if where and _same_folder(Path(where), Path(env["GIT_DIR"])) else env
+
+
 def find_repo(project: Path = ROOT, environ: Mapping[str, str] | None = None, cwd: Path | None = None) -> Repo:
     """Return the git repository of `project`. NotInGit when git is missing (3) or the project
     is not inside a git work tree (2); PytError with git's own message for any other git
     failure (dubious ownership, a broken .git...)."""
-    if shutil.which("git") is None:
+    if proc.find_program("git") is None:
         raise NotInGit(NO_GIT, 3)
-    env = git_env(os.environ if environ is None else environ, cwd or Path(os.getcwd()))
+    source = os.environ if environ is None else environ
+    env = _found_from(project, git_env(source, cwd or Path(os.getcwd())), source)
     r = _git(["rev-parse", "--show-toplevel", "--git-common-dir", "--git-path", "hooks", "--show-prefix"], project, env)
     lines = r.stdout.splitlines()
     if r.returncode != 0 and "not a git repository" not in r.stderr:
@@ -269,14 +315,28 @@ def find_repo(project: Path = ROOT, environ: Mapping[str, str] | None = None, cw
     if not _same_folder(top / prefix, project):
         raise PytError(f"the project {project} is not inside its git work tree {top}", 2)
     lines = [native_path(ln) for ln in lines[:3]]
+    hooks_dir = Path(os.path.normpath(project / lines[2]))  # relative ones are relative to the cwd
+    default_dir = Path(os.path.normpath(project / lines[1] / "hooks"))
+    # git names the default folder even when it is a link (a symlink, a junction): git runs the
+    # hooks through it, and pytemplate writes into it as into core.hooksPath's folder: never
+    linked = _link_target(default_dir) if _same(hooks_dir, default_dir) else None
     return Repo(
         project=project,
         top=top,
-        hooks_dir=Path(os.path.normpath(project / lines[2])),  # relative ones are relative to the cwd
-        default_dir=Path(os.path.normpath(project / lines[1] / "hooks")),
+        hooks_dir=linked or hooks_dir,
+        default_dir=default_dir,
         prefix=prefix,
         env=env,
+        hooks_link=linked is not None,
     )
+
+
+def _link_target(folder: Path) -> Path | None:
+    """The folder that `folder`, a symbolic link or a junction, leads to (a missing one too), or
+    None for a plain folder or none at all. realpath resolves both on every OS and resolves the
+    folders above it the same way on both sides, so only a link AT `folder` tells them apart."""
+    real = Path(os.path.realpath(folder))
+    return None if _same(real, Path(os.path.realpath(folder.parent)) / folder.name) else real
 
 
 # --- the hook script -----------------------------------------------------------------------------
@@ -288,6 +348,31 @@ def sh_literal(text: str) -> str:
         return "'" + text.replace("'", "'\\''") + "'"
     fmt = "".join(chr(b) if 32 <= b < 127 and chr(b) not in "%\\'" else f"\\{b:03o}" for b in text.encode("utf-8"))
     return f"\"$(printf '{fmt}')\""
+
+
+def shell_word(text: str) -> str:
+    """`text` as one word of a sh script, ASCII only (sh_literal), as it is when nothing in it
+    is special (run_line)."""
+    return text if re.fullmatch(r"[A-Za-z0-9_./-]+", text) else sh_literal(text)
+
+
+def pasteable(text: str) -> str:
+    """`text` as one word a user can paste: as it is when plain; in double quotes when sh,
+    PowerShell and cmd read nothing in them (no $, backtick, backslash, double quote, ! or %);
+    else in sh's single quotes, which PowerShell reads alike (shlex.quote). Unquoted, the hints
+    for a project in apps/R&D split there: `cd apps/R&D` ran `cd apps/R` in the background, then
+    a command `D`."""
+    if re.fullmatch(r"[A-Za-z0-9_./-]+", text):
+        return text
+    if not re.search(r'[$`\\"!%]', text):
+        return f'"{text}"'
+    return shlex.quote(text)
+
+
+def script_word(text: str) -> str:
+    """pasteable(text), in ASCII for the hook script: a non-ASCII path as sh_literal's
+    `"$(printf ...)"`, which a POSIX shell pastes as the path."""
+    return pasteable(text) if text.isascii() else sh_literal(text)
 
 
 _LAUNCHER_LINE = re.compile(r"^_pt_launcher=(.*)$", re.MULTILINE)
@@ -312,61 +397,133 @@ def launcher_of(text: str) -> str | None:
         return None
 
 
+def is_ours(text: str) -> bool:
+    """Whether a hook's text (LF, as _read gives it) is one hook_script wrote, this version's or an
+    earlier one's: its first two lines and a `_pt_launcher=` line launcher_of reads. A file that
+    only held MARKER (a hook of the user's whose comment names pytemplate's hook) was taken for
+    this project's outdated hook: setup and apply replaced it and uninstall deleted it, no copy
+    kept, and the checks it ran besides ours (a secrets scan) were gone."""
+    return _OURS.match(text) is not None and launcher_of(text) is not None
+
+
 # The shells a kept hook is sourced by, with $0 = <hooks>/pre-commit: a hook that picks its job
 # from its own name (husky v4, yorkie: `basename "$0"`) or finds its helpers next to it ran as
 # pre-commit.local and silently checked nothing. zsh is left out: it sets $0 to a sourced file.
+# A kept hook without a #! line is a shell script when it is text (git runs it with sh), and a
+# compiled program when its first 64 bytes hold a NUL byte (ELF, Mach-O, PE: git executes it):
+# that one is executed too, never sourced (every commit failed with a shell syntax error).
+# A kept pytemplate hook (another project's, chained by --force) is executed as well: it must run
+# as pre-commit.local, which never chains itself. It is told from the others by what is_ours
+# reads, as grep patterns (the header line; a `_pt_launcher=` line), never by MARKER alone: a
+# husky v4 hook whose comment named pytemplate's hook ran as pre-commit.local and checked nothing.
 SHELLS = ("sh", "bash", "dash", "ash", "ksh", "mksh", "yash")
+_OURS_GREP = "'^" + HEADER.replace("./pyt", "\\./[a-z]*") + "$'"
 CHAIN_LINES = (
     f'    _pt_local="$_pt_dir/{LOCAL}"',
     "    _pt_line=",
     '    IFS= read -r _pt_line < "$_pt_local" || :',
     "    case $_pt_line in *\"$(printf '\\r')\") _pt_line=${_pt_line%?} ;; esac",
     "    case $_pt_line in '#!'*) _pt_line=${_pt_line#??} ;; *) _pt_line=/bin/sh ;; esac",
+    "    case $_pt_line in /bin/sh) od -An -tx1 -N 64 \"$_pt_local\" 2>/dev/null | grep -q ' 00' && _pt_line= ;; esac",
     '    _pt_line=${_pt_line#"${_pt_line%%[! ]*}"}',
     "    _pt_interp=${_pt_line%% *}",
     '    _pt_args=${_pt_line#"$_pt_interp"}',
     '    _pt_args=${_pt_args#"${_pt_args%%[! ]*}"}',
+    "    _pt_split=",
     '    if [ "${_pt_interp##*/}" = env ]; then',
-    "        _pt_interp=${_pt_args%% *}",
-    '        _pt_args=${_pt_args#"$_pt_interp"}',
-    '        _pt_args=${_pt_args#"${_pt_args%%[! ]*}"}',
+    # env's options (-S, -i, -u NAME...) and NAME=VALUE words come before the program it runs
+    # (interpreter reads them alike); -S splits the rest of the line into words, as env does
+    "        _pt_interp=",
+    '        while [ -z "$_pt_interp" ] && [ -n "$_pt_args" ]; do',
+    "            _pt_word=${_pt_args%% *}",
+    '            _pt_args=${_pt_args#"$_pt_word"}',
+    '            _pt_args=${_pt_args#"${_pt_args%%[! ]*}"}',
+    "            case $_pt_word in",
+    '                -u|-C|--unset|--chdir) _pt_args=${_pt_args#"${_pt_args%% *}"}; _pt_args=${_pt_args#"${_pt_args%%[! ]*}"} ;;',
+    "                -S|--split-string) _pt_split=1 ;;",
+    '                -S*|--split-string=*) _pt_split=1; _pt_args="${_pt_word#*[S=]} $_pt_args" ;;',
+    "                -*|*=*) ;;",
+    "                *) _pt_interp=$_pt_word ;;",
+    "            esac",
+    "        done",
     "    fi",
     '    _pt_args=${_pt_args%"${_pt_args##*[! ]}"}',
-    f"    if grep -q '{MARKER}' \"$_pt_local\" 2>/dev/null; then",
+    f"    if grep -q {_OURS_GREP} \"$_pt_local\" 2>/dev/null && grep -q '^_pt_launcher=' \"$_pt_local\" 2>/dev/null; then",
     '        "$_pt_local" "$@" || exit $?',
     "    else",
     "        case ${_pt_interp##*/} in",
     f"            {'|'.join(SHELLS)})",
-    '                _PT_HOOK=$_pt_local "$_pt_interp" ${_pt_args:+"$_pt_args"} -c ". \\"\\$_PT_HOOK\\"" "$_pt_dir/pre-commit" "$@" || exit $? ;;',
+    '                if [ -z "$_pt_split" ]; then',
+    '                    _PT_HOOK=$_pt_local "$_pt_interp" ${_pt_args:+"$_pt_args"} -c ". \\"\\$_PT_HOOK\\"" "$_pt_dir/pre-commit" "$@" || exit $?',
+    "                else",
+    # each word an argument of its own, before -c, and the hook's own arguments last
+    "                    (",
+    "                        _pt_n=$#",
+    '                        while [ -n "$_pt_args" ]; do',
+    "                            _pt_word=${_pt_args%% *}",
+    '                            _pt_args=${_pt_args#"$_pt_word"}',
+    '                            _pt_args=${_pt_args#"${_pt_args%%[! ]*}"}',
+    '                            set -- "$@" "$_pt_word"',
+    "                        done",
+    '                        set -- "$@" -c ". \\"\\$_PT_HOOK\\"" "$_pt_dir/pre-commit"',
+    '                        while [ "$_pt_n" -gt 0 ]; do',
+    '                            set -- "$@" "$1"',
+    "                            shift",
+    "                            _pt_n=$((_pt_n - 1))",
+    "                        done",
+    '                        _PT_HOOK=$_pt_local "$_pt_interp" "$@"',
+    "                    ) || exit $?",
+    "                fi ;;",
     '            *) "$_pt_local" "$@" || exit $? ;;',
     "        esac",
     "    fi",
 )
+# env's options that take the next word as their value (env -u NAME, -C DIR)
+_ENV_VALUE_OPTIONS = ("-u", "-C", "--unset", "--chdir")
 _NAME_READS = re.compile(r"\$0\b|\$\{0\}|argv\[0\]|__FILE__|\$PROGRAM_NAME|process\.argv")
 
 
+def _after_env(words: list[str]) -> list[str]:
+    """The words of a #! line from the program env runs: env's options (-S, -i, -u NAME, -C DIR,
+    `-Sbash`...) and NAME=VALUE words come first (`#!/usr/bin/env -S bash -e` named '-S')."""
+    rest = list(words)
+    while rest:
+        word = rest.pop(0)
+        if word in _ENV_VALUE_OPTIONS:
+            rest = rest[1:]
+        elif word.startswith(("--split-string=", "-S")) and word not in ("-S", "--split-string"):
+            return [word.split("=", 1)[1] if word.startswith("--") else word[2:], *rest]
+        elif not word.startswith("-") and "=" not in word:
+            return [word, *rest]
+    return []
+
+
 def interpreter(text: str) -> str:
-    """The program a hook's #! line names (after env, as the hook script reads it); sh without one."""
+    """The program a hook's #! line names (after env and its options, as the hook script reads
+    it); sh without one, and "" for a compiled hook (a NUL byte in its first 64 bytes: it runs
+    by itself)."""
     first = text.split("\n", 1)[0].rstrip("\r")
     if not first.startswith("#!"):
-        return "sh"
+        return "" if "\0" in text[:64] else "sh"
     words = first[2:].split()
     if words and words[0].rsplit("/", 1)[-1] == "env":
-        words = words[1:]
+        words = _after_env(words[1:])
     return words[0].rsplit("/", 1)[-1] if words else "sh"
 
 
 def reads_its_name(text: str) -> bool:
-    """Whether a hook that is not a shell script reads its own name: kept as pre-commit.local it
-    runs under that name (only a shell script can be sourced as pre-commit)."""
-    return interpreter(text) not in SHELLS and _NAME_READS.search(text) is not None
+    """Whether a hook script that is not a shell script reads its own name: kept as
+    pre-commit.local it runs under that name (only a shell script can be sourced as pre-commit).
+    A compiled hook's bytes cannot say: it runs as pre-commit.local, as git would run it."""
+    shell = interpreter(text)
+    return shell != "" and shell not in SHELLS and _NAME_READS.search(text) is not None
 
 
 def hook_script(launcher: str) -> str:
     """Return the pre-commit hook: pure ASCII, LF, runs `sh <launcher> hooks run` from the top."""
     lines = [
         "#!/bin/sh",
-        f"# {MARKER}: written by ./pyt hooks install (it rewrites this file: do not edit)",
+        HEADER,
         "# Runs `./pyt hooks run`: fast checks of the staged files (ruff, ruff format,",
         "# generated files, uv.lock, mypyc rules, launchers). mypy runs in ./pyt check.",
         "#   remove it:    ./pyt hooks uninstall",
@@ -386,7 +543,10 @@ def hook_script(launcher: str) -> str:
         "_pt_rc=$?",
         'if [ "$_pt_rc" -gt 1 ]; then',
         "    printf '%s\\n' \"pytemplate pre-commit: $_pt_launcher could not check this commit (exit code $_pt_rc).\" \\",
-        "        '  Commit without the checks: git commit --no-verify   Remove the hook: ./pyt hooks uninstall' >&2",
+        # the launcher itself, from the top where git runs hooks (a project in a subfolder has no
+        # ./pyt there), as a word the user can paste (script_word); each `$` ends its quoted piece
+        # (`$''`, the same text), so shellcheck sees no expansion in single quotes (SC2016)
+        "        " + sh_literal(f"  Commit without the checks: git commit --no-verify   Remove the hook: sh {script_word(launcher)} hooks uninstall").replace("$", "$''") + " >&2",
         "fi",
         'exit "$_pt_rc"',
     ]
@@ -398,7 +558,7 @@ def run_line(repo: Repo) -> str:
     checkout without the launcher, as pytemplate's own hook does (another branch): the unguarded
     `sh ./pyt hooks run || exit $?` in a global hooks folder failed every commit of every
     other repository ("cannot open ./pyt")."""
-    word = repo.launcher if re.fullmatch(r"[A-Za-z0-9_./-]+", repo.launcher) else sh_literal(repo.launcher)
+    word = shell_word(repo.launcher)
     return f"[ ! -f {word} ] || sh {word} hooks run || exit $?"
 
 
@@ -600,16 +760,31 @@ def _cd(words: list[str], cwd: Path | None) -> Path | None:
     return Path(os.path.normpath(target if target.is_absolute() else cwd / target))
 
 
+# Programs that run the command after them (`exec ./pyt hooks run`, `env X=1 ./pyt ...`)
+_RUNNERS = frozenset({"exec", "env", "time", "nohup"})
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _before_the_program(word: str) -> bool:
+    """Whether `word` may come before the program a command runs: a keyword (`if`, `!`), a
+    shell or a program that runs it (`sh`, `/bin/bash`, `exec`, `env`), one of their options,
+    or a variable assignment. Any other word is the program (`echo`, `printf`)."""
+    name = word.rsplit("/", 1)[-1]
+    return word in _BEFORE_CD or name in _RUNNERS or name in (*SHELLS, "zsh") or word.startswith("-") or _ASSIGNMENT.match(word) is not None
+
+
 def _calls_launcher(words: list[str], repo: Repo, cwd: Path | None) -> bool:
     """Whether a command calls this project's launcher with `hooks run` (`sh ./pyt hooks run`,
-    `./pyt -q hooks run`: the launcher's global options come before the command)."""
+    `./pyt -q hooks run`: the launcher's global options come before the command). The launcher
+    must be the program the command runs: `echo Tip: also run ./pyt hooks run` only mentions
+    it, and counted as running the checks."""
     for i in range(1, len(words) - 1):
         if words[i : i + 2] != ["hooks", "run"]:
             continue
         j = i - 1
         while j > 0 and words[j] in _GLOBAL_OPTIONS:
             j -= 1
-        if words[j] not in _GLOBAL_OPTIONS and _is_this_launcher(words[j], repo, cwd):
+        if words[j] not in _GLOBAL_OPTIONS and _is_this_launcher(words[j], repo, cwd) and all(map(_before_the_program, words[:j])):
             return True
     return False
 
@@ -621,7 +796,8 @@ def runs_checks(text: str, repo: Repo) -> bool:
     runs hooks, or from the folder a `cd` before it moved to (a `cd` in a subshell stays there);
     a launcher, or a `cd` folder, that holds a shell expansion cannot be resolved and counts.
     Another project's launcher, a commented-out line or a quoted string does not."""
-    if MARKER in text and (launcher := launcher_of(text)) is not None:
+    launcher = launcher_of(text) if is_ours(text) else None
+    if launcher is not None:
         return _is_this_launcher(launcher, repo, repo.top)
     folders: dict[tuple[int, ...], Path | None] = {(): repo.top}  # the current folder of each (sub)shell
     for subshells, words in _shell_commands(text):
@@ -644,13 +820,14 @@ def classify(path: Path, repo: Repo) -> str:
     this project's `hooks run`) | foreign.
 
     A symlink is never pytemplate's (install writes a regular file): writing through it,
-    dangling or not, would create or change its target, often a file of the work tree."""
+    dangling or not, would create or change its target, often a file of the work tree. Nor is a
+    file hook_script did not write (is_ours), whatever its comments say."""
     if path.is_symlink():
         return "calls" if runs_checks(_read(path), repo) else "foreign"
     if not path.is_file():
         return "missing"
     text = _read(path)
-    if MARKER in text:
+    if is_ours(text):
         if text == hook_script(repo.launcher):
             return "installed"
         other = launcher_of(text)
@@ -665,7 +842,7 @@ def own_local(repo: Repo) -> bool:
     if local.is_symlink() or not local.is_file():
         return False
     text = _read(local)
-    launcher = launcher_of(text) if MARKER in text else None
+    launcher = launcher_of(text) if is_ours(text) else None
     return launcher is not None and _in_this_project(launcher, repo)
 
 
@@ -682,16 +859,86 @@ def hook_state(repo: Repo) -> str:
     return "chained" if state == "other" and own_local(repo) else state
 
 
+def active_skipped(repo: Repo) -> tuple[str, str] | None:
+    """git_skips() of the hook git runs: core.hooksPath's (or a linked folder's) pre-commit
+    script, else the default folder's pre-commit."""
+    return git_skips(_hooks_path_file(repo) if repo.custom_hooks_path else repo.default_dir / HOOK, repo)
+
+
+def hooks_path_state(repo: Repo) -> str:
+    """classify() of the hook git runs in a custom hooks folder (core.hooksPath, a linked
+    folder), or "stale": pytemplate's hook of an older version that calls this project's
+    launcher. pytemplate writes nothing there, and such a hook (a team copied it into its
+    folder, then took a newer template) runs the checks all the same: read as "outdated", status,
+    install and setup said the checks were not in it and told to add the run line, which then
+    ran them twice."""
+    hook = _hooks_path_file(repo)
+    state = classify(hook, repo)
+    return "stale" if state == "outdated" and runs_checks(_read(hook), repo) else state
+
+
+# The states of a custom folder's hook (hooks_path_state) that run this project's checks
+RUNS_CHECKS = ("installed", "calls", "stale")
+
+
+def stale_hint(repo: Repo) -> str:
+    """How to bring a "stale" hook (hooks_path_state) up to date: pytemplate writes nothing in
+    that folder, so the user (or the tool that manages it) does. The pre-commit.local next to it,
+    which it runs first, must keep running."""
+    local = _hooks_path_file(repo).parent / LOCAL
+    keep = f", after a line that runs {_show(local, repo)} (it runs that first now)" if os.path.lexists(local) else ""
+    return f"it still runs the checks; to bring it up to date, replace it with this line{keep} (pytemplate writes nothing in {_show(repo.hooks_dir, repo)}):\n{run_line(repo)}"
+
+
 def hooks_path_runner(repo: Repo) -> str | None:
     """With core.hooksPath: the hook git runs there (as shown to the user) when it already runs
     this project's checks, else None."""
-    hook = _hooks_path_file(repo)
-    return _show(hook, repo) if classify(hook, repo) in ("installed", "calls") else None
+    return _show(_hooks_path_file(repo), repo) if hooks_path_state(repo) in RUNS_CHECKS else None
 
 
 def _show(path: Path, repo: Repo) -> str:
     rel = _within(path, repo.project)
     return rel if rel else path.as_posix()
+
+
+# What makes a file executable for Git for Windows' sh (the MSYS2 runtime on its noacl mounts,
+# Cygwin's has_exec_chars): its first two bytes. git itself runs a hook there that starts with #!
+WINDOWS_EXEC_MAGIC = (b"#!", b"MZ", b":\n")
+
+
+def _not_run(hook: Path, shown: str) -> str | None:
+    """None when the hook script runs the kept hook `hook` (shown as `shown`) first, else why
+    not: it runs it only with its x bit (`[ -x ]`), as git runs no hook without one (install
+    and status said it ran first, while git's own warning about it was gone). On Windows the
+    file's first bytes are its x bit for Git's sh (WINDOWS_EXEC_MAGIC), where os.access says X_OK
+    for every file: a kept hook without a #! line was said to run first, and was skipped."""
+    if IS_WINDOWS:
+        try:
+            with open(hook, "rb") as f:
+                magic = f.read(2)
+        except OSError:
+            magic = b""
+        if magic in WINDOWS_EXEC_MAGIC:
+            return None
+        return f"{shown} has no #! line, so neither git nor this hook runs it: start it with #!/bin/sh to run it first"
+    if os.access(hook, os.X_OK):
+        return None
+    return f"{shown} is not executable, so neither git nor this hook runs it: chmod +x {shown} to run it first"
+
+
+def git_skips(hook: Path, repo: Repo) -> tuple[str, str] | None:
+    """Why git does not run `hook`, the pre-commit of the folder git runs hooks from, and the fix,
+    or None. git runs no hook without its x bit: it only prints a hint, and the commit goes
+    through unchecked (a copy, an archive or a backup tool that drops modes). status and doctor
+    said "[ok] installed" and install, setup and apply "already installed", while every commit
+    went unchecked. Never on Windows, where git's access() ignores X_OK (compat/mingw.c) and runs
+    the hook whatever its mode; nor for husky's .husky/pre-commit, which husky runs through sh."""
+    if not (_same(hook.parent, repo.hooks_dir) or _same(hook.parent, repo.default_dir)):
+        return None  # husky 9's .husky/pre-commit (_hooks_path_file)
+    if IS_WINDOWS or not os.path.lexists(hook) or os.access(hook, os.X_OK):
+        return None
+    shown = _show(hook, repo)
+    return f"{shown} is not executable", f"chmod +x {shown}"
 
 
 def _hooks_path_file(repo: Repo) -> Path:
@@ -700,6 +947,56 @@ def _hooks_path_file(repo: Repo) -> Path:
     the user's .husky/pre-commit: that one is the file to check and to edit."""
     husky = repo.hooks_dir.name == "_" and any((repo.hooks_dir / name).is_file() for name in ("h", "husky.sh"))
     return repo.hooks_dir.parent / HOOK if husky else repo.hooks_dir / HOOK
+
+
+def elsewhere(repo: Repo, *, value: bool = False) -> str:
+    """Why pytemplate installs no hook where git runs them (custom_hooks_path), for the messages:
+    the default folder is a link (hooks_link), or core.hooksPath is set (`value`: and to what)."""
+    if repo.hooks_link:
+        return f"{_show(repo.default_dir, repo)} is a link to {_show(repo.hooks_dir, repo)}"
+    return f"core.hooksPath = {repo.hooks_path_value()!r}" if value else "core.hooksPath is set"
+
+
+def _elsewhere_short(repo: Repo) -> str:
+    return "a linked hooks folder" if repo.hooks_link else "core.hooksPath"
+
+
+def linked_hands_off(repo: Repo) -> str | None:
+    """Why uninstall, and apply with hooks.pre_commit = false, leave the hooks of a linked hooks
+    folder (Repo.hooks_link) as they are, or None. The folder is outside this repository's work
+    tree: other repositories may run its hooks; or git tracks its pre-commit or pre-commit.local:
+    a team's shared folder, whose hooks are the team's, pytemplate's own script too (shared on
+    purpose, or written there by an install older than the rule that leaves such a folder alone:
+    either way only a commit of the team's may change it). uninstall deleted the tracked
+    pre-commit and renamed the tracked pre-commit.local over it, and doctor advised it. None for a
+    folder that is no link, or for one of this work tree whose hooks git does not track: what such
+    an older install wrote there, which uninstall still removes."""
+    if not repo.hooks_link:
+        return None
+    present = [p for p in (repo.hooks_dir / HOOK, repo.hooks_dir / LOCAL) if os.path.lexists(p)]
+    top = Path(os.path.realpath(repo.top))
+    inside = _within(Path(os.path.realpath(repo.hooks_dir)), top)
+    if inside is None:
+        return f"{_show(repo.hooks_dir, repo)} is outside this repository, and other repositories may run its hooks"
+    names = [f"{inside}/{p.name}" if inside else p.name for p in present]
+    if not names:
+        return None
+    r = _git(["ls-files", "-z", "--", *names], top, repo.env)
+    if r.returncode != 0:  # read as "tracked": never a guess that deletes a file of the team's
+        return f"git cannot tell whether it tracks {', '.join(names)}: {r.stderr.strip() or f'exit code {r.returncode}'}"
+    tracked = [n for n in r.stdout.split("\0") if n]
+    if tracked:
+        return f"git tracks {', '.join(tracked)}: the hooks of everyone who uses that folder"
+    return None
+
+
+def linked_left_alone(repo: Repo, why: str) -> str:
+    """What uninstall says when it leaves pytemplate's hook in a linked hooks folder alone
+    (linked_hands_off gave `why`)."""
+    return (
+        f"pytemplate's hook in {_show(repo.hooks_dir, repo)} ({elsewhere(repo)}): left alone, since {why}. "
+        "If it should go, change that folder by hand (for a tracked file, in a commit)"
+    )
 
 
 def _hooks_path_hint(repo: Repo) -> str:
@@ -730,12 +1027,19 @@ def install(repo: Repo, *, force: bool = False) -> str:
     """Install or update the hook; return the message to print (PytError if it cannot)."""
     if repo.custom_hooks_path:
         hook = _hooks_path_file(repo)
-        state = classify(hook, repo)
+        state = hooks_path_state(repo)
+        skipped = git_skips(hook, repo) if state in RUNS_CHECKS else None
+        if skipped is not None:  # pytemplate writes nothing in that folder: the fix is the user's
+            raise PytError(f"{_show(hook, repo)} runs ./pyt hooks run ({_elsewhere_short(repo)}), but git skips it: {skipped[0]}.\n  {skipped[1]}")
+        if state == "stale":
+            hint = "\n".join(f"  {line}" for line in stale_hint(repo).splitlines())
+            return f"{_show(hook, repo)} already runs ./pyt hooks run ({_elsewhere_short(repo)}), but it is pytemplate's hook of an older version:\n{hint}"
         if state in ("calls", "installed"):
-            return f"{_show(hook, repo)} already runs ./pyt hooks run (core.hooksPath)"
+            return f"{_show(hook, repo)} already runs ./pyt hooks run ({_elsewhere_short(repo)})"
+        where = "a folder pytemplate never writes into" if repo.hooks_link else "not in the default folder"
         raise PytError(
-            f"core.hooksPath = {repo.hooks_path_value()!r}: git runs the hooks in {_show(repo.hooks_dir, repo)}, "
-            "not in the default folder, so pytemplate does not install its hook there.\n"
+            f"{elsewhere(repo, value=True)}: git runs the hooks in {_show(repo.hooks_dir, repo)}, "
+            f"{where}, so pytemplate does not install its hook there.\n"
             + "\n".join(f"  {line}" for line in _hooks_path_hint(repo).splitlines())
         )
     target = repo.default_dir / HOOK
@@ -745,19 +1049,25 @@ def install(repo: Repo, *, force: bool = False) -> str:
     if state == "missing" and not force and repo.ignored():
         raise PytError(f"{_ignored_message(repo)} (or: ./pyt hooks install --force)")
     other = launcher_of(_read(target)) if state == "other" else None
+    skipped = git_skips(target, repo) if state in ("calls", "other") else None  # not pytemplate's file to change
     if other is not None and own_local(repo):
+        skip_note = f"\n  but git skips {_show(target, repo)}: {skipped[0]} ({skipped[1]})" if skipped is not None else ""
         if not _own_local_outdated(repo):
+            if skip_note:  # the other project's file: its fix is the user's
+                raise PytError(f"{_show(target, repo)} ({other}) would run this project's checks from {_show(local, repo)},{skip_note}")
             return f"{_show(target, repo)} ({other}) already runs this project's checks from {_show(local, repo)}"
         if not proc.DRY_RUN:  # the other project's hook runs it: brought up to date in place
             _write_hook(local, script)
         verb = "would be updated" if proc.DRY_RUN else "updated"
-        return f"pre-commit hook {verb}: {_show(local, repo)} -> sh {repo.launcher} hooks run (run first by {_show(target, repo)}, the hook of {other})"
+        return f"pre-commit hook {verb}: {_show(local, repo)} -> sh {pasteable(repo.launcher)} hooks run (run first by {_show(target, repo)}, the hook of {other}){skip_note}"
     # this project's own copy as pre-commit.local (its chain's first hook went away): with this
     # project's hook back in pre-commit, it would run the checks twice
     drop = state in ("missing", "outdated", "installed") and own_local(repo)
     moved = False
     if state in ("foreign", "calls", "other"):
         if state == "calls" and not force:
+            if skipped is not None:
+                raise PytError(f"{_show(target, repo)} runs ./pyt hooks run (not pytemplate's file: left alone), but git skips it: {skipped[0]}.\n  {skipped[1]}")
             return f"{_show(target, repo)} already runs ./pyt hooks run (not pytemplate's file: left alone)"
         if not force:
             if other is not None:
@@ -776,7 +1086,13 @@ def install(repo: Repo, *, force: bool = False) -> str:
             )
         moved = True
     elif state == "installed" and not drop:
-        return f"pre-commit hook already installed: {_show(target, repo)}"
+        skips = git_skips(target, repo)
+        if skips is None:
+            return f"pre-commit hook already installed: {_show(target, repo)}"
+        if proc.DRY_RUN:
+            return f"pre-commit hook would be made executable again: {_show(target, repo)} (git skips it: {skips[0]})"
+        target.chmod(0o755)  # the mode _write_hook gives it (POSIX only: git_skips)
+        return f"pre-commit hook made executable again: {_show(target, repo)} (git skipped it: {skips[0]})"
     dry = proc.DRY_RUN
     if not dry:
         repo.default_dir.mkdir(parents=True, exist_ok=True)
@@ -790,25 +1106,31 @@ def install(repo: Repo, *, force: bool = False) -> str:
             local.unlink()
         _write_hook(target, script)
     verb = {"missing": "installed", "outdated": "updated", "installed": "already installed"}.get(state, "installed")
-    msg = f"pre-commit hook {'would be ' + verb if dry and state != 'installed' else verb}: {_show(target, repo)} -> sh {repo.launcher} hooks run"
+    msg = f"pre-commit hook {'would be ' + verb if dry and state != 'installed' else verb}: {_show(target, repo)} -> sh {pasteable(repo.launcher)} hooks run"
     if moved:
-        msg += f"\n  the previous hook {'would be' if dry else 'was'} kept as {_show(local, repo)} and runs first"
+        idle = _not_run(target if dry else local, _show(local, repo))  # a dry run moved nothing
+        msg += f"\n  the previous hook {'would be' if dry else 'was'} kept as {_show(local, repo)}" + (f"; {idle}" if idle else " and runs first")
     elif drop:
         msg += f"\n  {'would remove' if dry else 'removed'} {_show(local, repo)}: a copy of this project's hook (the checks would run twice)"
     elif local.is_file():
-        msg += f"\n  it runs {_show(local, repo)} first"
+        msg += f"\n  {_not_run(local, _show(local, repo)) or f'it runs {_show(local, repo)} first'}"
     return msg
 
 
 def uninstall(repo: Repo) -> str:
     """Remove this project's hook (never another one) and restore the hook it had moved aside.
     This project's hook chained as pre-commit.local after another project's is removed too
-    (never restored: it would run twice, or run with hooks.pre_commit = false)."""
+    (never restored: it would run twice, or run with hooks.pre_commit = false). In a linked hooks
+    folder only where linked_hands_off allows it: never a hook git tracks there."""
     target = repo.default_dir / HOOK
     local = repo.default_dir / LOCAL
     state = classify(target, repo)
     dry = proc.DRY_RUN
     own_copy = own_local(repo)
+    if state in ("installed", "outdated") or own_copy:
+        why = linked_hands_off(repo)
+        if why is not None:
+            return linked_left_alone(repo, why)
     if state == "other":
         other = launcher_of(_read(target))
         if own_copy:
@@ -841,28 +1163,41 @@ def _status_line(cfg: Config, repo: Repo) -> tuple[bool | None, str, str]:
     """Return (passed, label, hint) describing the hook, for `status` and `doctor`."""
     if repo.custom_hooks_path:
         hook = _hooks_path_file(repo)
-        state = classify(hook, repo)
+        state = hooks_path_state(repo)
         where = _show(hook, repo)
+        skipped = git_skips(hook, repo) if state in RUNS_CHECKS else None
+        if skipped is not None:
+            return None, f"git pre-commit hook: {where} runs ./pyt hooks run ({_elsewhere_short(repo)}), but git skips it: {skipped[0]}", skipped[1]
+        if state == "stale":
+            return None, f"git pre-commit hook outdated: {where} runs ./pyt hooks run ({_elsewhere_short(repo)}), as pytemplate's hook of an older version", stale_hint(repo)
         if state in ("installed", "calls"):
-            return True, f"git pre-commit hook: {where} runs ./pyt hooks run (core.hooksPath)", ""
-        return None, f"git pre-commit hook: core.hooksPath = {repo.hooks_path_value()!r}, pytemplate's checks are not in {where}", _hooks_path_hint(repo)
+            return True, f"git pre-commit hook: {where} runs ./pyt hooks run ({_elsewhere_short(repo)})", ""
+        return None, f"git pre-commit hook: {elsewhere(repo, value=True)}, pytemplate's checks are not in {where}", _hooks_path_hint(repo)
     target = repo.default_dir / HOOK
     local = repo.default_dir / LOCAL
     state = classify(target, repo)
     chained = local.is_file()
+    skipped = git_skips(target, repo) if state in ("installed", "calls", "other") else None
     if state == "installed" and own_local(repo):
         return None, f"git pre-commit hook installed, but {LOCAL} is a copy of it: the checks run twice", "./pyt hooks install"
+    if state == "installed" and skipped is not None:
+        return None, f"git pre-commit hook installed, but git skips it: {skipped[0]}", f"./pyt hooks install  (or {skipped[1]})"
     if state == "installed":
-        extra = f" (runs {LOCAL} first)" if chained else ""
-        return True, f"git pre-commit hook installed: {_show(target, repo)} -> sh {repo.launcher} hooks run{extra}", ""
+        idle = _not_run(local, _show(local, repo)) if chained else None
+        extra = f" ({idle})" if idle else f" (runs {LOCAL} first)" if chained else ""
+        return True, f"git pre-commit hook installed: {_show(target, repo)} -> sh {pasteable(repo.launcher)} hooks run{extra}", ""
     if state == "outdated":
         return None, "git pre-commit hook outdated (another launcher path or template version)", "./pyt hooks install"
+    if state == "calls" and skipped is not None:
+        return None, f"git pre-commit hook: {_show(target, repo)} runs ./pyt hooks run, but git skips it: {skipped[0]}", skipped[1]
     if state == "calls":
         return True, f"git pre-commit hook: {_show(target, repo)} runs ./pyt hooks run", ""
     other = launcher_of(_read(target)) if state == "other" else None
     if other is not None and own_local(repo):
         if _own_local_outdated(repo):
             return None, f"git pre-commit hook outdated: {LOCAL}, this project's hook that {_show(target, repo)} ({other}) runs first", "./pyt hooks install"
+        if skipped is not None:
+            return None, f"git pre-commit hook: {_show(target, repo)} ({other}) would run this project's checks ({LOCAL}), but git skips it: {skipped[0]}", skipped[1]
         return True, f"git pre-commit hook: {_show(target, repo)} runs this project's checks ({LOCAL}), then those of {other}", ""
     if repo.ignored():  # missing, foreign or another project's: none of ours, and this is why
         return None, f"git pre-commit hook not installed: the repository at {repo.top} ignores this project", (
@@ -894,13 +1229,13 @@ def chain_advice(repo: Repo) -> str:
 def show_status(cfg: Config, project: Path = ROOT) -> int:
     try:
         repo = find_repo(project)
-    except NotInGit as e:
-        ui.info(f"hooks: {e} (no git hook)")
+    except NotInGit as e:  # the answer, as the status line is in a repository: -q never hides it
+        ui.report(f"hooks: {e} (no git hook)")
         return 0
     ui.step(f"git hooks: {_show(repo.hooks_dir, repo)}")
     passed, label, hint = _status_line(cfg, repo)
     ui.check_line(passed, label, hint)
-    if repo.custom_hooks_path and classify(repo.default_dir / HOOK, repo) in ("installed", "outdated"):
+    if repo.custom_hooks_path and not repo.hooks_link and classify(repo.default_dir / HOOK, repo) in ("installed", "outdated"):
         ui.check_line(None, f"{_show(repo.default_dir / HOOK, repo)} is pytemplate's but inactive (core.hooksPath)", "./pyt hooks uninstall removes it")
     return 0
 
@@ -919,17 +1254,31 @@ def ensure_installed(cfg: Config, project: Path = ROOT) -> None:
         return
     try:
         if repo.custom_hooks_path:
-            if classify(_hooks_path_file(repo), repo) not in ("installed", "calls"):
-                ui.info("git pre-commit hook: core.hooksPath is set, not installed (./pyt hooks status says what to add)")
+            hook = _hooks_path_file(repo)
+            state = hooks_path_state(repo)
+            skipped = git_skips(hook, repo) if state in RUNS_CHECKS else None
+            if skipped is not None:  # a folder pytemplate never writes into: the fix is the user's
+                ui.warn(f"git pre-commit hook: {_show(hook, repo)} runs ./pyt hooks run, but git skips it: {skipped[0]} ({skipped[1]})")
+            elif state == "stale":
+                ui.info(f"git pre-commit hook: {_show(hook, repo)} runs ./pyt hooks run, as pytemplate's hook of an older version (./pyt hooks status says how to update it)")
+            elif state not in RUNS_CHECKS:
+                ui.info(f"git pre-commit hook: {elsewhere(repo)}, not installed (./pyt hooks status says what to add)")
             return
         target = repo.default_dir / HOOK
         state = classify(target, repo)
         own_copy = own_local(repo)
+        skipped = git_skips(target, repo) if state in ("installed", "calls", "other") else None
         if state in ("missing", "foreign", "other") and not own_copy and repo.ignored():  # nothing of ours there: why
             ui.info(f"git pre-commit hook: not installed: {_ignored_message(repo)} (or: ./pyt hooks install --force)")
-        elif state in ("missing", "outdated") or (state == "installed" and own_copy) or (state == "other" and own_copy and _own_local_outdated(repo)):
+        elif (
+            state in ("missing", "outdated")
+            or (state == "installed" and (own_copy or skipped is not None))  # a copy to drop, or the x bit to give back
+            or (state == "other" and own_copy and _own_local_outdated(repo))
+        ):
             lines = install(repo).splitlines()
             ui.ok("\n".join(lines if own_copy else lines[:1]))  # the removed copy is news
+        elif skipped is not None and (state == "calls" or own_copy):  # not pytemplate's file to change
+            ui.warn(f"git pre-commit hook: {_show(target, repo)} would run this project's checks, but git skips it: {skipped[0]} ({skipped[1]})")
         elif state == "foreign":
             ui.info(f"git pre-commit hook: another tool's hook is installed, left alone ({chain_advice(repo)})")
         elif state == "other" and not own_copy:
@@ -958,7 +1307,9 @@ def doctor(cfg: Config, check: Check, project: Path = ROOT) -> None:
     ui.step("git hook")
     check(*_status_line(cfg, repo))
     ci = ".github/workflows/ci.yml"
-    if repo.prefix and (project / ci).is_file():  # new warns only when it creates a project there
+    # new warns only when it creates a project there. An ignored project is in no commit of that
+    # repository: the line above says to give it one of its own (git init), not to add a workflow
+    if repo.prefix and not repo.ignored() and (project / ci).is_file():
         check(
             None,
             f"generated CI: {repo.prefix}/{ci} never runs (GitHub reads {repo.top.name}/.github/workflows only)",
@@ -999,48 +1350,142 @@ def project_paths(prefix: str, names: Iterable[str], *, ignore_case: bool = IS_W
     return out
 
 
+def _git_output(repo: Repo, *args: str) -> str:
+    """git's output for a call a check relies on, its paths as the file system names them
+    (os.fsdecode: a name that is not UTF-8 keeps its bytes, which the checks then open and hand
+    to git and ruff; read as UTF-8 text it became U+FFFD, and a staged file whose name is
+    Latin-1 was "missing from the working tree"). A call that failed read as an empty answer (no
+    file with unstaged changes, no untracked file, no index mode) and the checks it fed passed
+    a commit they had to block: it stops the hook with git's own message (the hook script then
+    blocks the commit and says how to commit without the checks)."""
+    argv = ["git", *GIT_CONFIG, "--literal-pathspecs", *args]
+    r = _run_bytes(argv, cwd=repo.project, env=_git_process_env(repo.env))
+    if r.returncode != 0:
+        said = r.stderr.decode("utf-8", errors="replace").strip() or f"exit code {r.returncode}"
+        raise PytError(f"git {' '.join(args[:2])} failed: {said}")
+    return os.fsdecode(r.stdout)
+
+
 def staged_files(repo: Repo, diff_filter: str = STAGED) -> list[str]:
     """Return the staged files, relative to the project: the ones whose new content is in the
     commit by default (what the per-file checks read); diff_filter="D": the staged deletions.
     --no-renames: a rename is its deletion plus its addition, so both paths are seen."""
-    r = repo.git("diff", "--cached", "--name-only", "--no-renames", f"--diff-filter={diff_filter}", "-z")
-    if r.returncode != 0:
-        raise PytError(f"git diff --cached failed: {r.stderr.strip()}")
-    return project_paths(repo.prefix, r.stdout.split("\0"), ignore_case=repo.ignore_case)
+    out = _git_output(repo, "diff", "--cached", "--name-only", "--no-renames", f"--diff-filter={diff_filter}", "-z")
+    return project_paths(repo.prefix, out.split("\0"), ignore_case=repo.ignore_case)
+
+
+# The index flags that hide a file's changes from `git diff` and `git add`, by the tag `git
+# ls-files -v` gives the entry: S skip-worktree (a sparse checkout, or the trick that keeps local
+# edits of a tracked file out of `git status`), a lower-case tag assume-unchanged, s both
+HIDING_FLAGS = ("skip-worktree", "assume-unchanged")
+
+
+def _hiding_flags(tag: str) -> tuple[str, ...]:
+    return tuple(flag for flag, on in zip(HIDING_FLAGS, (tag in ("S", "s"), tag.islower()), strict=True) if on)
+
+
+@dataclass(frozen=True)
+class Staging:
+    """What a commit made now would miss of some paths (relative to the project)."""
+
+    dirty: frozenset[str]  # unstaged changes, untracked (ignored or not), changes an index flag hides
+    flags: Mapping[str, tuple[str, ...]] = field(default_factory=dict)  # tracked path -> its HIDING_FLAGS
+
+
+def staging(repo: Repo, paths: Sequence[str]) -> Staging:
+    """Which of `paths` (relative to the project) a commit made now would miss, and the index flags
+    that hide the changes of any of them. The paths are files the commit needs (the generated
+    ones, pytemplate.toml, pyproject.toml, uv.lock: CI renders and syncs from them), so neither
+    an ignore rule nor an index flag makes one committed: `--exclude-standard` left out an
+    untracked one that a .gitignore or the user's core.excludesFile (a global `.vscode/` or
+    `.python-version` rule) ignores, `git diff` never shows the changes of a skip-worktree or
+    assume-unchanged entry, and the hook passed a commit CI then failed on every push."""
+    if not paths:
+        return Staging(frozenset())
+    names = _git_output(repo, "diff", "--name-only", "-z", "--", *paths).split("\0")
+    index = _git_output(repo, "ls-files", "--others", "--stage", "-v", "-z", "--full-name", "--", *paths)
+    flags: dict[str, tuple[str, ...]] = {}
+    blobs: dict[str, str] = {}
+    for record in index.split("\0"):
+        if record.startswith("? "):  # untracked, whatever an ignore rule says
+            names.append(record[2:])
+            continue
+        meta, _, name = record.partition("\t")
+        fields = meta.split()  # tag, mode, blob, stage
+        hidden = _hiding_flags(fields[0]) if len(fields) == 4 else ()
+        for rel in project_paths(repo.prefix, [name], ignore_case=repo.ignore_case) if hidden else ():
+            flags[rel], blobs[rel] = hidden, fields[2]
+    # git diff never compares a flagged entry with its file: the file's blob tells (the path's
+    # attributes applied, as `git add` would store it); a skip-worktree file missing from the
+    # disk (a sparse checkout) changes nothing in the commit
+    present = [p for p in blobs if (repo.project / p).is_file()]
+    if present:
+        hashes = _git_output(repo, "hash-object", "--", *present).split()
+        head = f"{repo.prefix}/" if repo.prefix else ""
+        names += [head + p for p, blob in zip(present, hashes, strict=False) if blob != blobs[p]]
+    return Staging(frozenset(project_paths(repo.prefix, names, ignore_case=repo.ignore_case)), flags)
 
 
 def unstaged_files(repo: Repo, paths: Sequence[str]) -> list[str]:
-    """Return which of `paths` (relative to the project) have unstaged changes or are untracked
-    (and not ignored): a commit made now would miss them."""
-    if not paths:
-        return []
-    diff = repo.git("diff", "--name-only", "-z", "--", *paths)
-    others = repo.git("ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", *paths)
-    names = diff.stdout.split("\0") + others.stdout.split("\0")
-    return sorted(set(project_paths(repo.prefix, names, ignore_case=repo.ignore_case)))
+    """Return which of `paths` (relative to the project) a commit made now would miss (staging)."""
+    return sorted(staging(repo, paths).dirty)
+
+
+def add_command(repo: Repo, flags: Mapping[str, tuple[str, ...]], paths: Sequence[str]) -> list[str]:
+    """The lines of a hint that stage `paths` (relative to the project; `flags`: Staging.flags):
+    `git add`, `git add -f` for an untracked path git ignores (git add refuses it otherwise), and
+    first a `git update-index` that clears each flag hiding a path's changes (git add refuses a
+    skip-worktree path, and stages nothing of an assume-unchanged one), then why. A plain `git add
+    a b` when nothing is ignored or flagged (asked only for a hint: the check already failed)."""
+    r = _git(["check-ignore", "--", *paths], repo.project, repo.env, literal=False) if paths else None
+    ignored = set(r.stdout.splitlines()) if r is not None and r.returncode == 0 else set()  # 1: none
+    lines: list[str] = []
+    for flag in HIDING_FLAGS:
+        marked = [p for p in paths if flag in flags.get(p, ())]
+        if marked:
+            lines.append(f"git update-index --no-{flag} {' '.join(marked)}")
+    plain = [p for p in paths if p not in ignored]
+    forced = [p for p in paths if p in ignored]
+    if plain:
+        lines.append(f"git add {' '.join(plain)}")
+    if forced:
+        lines.append(f"git add -f {' '.join(forced)}")
+        lines.append("(git ignores them, by a .gitignore or core.excludesFile, but the commit needs them: CI and every clone render and sync from them)")
+    if any(p in flags for p in paths):
+        lines.append("(an index flag hides their changes from git status and git add: update-index clears it)")
+    return lines
+
+
+def _plain_add(paths: Sequence[str]) -> list[str]:
+    return [f"git add {' '.join(paths)}"]
 
 
 def worktree_changes(repo: Repo) -> set[str]:
     """Return the project files whose working tree differs from the index (unstaged edits and
-    files deleted from the working tree), relative to the project."""
-    r = repo.git("diff", "--name-only", "--no-renames", "-z")
-    return set(project_paths(repo.prefix, r.stdout.split("\0"), ignore_case=repo.ignore_case))
+    files deleted from the working tree), relative to the project. Never a submodule: its own
+    checkout is no content of this commit, and git cat-file cannot read a gitlink (staged_blob
+    stopped the hook on a staged submodule that had moved on)."""
+    out = _git_output(repo, "diff", "--name-only", "--no-renames", "--ignore-submodules=all", "-z")
+    return set(project_paths(repo.prefix, out.split("\0"), ignore_case=repo.ignore_case))
 
 
-def staged_blob(repo: Repo, path: str) -> bytes | None:
+def staged_blob(repo: Repo, path: str) -> bytes:
     """Return the staged content of `path` (relative to the project) as a checkout would write
-    it (`--filters`: CRLF for `eol=crlf` files, whatever the index stores), or None.
+    it (`--filters`: CRLF for `eol=crlf` files, whatever the index stores). A path the index does
+    not hold, or git failing, is a PytError with git's message: None read as "nothing to check",
+    and the launcher and language checks passed a staged file they never read.
     `:0:` (stage 0) keeps a path like `1:x.py` from reading as a stage number."""
     spec = ":0:" + (f"{repo.prefix}/{path}" if repo.prefix else path)
-    try:
-        r = _run_bytes(["git", *GIT_CONFIG, "cat-file", "--filters", spec], cwd=repo.project, env=_git_process_env(repo.env))
-    except PytError:
-        return None
-    return r.stdout if r.returncode == 0 else None
+    r = _run_bytes(["git", *GIT_CONFIG, "cat-file", "--filters", spec], cwd=repo.project, env=_git_process_env(repo.env))
+    if r.returncode != 0:
+        said = r.stderr.decode("utf-8", errors="replace").strip() or f"exit code {r.returncode}"
+        raise PytError(f"git cat-file {spec} failed: {said}")
+    return r.stdout
 
 
 def python_files(staged: Sequence[str], dirs: Sequence[str]) -> list[str]:
-    """Return the staged .py/.pyi files under the code dirs (src/, tests/)."""
+    """Return the staged Python files and notebooks (PY_SUFFIXES) under the code dirs (src/,
+    tests/): ruff reads a notebook by path and on stdin alike (--stdin-filename x.ipynb)."""
     return [p for p in staged if p.endswith(PY_SUFFIXES) and "/" in p and p.split("/", 1)[0] in dirs]
 
 
@@ -1119,6 +1564,11 @@ def _run_ruff(cfg: Config, args: Sequence[str | Path], whole: Sequence[str], as_
     return code, "\n".join(outs)
 
 
+# What `ruff format --check` prints for a file it cannot parse, by path (concise) or on stdin; its
+# exit code is then 2, like a ruff that did not run, which the hook called "could not run ruff"
+_UNPARSABLE = re.compile(r": invalid-syntax: |^error: Failed to parse ", re.MULTILINE)
+
+
 def check_ruff(cfg: Config, files: Sequence[str], as_staged: Mapping[str, bytes] | None = None) -> Iterator[Result]:
     """ruff check and ruff format --check on the staged Python files `files`: the ones in
     `as_staged` (path -> staged content: they have unstaged changes) through stdin, the others
@@ -1135,7 +1585,7 @@ def check_ruff(cfg: Config, files: Sequence[str], as_staged: Mapping[str, bytes]
     n = f"{len(files)} file{'s' if len(files) != 1 else ''}"
     note = f"; {len(staged_)} with unstaged changes, checked as staged" if staged_ else ""
     partial_hint = "\n(a file with unstaged changes was checked as staged: stage only the fix, e.g. git add -p)" if staged_ else ""
-    common: list[str | Path] = ["--config", config_file, "--force-exclude", "--output-format", "concise"]
+    common: list[str | Path] = ["--config", config_arg(config_file), "--force-exclude", "--output-format", "concise"]
     code, out = _run_ruff(cfg, ["check", *common, *(["--exit-zero"] if exit_zero else [])], whole, staged_)
     if code > 1:
         yield Result(False, "ruff check: could not run ruff (the output says why)", output=out)
@@ -1146,7 +1596,10 @@ def check_ruff(cfg: Config, files: Sequence[str], as_staged: Mapping[str, bytes]
     else:
         yield Result(False, f"ruff check: {n} (profile '{profile}'{note})", "./pyt lint --fix fixes some; then git add" + partial_hint, output=out)
     code, out = _run_ruff(cfg, ["format", "--check", *common], whole, staged_)
-    if code > 1:
+    if code > 1 and _UNPARSABLE.search(out):  # ruff format exits 2 for a file it cannot parse
+        also = ", then ./pyt fmt" if "would be reformatted" in out or "Would reformat" in out else ""
+        yield Result(False, "ruff format: a staged file does not parse", f"fix the syntax error ruff check shows{also}; then git add" + partial_hint, output=out)
+    elif code > 1:
         yield Result(False, "ruff format: could not run ruff (the output says why)", output=out)
     elif code == 0:
         yield Result(True, f"ruff format: {n} formatted" + (f" ({note[2:]})" if note else ""))
@@ -1154,11 +1607,12 @@ def check_ruff(cfg: Config, files: Sequence[str], as_staged: Mapping[str, bytes]
         yield Result(False, "ruff format: files need formatting", "./pyt fmt, then git add" + partial_hint, output=out)
 
 
-def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> Iterator[Result]:
+def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str], add: Callable[[Sequence[str]], list[str]] = _plain_add) -> Iterator[Result]:
     """The generated files match their sources, and none has unstaged changes. Conservative:
     this blocks even a commit that touches none of them, because the generator also reads the
     runner and the templates. The hints name the config files with unstaged changes too, so
-    following them never commits generated files without their source."""
+    following them never commits generated files without their source. `add`: the command lines
+    that stage some paths (add_command)."""
     changed, edited = render.apply(cfg, check=True)
     sources = [p for p in CONFIG_FILES if p in dirty]
     if changed or edited:
@@ -1167,7 +1621,8 @@ def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> I
             # render records their hashes in state.json too: left out of the line, the next commit
             # stopped at "generated files staged: unstaged: .pytemplate/state.json"
             state = STATE_FILE.relative_to(ROOT).as_posix()
-            hints.append(f"outdated: {', '.join(changed)}\n./pyt render, then git add {' '.join([*sources, *changed, state])}")
+            first, *rest = add([*sources, *changed, state])
+            hints.append("\n".join([f"outdated: {', '.join(changed)}", f"./pyt render, then {first}", *rest]))
         if edited:
             hints.append(f"hand-edited: {', '.join(edited)}\nchange pytemplate.toml or .pytemplate/templates (./pyt render --diff), or ./pyt render --force")
         yield Result(False, "generated files up to date", "\n".join(hints))
@@ -1176,7 +1631,7 @@ def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> I
     missed = [p for p in generated if p in dirty]
     if missed:
         also = f" (their source {', '.join(sources)} too)" if sources else ""
-        yield Result(False, "generated files staged", f"unstaged: {', '.join(missed)}{also}\ngit add {' '.join([*sources, *missed])}")
+        yield Result(False, "generated files staged", "\n".join([f"unstaged: {', '.join(missed)}{also}", *add([*sources, *missed])]))
     else:
         yield Result(True, "generated files staged")
 
@@ -1200,12 +1655,14 @@ def check_lock(cfg: Config) -> Result:
     return Result(True, "pyproject.toml and uv.lock up to date")
 
 
-def check_together(group: Sequence[str], touched: set[str], deleted: set[str], dirty: set[str]) -> Result:
+def check_together(
+    group: Sequence[str], touched: set[str], deleted: set[str], dirty: set[str], add: Callable[[Sequence[str]], list[str]] = _plain_add
+) -> Result:
     """Once any file of `group` (the config files and the generated ones) is in the commit, the
     config files are committed together: none may keep unstaged changes, or HEAD pairs a new
     file with an old one (uv.lock without its pyproject.toml fails `uv run --locked`; generated
     files without pytemplate.toml fail `render --check`). Unstaged generated files are
-    check_generated's finding."""
+    check_generated's finding. `add`: the command lines that stage some paths (add_command)."""
     in_commit = [p for p in group if p in touched]
     if not in_commit:
         return Result(None, "config files: not in this commit")
@@ -1215,10 +1672,10 @@ def check_together(group: Sequence[str], touched: set[str], deleted: set[str], d
     hints = [f"in the commit: {', '.join(in_commit)}"]
     kept = [p for p in missed if p in deleted]  # `git rm --cached`: gone from the commit, still on disk
     if kept:
-        hints.append(f"deleted in the commit but still in the working tree: {', '.join(kept)}\ngit add {' '.join(kept)} (or delete them)")
+        hints += [f"deleted in the commit but still in the working tree: {', '.join(kept)} (stage them again, or delete them)", *add(kept)]
     rest = [p for p in missed if p not in deleted]
     if rest:
-        hints.append(f"unstaged changes: {', '.join(rest)} (they are committed together)\ngit add {' '.join(rest)}")
+        hints += [f"unstaged changes: {', '.join(rest)} (they are committed together)", *add(rest)]
     return Result(False, f"config files staged together: {', '.join(missed)} not staged", "\n".join(hints))
 
 
@@ -1245,9 +1702,8 @@ def check_mypyc(cfg: Config, project: Path, staged: set[str]) -> Result:
 
 
 def _index_modes(repo: Repo, names: Sequence[str]) -> dict[str, str]:
-    r = repo.git("ls-files", "-s", "--", *names)
     modes: dict[str, str] = {}
-    for line in r.stdout.splitlines():
+    for line in _git_output(repo, "ls-files", "-s", "--", *names).splitlines():
         meta, _, path = line.partition("\t")
         if meta and path:
             modes[path.rsplit("/", 1)[-1]] = meta.split()[0]
@@ -1365,24 +1821,30 @@ def checks(
     py = python_files(staged, code_dirs)
     missing = [p for p in py if not (repo.project / p).is_file()]
     present = [p for p in py if p not in missing]
-    as_staged: dict[str, bytes] = {}
-    for p in present:
-        if p in partial and (blob := staged_blob(repo, p)) is not None:
-            as_staged[p] = blob
+    as_staged = {p: staged_blob(repo, p) for p in present if p in partial}
     yield from check_ruff(cfg, present, as_staged)
     if missing:
-        # git commits the staged version of a file deleted from the disk: almost always an accident
+        # git commits the staged version of a file deleted from the disk: almost always an accident.
+        # Dropping it from the commit: `git rm --cached` unstages a file the commit adds, but for a
+        # tracked one it stages its deletion; `git restore --staged` puts HEAD's version back.
+        added = set(staged_files(repo, "A"))
+        new = [p for p in missing if p in added]
+        tracked = [p for p in missing if p not in added]
+        drop = [f"git rm --cached {' '.join(new)}"] if new else []
+        drop += [f"git restore --staged {' '.join(tracked)}"] if tracked else []
         yield Result(
             False,
             f"staged files missing from the working tree: {', '.join(missing)}",
-            f"keep them: git restore {' '.join(missing)}\ndrop them from the commit: git rm --cached {' '.join(missing)}",
+            f"keep them: git restore {' '.join(missing)}\ndrop them from the commit: {'; '.join(drop)}",
         )
     generated = sorted({*render.outputs(cfg), STATE_FILE.relative_to(ROOT).as_posix()})
     group = [*CONFIG_FILES, *generated]
-    dirty = set(unstaged_files(repo, group))
-    yield from check_generated(cfg, generated, dirty)
+    state = staging(repo, group)
+    dirty = set(state.dirty)
+    add = functools.partial(add_command, repo, state.flags)
+    yield from check_generated(cfg, generated, dirty, add)
     yield check_lock(cfg)
-    yield check_together(group, staged_set | set(deleted), set(deleted), dirty)
+    yield check_together(group, staged_set | set(deleted), set(deleted), dirty, add)
     yield check_mypyc(cfg, repo.project, staged_set)
     yield check_launchers(repo, staged_set, content)
     if template_repo:
@@ -1420,7 +1882,10 @@ def run(cfg: Config, repo: Repo) -> int:
     n = len(staged) + len(deleted)
     gone = f", {len(deleted)} deleted" if deleted else ""
     ui.step(f"pre-commit: checking {n} staged file{'s' if n != 1 else ''}{gone}")
-    dirs = [d for d in ("src", "tests") if (repo.project / d).is_dir()]
+    # The code folders by name, never by what is on disk: a staged file of a src/ or tests/ gone
+    # from the working tree is a missing file like any other (filtered by existence, it was dropped
+    # without a word, neither checked nor named, and the commit took it in)
+    dirs = ["src", "tests"]
     failed = 0
     template_repo = (TEMPLATE / "template-repo").is_file()
     for result in checks(cfg, repo, staged, code_dirs=dirs, template_repo=template_repo, deleted=deleted):
@@ -1428,9 +1893,14 @@ def run(cfg: Config, repo: Repo) -> int:
         failed += result.passed is False
     seconds = time.perf_counter() - start
     if failed:
+        # git runs the hook from the top of the work tree, where a project in a subfolder has no
+        # ./pyt: the hints, and the paths the tools print, are the project's (typed at the top,
+        # `./pyt render` and `git add .vscode/tasks.json` failed)
+        folder = pasteable(repo.prefix)  # `cd apps/R&D` ran `cd apps/R` in the background, then `D`
+        where = f"\n  (the commands and paths above are the project's: run them in its folder, cd {folder} from the top of the repository)" if repo.prefix else ""
         ui.error(
             f"pre-commit: {failed} check{'s' if failed != 1 else ''} failed ({seconds:.1f} s). Fix, `git add` and commit again\n"
-            "  (skip the hook once: git commit --no-verify)"
+            f"  (skip the hook once: git commit --no-verify){where}"
         )
         return 1
     ui.ok(f"pre-commit: all checks passed ({seconds:.1f} s)")
@@ -1453,11 +1923,16 @@ def cmd_hooks(cfg: Config, args: list[str]) -> int:
     if sub == "run":
         return run(cfg, repo)
     try:
-        if sub == "install":
-            ui.ok(install(repo, force="--force" in flags))
-        else:
-            ui.info(uninstall(repo))
+        message = install(repo, force="--force" in flags) if sub == "install" else uninstall(repo)
     except OSError as e:  # a hooks folder the user may not write (another user's, read-only, immutable)
         name = e.filename or (repo.default_dir / HOOK)
         raise PytError(f"hooks {sub}: cannot change {name}: {e.strerror or e}") from None
+    # What was done, or left alone and why (a kept hook that never runs): the answer to the
+    # command, never hidden by -q (5.3), which hid "not pytemplate's hook: left alone"
+    if ui.QUIET:
+        ui.report(message)
+    elif sub == "install":
+        ui.ok(message)
+    else:
+        ui.info(message)
     return 0

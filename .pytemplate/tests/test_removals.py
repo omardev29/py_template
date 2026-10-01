@@ -130,8 +130,10 @@ def test_a_pytemplate_toml_that_still_has_jit_fails_to_load(tmp_path: Path, monk
     """A project whose pytemplate.toml kept `jit = false` fails on every command, like any typo."""
     text = (ROOT / "pytemplate.toml").read_text(encoding="utf-8")
     assert "\njit" not in text
-    old = text.replace('pypy = "pypy@3.11.15"', 'pypy = "pypy@3.11.15"\njit = false             # old key', 1)
-    assert old != text
+    # into [python] whatever its lines say: a project that pinned another python.pypy (README's
+    # Troubleshooting) had no `pypy = "pypy@3.11.15"` line to put it after, and the test failed
+    old = config.set_value(text, "python", "jit", False)
+    assert old != text and tomllib.loads(old)["python"]["jit"] is False
     path = tmp_path / "pytemplate.toml"
     path.write_text(old, encoding="utf-8")
     monkeypatch.setattr(config, "CONFIG_FILE", path)
@@ -381,6 +383,19 @@ def test_shell_setup_says_what_replaced_it(outside: bool, monkeypatch: pytest.Mo
     assert cli.main(["shell-setup", "bash"]) == 2
     prog = "pyt" if outside else "./pyt"
     assert f"shell-setup is no longer a {prog} command: `pyt install` puts the launchers themselves on PATH" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("outside", [False, True], ids=["project", "outside"])
+def test_help_of_shell_setup_says_what_replaced_it(outside: bool, monkeypatch: pytest.MonkeyPatch, cli_state: None, capsys: pytest.CaptureFixture[str]) -> None:
+    """`help shell-setup` said `unknown command`, while typing `shell-setup` says what replaced
+    it (rule 1.11: a retired command is recognised wherever it is named)."""
+    monkeypatch.setattr(project, "GLOBAL", outside)
+    monkeypatch.setattr(config, "load", lambda *_a: make({}))
+    assert cli.main(["help", "shell-setup"]) == 2
+    err = capsys.readouterr().err
+    prog = "pyt" if outside else "./pyt"
+    assert f"shell-setup is no longer a {prog} command: `pyt install` puts the launchers themselves on PATH" in err, err
+    assert "unknown command" not in err, err
 
 
 # --- the real thing, in throwaway copies ---------------------------------------------------------

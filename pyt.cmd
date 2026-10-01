@@ -71,7 +71,9 @@ set "PT_GLOBAL=1"
 set "PT_PARENT="
 set "PT_UV="
 if defined UV if exist "%UV%" if not exist "%UV%\" set "PT_UV=%UV%"
+if defined PT_UV call :opens 2>nul
 if not defined PT_UV for %%I in (uv.exe) do set "PT_UV=%%~$PATH:I"
+if defined PT_UV call :opens 2>nul
 if not defined PT_UV call :uv_in_dirs
 if not defined PT_UV call :uv_in_registry
 if not defined PT_UV goto :no_uv
@@ -165,15 +167,50 @@ exit /b 0
 :uv_in_list
 if not defined PT_LIST exit /b 0
 rem Drop the quotes of quoted entries first (the list is split on the
-rem semicolons into quoted words below), then "call set" expands the
-rem variables of REG_EXPAND_SZ values.
+rem semicolons into quoted words below). Then a child cmd expands the
+rem variables of REG_EXPAND_SZ values as Windows does: its command line
+rem keeps a variable that is not defined as it is. In this batch file call
+rem set removed it, and an entry of an undefined JAVA_HOME, then \bin,
+rem named a folder of the drive root, where any user may create one.
+rem The echo has no redirection: echo prints the blank before one, and the
+rem closing quote then stayed on the list, which broke the FOR below. A
+rem variable may hold quotes too (a quoted JAVA_HOME): they go as well.
 set "PT_LIST=%PT_LIST:"=%"
-call set "PT_LIST=%PT_LIST%"
-for %%P in ("%PT_LIST:;=" "%") do call :probe "%%~P"
+for /f "delims=" %%L in ('echo "%PT_LIST%"') do set "PT_LIST=%%~L"
+if not defined PT_LIST exit /b 0
+set "PT_LIST=%PT_LIST:"=%"
+if not defined PT_LIST exit /b 0
+rem Each entry reaches :try_entry in a variable: as call arguments its
+rem variables would be expanded again, the batch file's way.
+for %%P in ("%PT_LIST:;=" "%") do set "PT_E=%%~P" & call :try_entry
+set "PT_E="
+exit /b 0
+
+:try_entry
+rem Only an absolute folder (X:\... or \\server\share\...): a relative entry
+rem names a folder below the current one, or holds a variable not defined.
+if defined PT_UV exit /b 0
+if not defined PT_E exit /b 0
+if "%PT_E:~1,2%"==":\" goto :try_absolute
+if "%PT_E:~1,2%"==":/" goto :try_absolute
+if "%PT_E:~0,2%"=="\\" goto :try_absolute
+exit /b 0
+:try_absolute
+if exist "%PT_E%\uv.exe" set "PT_UV=%PT_E%\uv.exe"
+if defined PT_UV call :opens 2>nul
 exit /b 0
 
 :probe
 if defined PT_UV exit /b 0
 if "%~1"=="" exit /b 0
 if exist "%~1\uv.exe" set "PT_UV=%~1\uv.exe"
+if defined PT_UV call :opens 2>nul
+exit /b 0
+
+:opens
+rem if exist is also true for a symbolic link whose target is gone (an
+rem uninstalled uv, its link left in WinGet's Links folder), which then
+rem won over the next uv: the file must open (a failed redirection runs
+rem what follows the double bar).
+<"%PT_UV%" type nul >nul || set "PT_UV="
 exit /b 0

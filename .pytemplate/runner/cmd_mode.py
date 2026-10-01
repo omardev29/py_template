@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -30,7 +30,8 @@ def _describe(cfg: Config, title: str = "current mode") -> None:
     for b in cfg.backend.supported:
         ui.report(f"  {'typing ' + b:<14} {cfg.profile_for(b)}")
     ui.report(f"  editor         {cfg.typing.editor}")
-    ui.report(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
+    if cfg.supports("mypyc"):  # a project without it compiles nothing (the line said it did)
+        ui.report(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
 
 
 def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespace:
@@ -38,10 +39,15 @@ def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespa
 
     An option the parser does not know is refused by name BEFORE parsing: argparse bound the
     value after it to a positional (`mode --typ strict`: "argument backend: invalid choice:
-    'strict'", never a word about --typ)."""
+    'strict'", never a word about --typ). So is an option given twice, whose last value argparse
+    keeps without a word (`new DIR --preset raylib --preset flet` made a flet project)."""
     options = args[: args.index("--")] if "--" in args else args
     known = parser._option_string_actions
     unknown = [a for a in options if a.startswith("-") and a != "-" and a.split("=", 1)[0] not in known]
+    names = [a.split("=", 1)[0] for a in options if a.startswith("--") and a.split("=", 1)[0] in known]
+    repeated = sorted({n for n in names if names.count(n) > 1})
+    if repeated and not unknown:
+        raise PytError(f"{parser.prog}: {', '.join(repeated)} given more than once; give each option once")
     ns = argparse.Namespace()
     if not unknown:
         ns, unknown = parser.parse_known_args(args)
@@ -50,14 +56,23 @@ def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespa
     return ns
 
 
+def _builtins() -> set[str]:
+    """The builtin commands, as dispatch validates with them: a [vscode] button of a retired
+    command (config.RETIRED_COMMANDS) is left out only then, and mode rendered it into
+    tasks.json, which render --check and the pre-commit hook then refused."""
+    from .cli import COMMANDS  # lazy: cli imports this module through its COMMANDS table
+
+    return set(COMMANDS)
+
+
 def _config_from_text(text: str, where: str) -> Config:
     """Validate a pytemplate.toml text in memory (what config.load does with the file)."""
     try:
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
-        raise PytError(f"{where}: not valid TOML: {e}") from None
+    except config.TOML_ERRORS as e:
+        raise PytError(f"{where}: not valid TOML: {config.toml_error(e)}") from None
     cfg: Config = config._build(Config, data, "")
-    config.validate(cfg)
+    config.validate(cfg, _builtins())
     return cfg
 
 
@@ -115,6 +130,9 @@ def _supports_after(cfg: Config, spec: str, backend: str | None = None) -> list[
 # mypy flags of the 3.11 API check: never the project's .mypy.ini (the default typing profile
 # "off" sets ignore_errors = True there, which hid every error), and the bodies of unannotated
 # functions are checked too. Only the errors that appear as 3.11 and not as python.cpython count.
+# Modules are named from src (MYPYPATH, _precheck_mypypath) and the project folder, as .mypy.ini
+# names them (explicit_package_bases): from the nearest folder with an __init__.py, an app package
+# without one was "found twice" (`app` and `<pkg>.app`), mypy stopped and PyPy could not be enabled
 PRECHECK_MYPY_FLAGS = (
     "--config-file=",  # an empty value: no config file at all
     "--check-untyped-defs",
@@ -123,7 +141,25 @@ PRECHECK_MYPY_FLAGS = (
     "--follow-imports", "silent",
     "--no-error-summary",
     "--hide-error-context",
+    "--explicit-package-bases",
 )
+
+
+def _precheck_mypypath() -> str:
+    """The MYPYPATH of the precheck's mypy: the caller's own MYPYPATH first, which ./pyt check's
+    mypy reads too (mypy puts it before the config's), then .mypy.ini's mypy_path (src, and
+    typings/ when it holds stubs), relative to the project folder mypy runs in (an absolute path
+    would split at a ':' of the project folder's path on POSIX)."""
+    ours = ["src", "typings"] if render.typings_dir() else ["src"]
+    return os.pathsep.join([*filter(None, [os.environ.get("MYPYPATH")]), *ours])
+
+
+def precheck_key(line: str) -> tuple[str, str]:
+    """A mypy error line (`path:line: error: message  [code]`) by what no typeshed wording
+    changes: its place and its error code ("" for an error without one)."""
+    where = line.split(": error:", 1)[0]
+    code = re.search(r"\[([A-Za-z0-9_-]+)\]\s*$", line)
+    return where, code.group(1) if code else ""
 
 
 def _precheck_py311(cfg: Config) -> None:
@@ -159,9 +195,18 @@ def _precheck_py311(cfg: Config) -> None:
         ui.ok(f"no Python code in src/ or tests/: nothing to check for Python {version}")
         return
     # 1) syntax: ruff reports syntax that does not exist in the target version as an error
+    #    (invalid-syntax). No lint rule besides E9 (an io-error): F632 `x is "a"` or an undefined
+    #    name (F63, F82) is the same on every version, and blocked PyPy as "syntax" under the warn
+    #    profile, whose check passes them. --isolated reads no configuration file, so the folders
+    #    it leaves out are given here, ./pyt check's (render.ruff_exclude): with ruff's own default
+    #    `exclude`, whose names match a folder at any depth, src/<pkg>/dist/ or a tests/venv/ was
+    #    never checked, and code PyPy cannot parse there (a PEP 701 f-string, which mypy's 3.11
+    #    parse passes) enabled PyPy
+    target = "py" + version.replace(".", "")
+    excludes = ",".join(render.ruff_exclude())  # read against ruff's working folder, ROOT
     r = envs.uv(
         tool,
-        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", "py" + version.replace(".", ""), "--select", "E9,F63,F7,F82", *dirs],
+        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", target, "--select", "E9", "--exclude", excludes, *dirs],
         check=False,
         echo=not dry,  # proc.run skips echoed commands under --dry-run
     )
@@ -171,21 +216,29 @@ def _precheck_py311(cfg: Config) -> None:
         raise PytError(f"could not run ruff for the Python {version} check (exit code {r.returncode}, see above)")
 
     # 2) APIs: mypy errors that appear ONLY when checking as that version (e.g. typing.override)
-    def mypy_errors(version: str) -> set[str]:
+    def mypy_errors(version: str) -> dict[tuple[str, str], str]:
+        """The error lines, by place and code (precheck_key): typeshed words the same error
+        differently for each version (int(str | None) lists SupportsTrunc as 3.11 only)."""
         argv = [
             *run, "mypy", *PRECHECK_MYPY_FLAGS,
             "--python-version", version, "--python-executable", str(tool.python), *dirs,
         ]
-        r = envs.uv(tool, argv, capture=True, check=False, echo=False)
+        r = envs.uv(tool, argv, extra_env={"MYPYPATH": _precheck_mypypath()}, capture=True, check=False, echo=False)
         if r.returncode not in (0, 1):  # 2 = mypy (or uv starting it) aborted: nothing was checked
-            ui.info(((r.stdout or "") + (r.stderr or "")).rstrip())
+            ui.report(((r.stdout or "") + (r.stderr or "")).rstrip())  # why: shown even with -q
             raise PytError(f"mypy could not check the code as Python {version} (exit code {r.returncode}, see above)")
-        return {ln.strip() for ln in (r.stdout or "").splitlines() if ": error:" in ln}
+        errors: dict[tuple[str, str], str] = {}
+        for ln in (r.stdout or "").splitlines():
+            if ": error:" in ln:
+                errors.setdefault(precheck_key(ln.strip()), ln.strip())
+        return errors
 
-    new = sorted(mypy_errors(version) - mypy_errors(cfg.python.cpython))
+    at_version = mypy_errors(version)
+    at_cpython = mypy_errors(cfg.python.cpython)
+    new = sorted(line for key, line in at_version.items() if key not in at_cpython)
     if new:
-        for line in new:
-            ui.error(line)
+        for line in new:  # mypy's own lines (`path:line: error: ...`): never a second prefix
+            ui.report(line)  # what was asked for: shown with -q too
         raise PytError(
             f"the code uses APIs that do not exist in Python {version} (above). Fix it before enabling PyPy "
             "(e.g. typing.override -> typing_extensions.override)"
@@ -254,6 +307,12 @@ def _plan_mode(cfg: Config, new_cfg: Config, changes: list[tuple[str, str, objec
         lock = "up to date (uv lock --check)" if r.returncode == 0 else "would re-lock (uv lock)"
     else:
         lock = "unchanged"
+    if lock.startswith("would re-lock"):
+        # The real run's ensure_lock refuses this re-lock under the user's UV_FROZEN or UV_LOCKED
+        # (`uv lock` writes nothing then): the plan says so, where it promised the re-lock
+        from .cmd_env import _refuse_a_frozen_lock
+
+        _refuse_a_frozen_lock()
     ui.info(f"  uv.lock          {lock}")
     changed, edited = render.apply(new_cfg)  # --dry-run: only compares
     ui.info("  generated files  " + (f"would update {', '.join(changed)}" if changed else "unchanged"))
@@ -282,11 +341,7 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
             fixed.append(f"--supports={spec}")
         else:
             fixed.append(a)
-    options = [a.split("=", 1)[0] for a in fixed if a.startswith("--")]
-    repeated = sorted({o for o in options if options.count(o) > 1})
-    if repeated:  # argparse would silently keep the last one
-        raise PytError(f"mode: {', '.join(repeated)} given more than once; give each option once")
-    ns = _parse(parser, fixed)
+    ns = _parse(parser, fixed)  # an option given twice is refused there, as for new, render, __init
     if ns.supports is not None and not ns.supports.strip():
         raise PytError("mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc")
     if not any((ns.backend, ns.supports, ns.typing, ns.editor)):
@@ -349,7 +404,7 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     before = {path: _read_bytes(path) for path in (CONFIG_FILE, PYPROJECT, PYPROJECT.with_name("uv.lock"))}
     try:
         config.update_file(changes)
-        new_cfg = config.load()
+        new_cfg = config.load(_builtins())
         heavy = supported != cfg.backend.supported
         if heavy or render.pyproject_outdated(new_cfg):
             from .cmd_env import ensure_lock
@@ -461,8 +516,9 @@ def cmd_init(cfg: Config, args: list[str]) -> int:
 
 def _work_tree_top(folder: Path) -> Path | None:
     """The top of the git work tree `folder` would be in (its nearest existing parent is asked:
-    new creates the folder), or None: no work tree there, or no git."""
-    git = shutil.which("git")
+    new creates the folder), or None: no work tree there, one that ignores `folder` (the project
+    gets a repository of its own there: presets.ignored_by_work_tree), or no git."""
+    git = proc.find_program("git")
     if git is None:
         return None
     probe = folder
@@ -470,7 +526,9 @@ def _work_tree_top(folder: Path) -> Path | None:
         probe = probe.parent
     r = proc.run([git, "rev-parse", "--show-toplevel"], cwd=probe, env=presets._git_env(), capture=True, check=False, echo=False)
     top = r.stdout.strip() if r.returncode == 0 else ""
-    return Path(native_path(top)) if top else None  # MSYS2's own git prints /c/...
+    if not top or presets.ignored_by_work_tree(git, folder, probe):
+        return None
+    return Path(native_path(top))  # MSYS2's own git prints /c/...
 
 
 def _monorepo_note(dest: Path, top: Path) -> None:
@@ -485,6 +543,24 @@ def _monorepo_note(dest: Path, top: Path) -> None:
     )
 
 
+def _inside_the_template(resolved: Path) -> bool:
+    """Whether `resolved` (a realpath) is the template's folder or lies inside it, whatever
+    spelling names that folder: realpath folds links only, and another case of its name (macOS's
+    case-insensitive volume, where ROOT keeps the case typed) or a bind mount of it named the
+    same folder by another string, so new made its project inside the template's work tree. Each
+    folder of it that exists is compared with ROOT itself (os.path.samefile, as hooks compares the
+    project's folder)."""
+    if resolved == ROOT or ROOT in resolved.parents:
+        return True
+    for folder in (resolved, *resolved.parents):
+        try:
+            if os.path.samefile(folder, ROOT):
+                return True
+        except OSError:  # the destination's tail, not made yet (or a folder it may not look into)
+            continue
+    return False
+
+
 def cmd_new(cfg: Config, args: list[str]) -> int:
     """new DIR [--preset P] [--name NAME]: copy the template to a new project."""
     from .cli import _prog  # `pyt` outside a project (global mode), where `new` runs too
@@ -495,21 +571,30 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
     parser.add_argument("--name")
     ns = _parse(parser, args)
     dest = user_path(ns.dest)
-    resolved = dest.resolve()
-    if resolved == ROOT or ROOT in resolved.parents:
+    # realpath, never Path.resolve: on Python 3.11 and 3.12 (new runs on any 3.11+) resolve raises
+    # RuntimeError for a link loop, an internal error; check_destination names it below
+    resolved = Path(os.path.realpath(dest))
+    if _inside_the_template(resolved):
         raise PytError(f"new: the destination folder cannot be inside {presets.source_name()}")
-    if dest.exists() and not dest.is_dir():
-        raise PytError(f"new: {dest} exists and is not a folder")
-    if dest.is_dir() and any(dest.iterdir()):
-        raise PytError(f"new: {dest} already exists and is not empty")
-    # Checked here, before copying (and under --dry-run): a copy whose `init` fails is removed
-    name = ns.name or presets.name_from_folder(resolved.name)
+    presets.check_destination(dest, "new: ")
+    # Checked here, before copying (and under --dry-run): a copy whose `init` fails is removed.
+    # An empty --name (a script's "$NAME" with NAME unset) is no name: it took the folder's
+    if ns.name == "":
+        raise PytError("new: --name is empty: give the app a name, or leave --name out to name it after the folder")
+    name = presets.name_from_folder(resolved.name) if ns.name is None else ns.name
     if not config.APP_NAME.fullmatch(name):
         raise PytError(
             f"new: '{name}' is not a valid app name (it may only contain {config.NAME_RULE}). "
             "Choose one with --name NAME"
         )
     presets.check_name_free(cfg, ns.preset, name)
+    # Every new project is locked anew (its own name, the preset's requirements: __init runs `uv
+    # add` and `uv lock`), which the user's UV_FROZEN or UV_LOCKED forbid. Refused here, before
+    # the copy and in the dry run too: uv's own error came after the copy, blaming a `--no-sync`
+    # the user never typed (or saying to run `uv lock`), and the dry run promised success.
+    from .cmd_env import _refuse_a_frozen_lock  # imported where used: cmd_env imports much more
+
+    _refuse_a_frozen_lock("a new project is locked anew")
     top = _work_tree_top(dest)
     # The new project's python.cpython: its lock needs it (uv lock), and its __init runs on it.
     # Asked before the copy: where uv cannot install it (Android/Termux), nothing is written.
@@ -529,7 +614,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
             ui.info(f"  pins    {len(pins)} packages new to uv.lock at the versions the template tested (constraints.txt of the preset)")
         if top is not None:
             git = f"(inside the git work tree of {top}: no git init)"
-        elif shutil.which("git") is None:
+        elif proc.find_program("git") is None:
             git = "(git not found: no git init)"
         else:
             git = "and `git init -b main`"

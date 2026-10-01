@@ -7,7 +7,8 @@ Rules for Flet and mypyc to coexist without losing performance:
   at runtime and would raise TypeError.
 - Heavy work in ANOTHER PROCESS (ProcessPoolExecutor): compiled code does not release
   the GIL, so in a thread it would freeze the UI just like in the event loop. Where Python
-  cannot start processes (flet build for the web, Android, iOS) it runs here instead.
+  cannot start processes (flet build for the web, Android, iOS) it runs here instead, and so
+  it does when a new worker dies too; a worker that died (killed, out of memory) is replaced.
 - Update the UI in one batch: change several controls and call page.update() once.
 """
 
@@ -19,11 +20,12 @@ import platform
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 
 import flet as ft
 
-from {{pkg}}.core import fractal
-from {{pkg}}.resources import assets_dir
+from ..core import fractal
+from ..resources import assets_dir
 
 WIDTH = 640
 HEIGHT = 400
@@ -43,13 +45,22 @@ def _executor() -> ProcessPoolExecutor | None:
         return ProcessPoolExecutor(max_workers=1)
     except NotImplementedError:  # a Python without working multiprocessing (named semaphores)
         return None
+    except OSError:  # named semaphores that fail when made: no writable /dev/shm (a container)
+        return None
 
 
 async def _render_png(width: int, height: int, max_iter: int) -> bytes:
-    if _executor() is None:
-        return fractal.render_png(width, height, max_iter)  # the UI waits meanwhile
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_executor(), fractal.render_png, width, height, max_iter)
+    for _ in range(2):  # a pool whose worker died runs nothing more: a new one, once
+        pool = _executor()
+        if pool is None:
+            break
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(pool, fractal.render_png, width, height, max_iter)
+        except BrokenProcessPool:
+            _executor.cache_clear()
+            pool.shutdown(wait=False)
+    return fractal.render_png(width, height, max_iter)  # the UI waits meanwhile
 
 
 def _backend() -> str:
@@ -58,7 +69,7 @@ def _backend() -> str:
 
 
 async def main(page: ft.Page) -> None:
-    page.title = "{{name}}"
+    page.title = "{{name}}"  # fmt: skip
     page.theme_mode = ft.ThemeMode.DARK
 
     iterations = ft.Slider(

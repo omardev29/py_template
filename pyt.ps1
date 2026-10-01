@@ -11,6 +11,8 @@
 #     inside the caller's session, so anything it changes stays there.
 #   * PowerShell < 7.3 (and $PSNativeCommandArgumentPassing = 'Legacy') drops
 #     empty arguments and mangles embedded quotes: arguments are pre-quoted.
+#   * PowerShell 7 globs a native argument that is not a quoted literal (Linux/macOS):
+#     a path in a variable goes double-quoted ("$path"), never bare ($path).
 #   * PowerShell itself removes a bare -- before any script sees it (5.1 and
 #     7.x alike): quote it ('--') or use .\pyt.cmd.
 #   * Never write the name of PowerShell's automatic pipeline variable in this
@@ -44,12 +46,38 @@ if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
 
 $onWindows = $env:OS -eq 'Windows_NT'
 $uvExe = if ($onWindows) { 'uv.exe' } else { 'uv' }
+$v = $PSVersionTable.PSVersion
+$legacy = $v.Major -lt 7 -or ($v.Major -eq 7 -and $v.Minor -lt 3)
+if (-not $legacy) { $legacy = (Get-Variable PSNativeCommandArgumentPassing -ValueOnly -ErrorAction Ignore) -eq 'Legacy' }
+
+# An argument as legacy passing (PowerShell < 7.3, or $PSNativeCommandArgumentPassing =
+# 'Legacy') must get it: that passing drops empty arguments and mangles embedded quotes, so the
+# argument goes pre-quoted. It wraps an argument in quotes once it sees a blank after an even
+# number of `"`. Windows PowerShell counts every `"`, so a quote is written `""` (uv reads `""`
+# inside quotes as one `"`); PowerShell 7 skips `\"` when counting.
+function ConvertTo-LegacyArg([string] $Arg) {
+    $quote = if ($PSVersionTable.PSEdition -eq 'Desktop') { '""' } else { '\"' }
+    return '"' + (($Arg -replace '(\\*)"', ('$1$1' + $quote)) -replace '(\\+)$', '$1$1') + '"'
+}
+
+# /bin/sh (Linux/macOS only) runs $Script with the path $Path as $1, both exact: double-quoted,
+# as PowerShell 7 globs a native argument that is not a quoted literal (a folder named p[0-9]
+# read as its sibling p1, whose owner then decided whose runner it was), and pre-quoted under
+# legacy passing, which dropped their double quotes (a"b read as ab).
+function Invoke-Sh([string] $Script, [string] $Path) {
+    if ($legacy) { $Script = ConvertTo-LegacyArg $Script; $Path = ConvertTo-LegacyArg $Path }
+    & /bin/sh -c "$Script" sh "$Path"
+}
 
 # A uv that can run. On Linux/macOS it also needs an x bit, like `test -x` in ./pyt
 # (Get-Command and File.Exists accept a uv left without one by a broken download).
 # GetUnixFileMode needs .NET 7 (PowerShell 7.3+): older versions skip the mode check.
+# File.Exists is also true for a symbolic link whose target is gone (an uninstalled uv's
+# link: pipx, Homebrew, WinGet's Links folder), which then won over the next uv: the file
+# must open.
 function Test-Uv([string] $Path) {
     if (-not $Path -or -not [IO.File]::Exists($Path)) { return $false }
+    try { [IO.File]::OpenRead($Path).Dispose() } catch { return $false }
     if ($onWindows) { return $true }
     try { return ([int][IO.File]::GetUnixFileMode($Path) -band 73) -ne 0 } catch { return $true }
 }
@@ -96,9 +124,12 @@ function Find-Uv {
         if ($env:ChocolateyInstall) { $dirs += [IO.Path]::Combine($env:ChocolateyInstall, 'bin') }
         if ($env:ProgramData) { $dirs += [IO.Path]::Combine($env:ProgramData, 'chocolatey', 'bin') }
         # The PATH stored in the registry (a console opened before uv was installed
-        # still has the old one). GetEnvironmentVariable expands %VARS% itself.
-        $dirs += @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';')
-        $dirs += @([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';')
+        # still has the old one). GetEnvironmentVariable expands %VARS% itself, and keeps
+        # one that is not defined as it is. Only absolute folders (X:\... or \\server\...):
+        # a relative entry names one below the current folder.
+        $absolute = '^\s*"?([A-Za-z]:[\\/]|[\\/]{2})'
+        $dirs += @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -match $absolute })
+        $dirs += @([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';' | Where-Object { $_ -match $absolute })
     } else {
         $dirs += '/opt/homebrew/bin', '/usr/local/bin', '/home/linuxbrew/.linuxbrew/bin'
         if ($h) { $dirs += [IO.Path]::Combine($h, '.nix-profile', 'bin') }
@@ -119,9 +150,11 @@ function Get-Entry([string] $Dir) {
 
 # Whether another user owns this runner (POSIX: anyone may create /tmp/.pytemplate/pyt.py; on
 # Windows, whose owners are not read here, a drive root, where any user may create folders).
+# Its folder counts too, where the runner's package is imported from: a hard link keeps the
+# owner of the file it links (on macOS any user may link a pyt.py of yours into a folder of theirs).
 function Test-Foreign([string] $Entry, [bool] $Top) {
     if ($onWindows) { return $Top }
-    & /bin/sh -c 'set -f; IFS=; [ -O $1 ]' sh $Entry
+    Invoke-Sh 'set -f; IFS=; [ -O "${1%/*}" ] && [ -O "$1" ]' $Entry
     return $LASTEXITCODE -ne 0
 }
 
@@ -140,7 +173,7 @@ for ($hops = 0; $self -and $hops -lt 40; $hops++) {
     $dir = [IO.Path]::GetDirectoryName($self)
     if (-not $onWindows -and -not [IO.Path]::IsPathRooted($link)) {
         # Relative to the PHYSICAL folder of the link (.NET folds '..' as text, the kernel does not).
-        $dir = & /bin/sh -c 'CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P' sh $dir
+        $dir = Invoke-Sh 'CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P' $dir
     }
     $self = [IO.Path]::Combine([string]$dir, $link)
     $root = [IO.Path]::GetDirectoryName($self)
@@ -152,6 +185,7 @@ if (-not $entry) {
     $loc = Get-Location
     $dir = if ($loc.Provider.Name -eq 'FileSystem') { $loc.ProviderPath } else { [Environment]::CurrentDirectory }
     $other = $null
+    $walked = $dir
     while ($dir) {
         $parent = [IO.Path]::GetDirectoryName($dir)
         $top = -not $parent -or $parent -eq $dir
@@ -161,7 +195,18 @@ if (-not $entry) {
             if (Test-Foreign $candidate $top) { $other = $candidate } else { $root = $dir; $entry = $candidate }
             break
         }
-        if ($top) { break }
+        if ($top) {
+            # The location is logical: from a folder reached through a symlink into a project
+            # (~/game-src -> ~/code/game/src) no logical parent holds it. Walk up again from the
+            # physical folder, where the kernel is (POSIX only).
+            $dir = $null
+            if (-not $onWindows -and $walked) {
+                $physical = (Invoke-Sh 'CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P' $walked) -join "`n"
+                if ($physical -and $physical -ne $walked) { $dir = $physical }
+                $walked = $null
+            }
+            continue
+        }
         $dir = $parent
     }
     if (-not $root -and -not $other) {
@@ -184,7 +229,7 @@ if (-not $entry) {
     }
     if ($other) {
         $own = [IO.Path]::GetFileNameWithoutExtension($other) + '.ps1'
-        [Console]::Error.WriteLine("pyt: $other is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run $([IO.Path]::Combine([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($other)), $own)) yourself.")
+        [Console]::Error.WriteLine("pyt: $other is not yours (another user owns it or its folder, or it is at a drive root): not run. If you trust it, run $([IO.Path]::Combine([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($other)), $own)) yourself.")
         exit 2
     }
     if (-not $root) {
@@ -262,11 +307,12 @@ $typed = $null
 foreach ($a in $args) { if ($a -is [array]) { $typed = Get-Typed @(Get-PSCallStack) 0; break } }
 if ($null -ne $typed) {
     # A gap takes the arguments the others leave, and its arrays pass their items one by one,
-    # as a native call splats them; with two gaps nothing lines up.
+    # as a native call splats them; with two gaps nothing lines up. Its places hold 0, not
+    # $false: a value whose text is unknown (a -X: before one keeps its items joined).
     $gaps = @(foreach ($t in $typed) { if ($t -is [string]) { $t } }).Count
     $fill = $args.Count - $typed.Count + 1
     if ($gaps -eq 1 -and $fill -ge 0) {
-        $typed = @(foreach ($t in $typed) { if ($t -is [string]) { for ($n = 0; $n -lt $fill; $n++) { $false } } else { $t } })
+        $typed = @(foreach ($t in $typed) { if ($t -is [string]) { for ($n = 0; $n -lt $fill; $n++) { 0 } } else { $t } })
     }
     if ($typed.Count -ne $args.Count -or $gaps -gt 1) { $typed = $null }
 }
@@ -278,7 +324,12 @@ $argv = @(for ($i = 0; $i -lt $args.Count; $i++) {
     if ($a -is [string] -and $a.EndsWith(':') -and $a.PSObject.Properties['<CommandParameterName>'] -and $i + 1 -lt $args.Count) {
         $i++
         if ($null -eq $args[$i]) { continue }
-        $a + ((@($args[$i]) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join ',')
+        $items = @(@($args[$i]) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+        if ($args[$i] -is [array] -and $null -ne $typed -and $typed[$i] -is [bool] -and -not $typed[$i]) {
+            foreach ($x in $items) { $a + $x }  # an array value (-X:$files): the switch once per item
+        } else {
+            $a + ($items -join ',')  # a typed list (-X:a,b) or a value: one argument
+        }
     } elseif ($a -is [array] -and ($null -eq $typed -or $typed[$i])) {
         (@($a) | ForEach-Object { [string]$_ }) -join ','
     } else {
@@ -286,19 +337,15 @@ $argv = @(for ($i = 0; $i -lt $args.Count; $i++) {
         foreach ($x in @($a)) { if ($null -ne $x -or $a -isnot [array]) { [string]$x } }
     }
 })
-$v = $PSVersionTable.PSVersion
-$legacy = $v.Major -lt 7 -or ($v.Major -eq 7 -and $v.Minor -lt 3)
-if (-not $legacy) { $legacy = (Get-Variable PSNativeCommandArgumentPassing -ValueOnly -ErrorAction Ignore) -eq 'Legacy' }
 # PowerShell 7.3+ takes any native argument equal to --% (quoted or splatted) for its
 # stop-parsing token: it drops it, then splits and %VAR%-expands the rest. Pre-quoted by
 # legacy passing (set in this script's scope only) it reaches uv intact.
 if (-not $legacy -and $argv -contains '--%') { $PSNativeCommandArgumentPassing = 'Legacy'; $legacy = $true }
+# The runner's path is an argument of uv's too: unquoted, legacy passing read a folder q"r as qr.
+$entryArg = $entry
 if ($legacy) {
-    # Legacy passing wraps an argument in quotes once it sees a blank after an even
-    # number of `"`. Windows PowerShell counts every `"`, so a quote is written `""`
-    # (uv reads `""` inside quotes as one `"`); PowerShell 7 skips `\"` when counting.
-    $quote = if ($PSVersionTable.PSEdition -eq 'Desktop') { '""' } else { '\"' }
-    $argv = @(foreach ($a in $argv) { '"' + (($a -replace '(\\*)"', ('$1$1' + $quote)) -replace '(\\+)$', '$1$1') + '"' })
+    $entryArg = ConvertTo-LegacyArg $entry
+    $argv = @(foreach ($a in $argv) { ConvertTo-LegacyArg $a })
 }
 
 # Pipeline input ('x' | ./pyt.ps1 run) goes to uv's stdin, as with a direct native call;
@@ -344,14 +391,14 @@ try {
         # included: it globs '*' (Linux/macOS) and expands '~', '~/x' ('~\x' on Windows). Run
         # the call rebuilt from single-quoted words so argv reaches uv untouched.
         $q = [Management.Automation.Language.CodeGeneration]
-        $words = foreach ($a in @($uv, 'run', '--quiet', "--python=$python", '--python-preference', $preference, '--script', $entry) + $argv) { "'" + $q::EscapeSingleQuotedStringContent($a) + "'" }
+        $words = foreach ($a in @($uv, 'run', '--quiet', "--python=$python", '--python-preference', $preference, '--script', $entryArg) + $argv) { "'" + $q::EscapeSingleQuotedStringContent($a) + "'" }
         $call = '& ' + ($words -join ' ')
         if ($fromPipe) { $call = '$pipeIn | ' + $call }
         Invoke-Expression $call
     } elseif ($fromPipe) {
-        $pipeIn | & $uv run --quiet "--python=$python" --python-preference $preference --script $entry @argv
+        $pipeIn | & $uv run --quiet "--python=$python" --python-preference $preference --script $entryArg @argv
     } else {
-        & $uv run --quiet "--python=$python" --python-preference $preference --script $entry @argv
+        & $uv run --quiet "--python=$python" --python-preference $preference --script $entryArg @argv
     }
     $code = $LASTEXITCODE
 } catch {

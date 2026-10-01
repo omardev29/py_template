@@ -18,14 +18,17 @@ import os
 import re
 import shutil
 import stat
-from collections.abc import Collection, Iterator
+import tomllib
+import uuid
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from . import envs, proc, render, ui
-from .config import Config, compiled_paths
+from .config import TOML_ERRORS, Config, compiled_paths
 from .imports import PARSE_ERRORS, imports_of, is_local, local_module, module_name, parse_error
-from .project import BUILD, EXT_SUFFIXES, IS_WINDOWS, SRC, TOOLS, rel
+from .project import BUILD, EXT_SUFFIXES, IS_WINDOWS, PYPROJECT, SRC, TOOLS, rel
 from .ui import PytError
 
 SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".hypothesis", ".ruff_cache"}
@@ -46,9 +49,22 @@ _NOT_BINARY = ("annotate", "compile", "files", "force")
 # builds with (CC, CFLAGS: it REPLACES Python's own flags, CPPFLAGS, LDSHARED, LDFLAGS), macOS
 # ARCHFLAGS and MSVC's CL/_CL_. Recorded with the options: a change forces a rebuild too.
 COMPILER_ENV = ("CC", "CFLAGS", "CPPFLAGS", "LDSHARED", "LDFLAGS", "ARCHFLAGS", "CL", "_CL_")
+# The packages whose code goes into every extension besides the generated C: mypyc compiles the
+# C runtime of the INSTALLED mypy (its lib-rt: CPy.h, init.c...) into each one, which mypycify
+# leaves out of Extension.depends, and setuptools drives the compiler. A new release of either
+# with the same generated C (common: the skeleton's C is the same under mypy 2.2.0 and 2.3.1)
+# kept the old binaries. Their versions in LOCK, the lock `uv run --locked` syncs the tools
+# environment to before tools/mypyc_build.py runs, are recorded with the options.
+TOOLCHAIN = ("mypy", "setuptools")
+LOCK = PYPROJECT.with_name("uv.lock")
 # ABI tag at the start of an extension suffix: cpython-314-x86_64-linux-gnu.so,
 # cpython-314-darwin.so, cp314-win_amd64.pyd (a trailing "t" = free-threaded build)
 _ABI_RE = re.compile(r"(?:cpython-|cp)(\d)(\d+)(t?)(?=[-.])")
+# Windows: the folder next to a stage where its extensions go when they leave it (a stale one,
+# one the build replaces). Windows deletes no DLL a process has loaded (the app still running
+# from the stage, a debug session) but renames it on the same volume; every build empties it,
+# best effort (what is still loaded stays for the next one)
+SET_ASIDE = "old-extensions"
 
 
 @dataclass(frozen=True)
@@ -82,9 +98,23 @@ def walk(root: Path) -> Iterator[Path]:
     Path.rglob does not descend into a symlinked folder (3.11-3.14): a linked src/assets or
     subpackage reached the stage empty. A link back to a folder on the way down (a cycle) is
     skipped; two links to the same folder are both followed. Cache folders are not entered.
+    A folder that cannot be listed (entered but not read: mode 0311, another user's 0711) is a
+    PytError naming it: os.walk skipped it without a word, so every build shipped it empty while
+    the app still opened its files by name in development (and sync_tree deleted the copy an
+    earlier build had made). One that is gone (the root, or a folder deleted meanwhile) is no loss.
     """
+
+    def unlistable(e: OSError) -> None:
+        if isinstance(e, (FileNotFoundError, NotADirectoryError)):
+            return
+        where = rel(Path(os.fsdecode(e.filename))) if e.filename else rel(root)
+        raise PytError(
+            f"cannot list {where}/: {e.strerror or e}: a build would leave out every file below it.\n"
+            "  Make it readable (chmod u+rx), or move it out of the folder, and try again"
+        )
+
     chains = {os.fspath(root): frozenset({os.path.realpath(root)})}
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+    for dirpath, dirnames, filenames in os.walk(root, onerror=unlistable, followlinks=True):
         chain = chains.pop(dirpath)
         kept: list[str] = []
         for name in sorted(dirnames):
@@ -100,7 +130,8 @@ def walk(root: Path) -> Iterator[Path]:
 
 
 def compiled_sources(cfg: Config) -> list[Path]:
-    """Return the .py files (in src/) that mypyc compiles.
+    """Return the .py files (in src/) that mypyc compiles: the modules Python can import below
+    each compile.modules entry (`_importable`: never an editor's leftover copy).
 
     compile.exclude takes modules and subpackages (a prefix) of those packages; an entry that
     names nothing that exists is an error (a typo must not silently compile everything).
@@ -111,7 +142,9 @@ def compiled_sources(cfg: Config) -> list[Path]:
         path = SRC / rel_path
         stem = rel_path.removesuffix(".py")
         if path.is_dir():
-            candidates = sorted(p for p in walk(path) if p.suffix == ".py" and p.name != "__init__.py" and p.is_file())
+            candidates = sorted(
+                p for p in walk(path) if p.suffix == ".py" and p.name != "__init__.py" and _importable(p) and p.is_file()
+            )
             if not candidates:  # an entry that compiles nothing is a mistake, never skipped silently
                 raise PytError(f"compile.modules: neither src/{stem}.py nor src/{stem}/ holds a module to compile")
         elif path.is_file():
@@ -133,6 +166,16 @@ def compiled_sources(cfg: Config) -> list[Path]:
     if not files:
         raise PytError("compile.modules contains no .py file to compile")
     return list(dict.fromkeys(files))
+
+
+def _importable(path: Path) -> bool:
+    """Whether Python can import the .py file `path` of src/ as a module: every part of its dotted
+    name an identifier. JupyterLab's .ipynb_checkpoints/<name>-checkpoint.py, a copy named
+    `bench copy.py` or `bench.old.py` and a data folder `sample-data/` hold none: mypyc made C
+    names with '-' or ' ' of them (a C compile error, with the C compiler hint), or a stray
+    top-level extension of a module mypy named from inside the folder, and lintc failed `check`
+    and the hook on a stale copy of the code; compile.exclude cannot name them."""
+    return all(part.isidentifier() for part in path.relative_to(SRC).with_suffix("").parts)
 
 
 def compiled_modules(cfg: Config) -> list[str]:
@@ -204,6 +247,42 @@ def remove_tree(path: Path) -> None:
         shutil.rmtree(path)
 
 
+_T = TypeVar("_T")
+
+
+def _source(path: Path, step: Callable[[], _T]) -> _T:
+    """Run a step that reads the file `path` of src/: a file it cannot read (another user's, one
+    locked by another program, a named pipe) is one error naming it; it ended run mypyc, test
+    mypyc, compile and every build in an internal-error traceback. What fails on the copy's side
+    (a file under .build/ another user left: cli names it) and a full disk go on as they are."""
+    from .cli import NO_ROOM
+
+    try:
+        return step()
+    except OSError as e:
+        if e.errno in NO_ROOM or (e.filename is not None and os.fsdecode(e.filename) != os.fspath(path)):
+            raise
+        raise PytError(f"cannot copy {rel(path)}: {e.strerror or e}") from None
+
+
+def _spelled_otherwise(target: Path, listed: dict[str, set[str] | None]) -> bool:
+    """Whether the file system finds `target` while its folder lists no entry of exactly that
+    name: a case-insensitive volume (macOS's and Windows' default) after a case-only rename in
+    src/ (Data.py -> data.py, Core/ -> core/). Kept, the copy went on under its old name: Windows
+    (whose paths compare without case) shipped that spelling, which Python's case-sensitive import
+    never finds, and macOS (whose paths compare with case) deleted it as a file src/ no longer
+    has, so the first build after the rename was without the module. `listed` caches each
+    folder's names; a folder it cannot list counts as spelled right."""
+    folder = os.fspath(target.parent)
+    if folder not in listed:
+        try:
+            listed[folder] = set(os.listdir(folder))
+        except OSError:
+            listed[folder] = None
+    names = listed[folder]
+    return names is not None and target.name not in names and os.path.lexists(target)
+
+
 def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
     """Copy src -> dst: only what changed; remove what was deleted (except mypyc's extensions).
 
@@ -213,15 +292,24 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
     a folder deleted from src goes with its caches (it must not stay importable as a namespace
     package). `owned`: the compiled modules, whose extensions mypyc manages (see _mypyc_output).
     Every copy is owner-writable (copy_writable), and a read-only one an older ./pyt left is
-    made writable before it is replaced or deleted.
+    made writable before it is replaced or deleted. A copy spelled otherwise than its source
+    (a case-only rename on a case-insensitive volume, `_spelled_otherwise`) is made again.
     """
     changed = 0
     dst.mkdir(parents=True, exist_ok=True)
     seen: set[Path] = set()
+    listed: dict[str, set[str] | None] = {}
     for path in walk(src):
         if _mypyc_output(path, src, owned):
             continue
         target = dst / path.relative_to(src)
+        if _spelled_otherwise(target, listed):
+            if target.is_dir() and not target.is_symlink():
+                remove_tree(target)
+            else:
+                _owner_writable(target)  # Windows deletes no read-only file
+                target.unlink()
+            changed += 1
         if path.is_dir():
             seen.add(target)
             if target.is_symlink() or (target.exists() and not target.is_dir()):  # a file became a folder
@@ -234,7 +322,7 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
             ui.warn(f"{rel(path)}: broken symbolic link, not copied")
             continue
         seen.add(target)
-        st = path.stat()
+        st = _source(path, path.stat)
         if target.is_symlink():  # never written through (sync_tree makes no links)
             target.unlink()
         elif target.is_dir():  # a folder became a file
@@ -244,7 +332,7 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
             tt = target.stat()
             if tt.st_size == st.st_size and tt.st_mtime_ns == st.st_mtime_ns:
                 continue
-        copy_writable(os.fspath(path), os.fspath(target))
+        _source(path, lambda: copy_writable(os.fspath(path), os.fspath(target)))
         changed += 1
     for path in sorted(dst.rglob("*"), reverse=True):  # children before their folder
         if path in seen or SKIP_DIRS & set(path.relative_to(dst).parts) or _mypyc_output(path, dst, owned):
@@ -298,10 +386,37 @@ def remove_stale_extensions(
             continue
         if _other_python(ext, python):
             ui.detail(f"  - {rel(ext)} (built for another Python)")
-            ext.unlink()
         elif _ext_module(ext, stage) not in wanted:
             ui.detail(f"  - {rel(ext)} (no longer compiled)")
-            ext.unlink()
+        else:
+            continue
+        try:
+            set_aside(ext, stage)
+        except OSError as e:
+            raise PytError(f"cannot remove {rel(ext)}: {e.strerror or e}. {_STILL_RUNNING.format(stage=rel(stage))}") from None
+
+
+_STILL_RUNNING = "Is the app still running from {stage} (./pyt run mypyc, a debug session)? Close it and try again"
+
+
+def set_aside(ext: Path, stage: Path) -> None:
+    """Take an extension out of the stage: deleted, or on Windows moved into SET_ASIDE next to the
+    stage, since a DLL a process has loaded cannot be deleted there, only renamed."""
+    if not IS_WINDOWS:
+        ext.unlink()
+        return
+    folder = stage.parent / SET_ASIDE
+    folder.mkdir(exist_ok=True)
+    os.replace(ext, folder / f"{uuid.uuid4().hex}-{ext.name}")
+
+
+def _empty_set_aside(stage: Path) -> None:
+    """Delete what earlier builds set aside, best effort: a file still loaded stays."""
+    folder = stage.parent / SET_ASIDE
+    with contextlib.suppress(OSError):
+        for path in folder.iterdir():
+            with contextlib.suppress(OSError):
+                path.unlink()
 
 
 def _read_json(path: Path) -> object:
@@ -310,6 +425,21 @@ def _read_json(path: Path) -> object:
     except (OSError, ValueError):
         return None
     return data
+
+
+def toolchain() -> dict[str, list[str]]:
+    """The versions LOCK pins for TOOLCHAIN (a lock it cannot read gives none: `uv run --locked`
+    then refuses to compile anyway)."""
+    try:
+        data = tomllib.loads(LOCK.read_text(encoding="utf-8-sig"))
+    except (OSError, *TOML_ERRORS):
+        return {}
+    packages = data.get("package")
+    found: dict[str, set[str]] = {}
+    for package in packages if isinstance(packages, list) else []:
+        if isinstance(package, dict) and package.get("name") in TOOLCHAIN:
+            found.setdefault(str(package["name"]), set()).add(str(package.get("version", "")))
+    return {name: sorted(versions) for name, versions in sorted(found.items())}
 
 
 def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compile_c: bool = True) -> Path:
@@ -327,6 +457,7 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
     group = group_name(cfg)
 
     ui.step(f"mypyc ({prof.name}): {', '.join(modules)}")
+    _empty_set_aside(prof.stage)
     # Before the sync: a folder emptied here is then removed by sync_tree
     remove_stale_extensions(prof.stage, modules, group, python=cfg.python.cpython, separate=cfg.compile.separate)
     changed = sync_tree(SRC, prof.stage, owned=modules)
@@ -357,11 +488,13 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
     # setuptools rebuilds an extension only when a source is newer than it: an option that only
     # reaches the C compiler (opt_level, no_semantic_interposition, debug_level, the compiler
     # variables of the environment) leaves the generated C untouched, so the old binary would
-    # be kept. The options of the last SUCCESSFUL compile are recorded (the record is deleted
-    # before compiling: a failed or interrupted build forces the next one); any difference
-    # forces a full rebuild (build_ext --force).
+    # be kept, and so was the binary of an older mypyc or setuptools (TOOLCHAIN). The options of
+    # the last SUCCESSFUL compile are recorded (the record is deleted before compiling: a failed
+    # or interrupted build forces the next one); any difference forces a full rebuild
+    # (build_ext --force).
     options = {k: v for k, v in spec.items() if k not in _NOT_BINARY}
     options["env"] = {name: os.environ[name] for name in COMPILER_ENV if name in os.environ}
+    options["toolchain"] = toolchain()
     stamp = prof.dir / COMPILED_STAMP
     spec["force"] = compile_c and _read_json(stamp) != options
     spec_file = prof.dir / "spec.json"
@@ -370,17 +503,32 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         annotate.parent.mkdir(parents=True, exist_ok=True)
     if compile_c and not proc.DRY_RUN:
         stamp.unlink(missing_ok=True)
-    if spec["force"] and not proc.DRY_RUN:
-        # mypyc reuses the IR of its cache (compile.separate: incremental) and the C files of the
-        # last run for a module whose source did not change: strip_asserts and
-        # strict_dunder_typing are no part of mypy's cache key, so deploy.optimize 0 -> 1 kept
-        # the asserts in the release binary. A forced build starts from neither.
-        for cached in (prof.dir / "mypy_cache", prof.dir / "c"):
+        if IS_WINDOWS:
+            # setuptools' build_ext --inplace deletes the extension in the stage before it copies a
+            # new one in: while the app still ran from the stage (Windows deletes no loaded DLL)
+            # every build that changed it failed, with the compiler-install hint
+            for ext in extension_files(prof.stage):
+                if _mypyc_output(ext, prof.stage, modules):
+                    with contextlib.suppress(OSError):  # left in place: setuptools then says why
+                        set_aside(ext, prof.stage)
+    # mypyc reuses the IR of its cache (compile.separate: incremental) and the C files of the last
+    # run for a module whose source did not change: strip_asserts and strict_dunder_typing are no
+    # part of mypy's cache key, so deploy.optimize 0 -> 1 kept the asserts in the release binary.
+    # A forced build starts from neither.
+    stale = [prof.dir / "mypy_cache", prof.dir / "c"] if spec["force"] else []
+    if annotate and cfg.compile.separate and not stale:
+        # A module mypy loads from that cache gets no IR, and mypyc annotates only the modules it
+        # built IR for: after an unchanged compile the report was an empty page (and one module
+        # after an edit of one), with the success line. mypyc writes a C file only when its text
+        # changes, so the C compiler still rebuilds nothing that did not change.
+        stale = [prof.dir / "mypy_cache"]
+    if stale and not proc.DRY_RUN:
+        for cached in stale:
             try:
                 if cached.exists():
                     shutil.rmtree(cached)
             except OSError as e:
-                raise PytError(f"cannot remove {rel(cached)} for a clean rebuild: {e.strerror or e} (delete it, or ./pyt clean)") from None
+                raise PytError(f"cannot remove {rel(cached)}, which mypyc must not reuse: {e.strerror or e} (delete it, or ./pyt clean)") from None
 
     tool = envs.tool_env(cfg)
     # MSVC/setuptools output is only shown on failure (or with -v). VSLANG=1033: compiler
@@ -389,14 +537,18 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
     argv: list[str | Path] = [proc.find_uv(), "run", "--locked", "python", TOOLS / "mypyc_build.py", spec_file]
     result = proc.run(argv, env=envs.env_vars(tool, envs_extra), capture=not ui.VERBOSE, check=False)
     if result.returncode != 0:
-        if not ui.VERBOSE:
-            ui.info((result.stdout or "") + (result.stderr or ""))
+        output = ((result.stdout or "") + (result.stderr or "")).rstrip()
+        if output:
+            ui.report(output)  # why it failed (mypy's errors, the compiler's): shown even with -q
         if result.returncode == MYPYC_REJECTED:  # mypy/mypyc rejected the code: no compiler involved
             raise PytError("mypyc failed (exit code 1): fix the errors above", 1)
         if result.returncode == COMPILER_MISSING:
             hint = has_compiler_hint(_venv_platform(tool))
             raise PytError(f"mypyc failed: the C compiler cannot start (above)\n{hint}", 3)
         if result.returncode == C_BUILD_FAILED:
+            if "could not delete '" in output:  # setuptools: an extension it replaces is in use (Windows)
+                still = _STILL_RUNNING.format(stage=rel(prof.stage))
+                raise PytError(f"mypyc failed (exit code 1): a file of the stage is in use (above). {still}", 1)
             raise PytError(f"mypyc failed (exit code 1)\n{has_compiler_hint(_venv_platform(tool))}", 1)
         # uv, or Python before the script ran (a stale uv.lock: uv's error is above)
         raise PytError(f"mypyc failed (exit code {result.returncode}): see the error above", result.returncode)
@@ -475,6 +627,8 @@ def hidden_imports(cfg: Config, stage: Path) -> list[str]:
         except PARSE_ERRORS as e:  # a runner older than the project's syntax, a too deeply nested source
             line, msg = parse_error(e)
             raise PytError(f"{rel(path)}:{line}: {msg}") from None
+        except OSError as e:  # another user's, locked by another program: never a traceback
+            raise PytError(f"{rel(path)}: cannot read it: {e.strerror or e}") from None
         for name in names:
             if not is_local(SRC, name):
                 external.add(name)
@@ -493,9 +647,11 @@ def hidden_imports(cfg: Config, stage: Path) -> list[str]:
 
 def exe_stage(cfg: Config, stage: Path, dest: Path) -> Path:
     """Copy the stage WITHOUT the compiled .py files, so the packager can only bundle the binary."""
+    from .methods.common import copy_tree  # a full disk: one error line (cli.NO_ROOM), no traceback
+
     if dest.exists():
         remove_tree(dest)
-    shutil.copytree(stage, dest, ignore=shutil.ignore_patterns(*SKIP_DIRS), copy_function=copy_writable)
+    copy_tree(stage, dest, ignore=shutil.ignore_patterns(*SKIP_DIRS), copy_function=copy_writable)
     for path in compiled_sources(cfg):
         target = dest / path.relative_to(SRC)
         if target.exists():
@@ -512,6 +668,31 @@ def _venv_platform(tool: envs.PyEnv) -> str:
         return str(envs.interpreter_info(tool.python)["platform"])
     except (OSError, ValueError, KeyError, proc.CommandFailed, PytError):
         return ""
+
+
+# tools/mypyc_build.py missing_compiler, asked in .venv (setuptools' distutils needs setuptools
+# imported first); the answer is the last PTCC: line
+_MISSING_COMPILER_CODE = (
+    "import sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import setuptools, mypyc_build\n"
+    "try:\n"
+    "    problem = mypyc_build.missing_compiler()\n"
+    "except Exception as e:\n"
+    "    problem = f'setuptools cannot set up a C compiler: {e}'\n"
+    "print('PTCC:' + (problem or ''))\n"
+)
+
+
+def missing_compiler(tool: envs.PyEnv) -> str | None:
+    """After a C build of mypyc code failed outside `build` (the wheel's setup.py, whose failure
+    is uv's exit code, never the script's COMPILER_MISSING): why setuptools cannot start the C
+    compiler of `tool`, with the hint to get one, or None (it can, or the question cannot run)."""
+    argv: list[str | Path] = ["run", "--locked", "python", "-c", _MISSING_COMPILER_CODE, TOOLS]
+    r = envs.uv(tool, argv, extra_env={"VSLANG": "1033"}, capture=True, check=False, echo=False)
+    marks = [line for line in (r.stdout or "").splitlines() if line.startswith("PTCC:")]
+    problem = marks[-1].removeprefix("PTCC:") if r.returncode == 0 and marks else ""
+    return f"{problem}\n{has_compiler_hint(_venv_platform(tool))}" if problem else None
 
 
 def has_compiler_hint(platform: str = "win-amd64") -> str:

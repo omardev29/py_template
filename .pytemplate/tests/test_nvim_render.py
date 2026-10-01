@@ -13,23 +13,24 @@ import re
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, cmd_dev, cmd_nvim, config, mypyc, project, render  # noqa: E402
+from runner import cli, cmd_dev, cmd_nvim, config, mypyc, nvimtest, project, render  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.editors import nvim, vscode  # noqa: E402
 from runner.ui import PytError  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / ".pytemplate" / "nvim"
+SPEC_LUA = PLUGIN / "spec.lua"  # the logic .lazy.lua (a thin loader) dofile's; trusted with the plugin
 # Neovim trusts .lazy.lua by the sha256 of its bytes: changing them forces every user of every
 # project to trust it again. Update this only on purpose (and say so in the release notes).
-LAZY_LUA_SHA256 = "08894628ac537240b2ed9fbb385e9fe8ea2ee41398b52efc08aee2a69b2e8f57"
+LAZY_LUA_SHA256 = "ec47993b92510b7454f7575b83ad4bd3f78a546fc8e454c8009ebf4196eb57ec"
 
 VARIANTS: dict[str, dict[str, Any]] = {
     "script": {},
@@ -76,9 +77,12 @@ def test_lazy_lua_is_identical_in_every_mode() -> None:
     assert "\r" not in text and text.endswith("\n")
     assert text.isascii()
     assert "\ufeff" not in text
+    # A thin loader: the extras and the plugin spec live in spec.lua (trusted with the plugin).
+    assert ".pytemplate/nvim/spec.lua" in text and "dofile(spec)(root)" in text
+    spec = SPEC_LUA.read_text(encoding="utf-8")
     for extra in ("lang.python", "lang.toml", "dap.core", "test.core", "editor.overseer"):
-        assert f'"lazyvim.plugins.extras.{extra}"' in text
-    assert 'name = "pytemplate.nvim"' in text
+        assert f'"lazyvim.plugins.extras.{extra}"' in spec
+    assert 'name = "pytemplate.nvim"' in spec
 
 
 def test_lazy_lua_matches_the_template() -> None:
@@ -110,8 +114,8 @@ def test_lazy_lua_template_in_another_encoding_is_a_clear_error(tmp_path: Path, 
 
 
 def test_lazy_lua_extras_match_cmd_nvim() -> None:
-    """./pyt nvim extras enables exactly what .lazy.lua imports."""
-    extras = re.findall(r'"(lazyvim\.plugins\.extras\.[\w.]+)"', nvim.LAZY_TEMPLATE.read_text(encoding="utf-8"))
+    """./pyt nvim extras enables exactly what spec.lua imports (the loader dofile's it)."""
+    extras = re.findall(r'"(lazyvim\.plugins\.extras\.[\w.]+)"', SPEC_LUA.read_text(encoding="utf-8"))
     assert extras == list(cmd_nvim.EXTRAS)
 
 
@@ -180,10 +184,21 @@ def test_editor_json_is_data_without_machine_paths(name: str) -> None:
         assert str(ROOT) not in s and ROOT.as_posix() not in s
 
 
+def _mypy_of(profile: str) -> tuple[bool, dict[str, str]]:
+    """editor.json's typing.mypy and mypy_severity for `profile`, read from the profile as the
+    project has it (README: a project may edit .pytemplate/templates/typing/<profile>.toml; with
+    `skip_mypy = false` in off.toml the shipped values failed here)."""
+    data = render.load_profile(profile)
+    return not data.get("skip_mypy", False), data.get("vscode", {}).get("mypy-type-checker.severity", nvim.DEFAULT_SEVERITY)
+
+
 def test_editor_json_follows_the_mode() -> None:
+    if (project.TEMPLATE / "template-repo").is_file():  # the shipped profiles
+        assert _mypy_of("off")[0] is False and _mypy_of("mypyc") == (True, {"error": "Error", "note": "Information"})
+        assert _mypy_of("warn")[1]["error"] == "Warning"
     script = editor("script")
     assert script["backend"] == {"active": "cpython", "supported": ["cpython", "mypyc"]}
-    assert script["typing"]["profile"] == "off" and script["typing"]["mypy"] is False
+    assert script["typing"]["profile"] == "off" and script["typing"]["mypy"] is _mypy_of("off")[0]
     assert script["typing"]["python_version"] is None and script["pypy_enabled"] is False
 
     raylib = editor("raylib")
@@ -195,11 +210,10 @@ def test_editor_json_follows_the_mode() -> None:
     assert flet["tasks"] == [{"name": "dev", "help": "", "background": True}]
 
     mypyc = editor("mypyc-active")
-    assert mypyc["typing"]["profile"] == "mypyc" and mypyc["typing"]["mypy"] is True
-    assert mypyc["typing"]["mypy_severity"] == {"error": "Error", "note": "Information"}
+    assert mypyc["typing"]["profile"] == "mypyc" and (mypyc["typing"]["mypy"], mypyc["typing"]["mypy_severity"]) == _mypy_of("mypyc")
 
     warn = editor("pypy-supported")
-    assert warn["typing"]["mypy_severity"]["error"] == "Warning"
+    assert warn["typing"]["mypy_severity"] == _mypy_of("warn")[1]
     assert warn["min_python"] == "3.11"
 
     assert editor("basedpyright")["typing"]["editor"] == "basedpyright"
@@ -219,12 +233,23 @@ def test_task_severity_follows_the_vscode_matchers(name: str) -> None:
         assert levels["mypy"] == by_owner.get("pytemplate-mypy", levels["mypy"]), backend  # no matcher: skip_mypy
 
 
+def _severity(profile: str) -> dict[str, str]:
+    """editor.json's task_severity of a backend on `profile`, read from the profile as the project
+    has it (README: a project may edit .pytemplate/templates/typing/<profile>.toml)."""
+    data = render.load_profile(profile)
+    return {"mypy": "error" if data.get("blocking") else "warning", "ruff": "warning" if data.get("ruff", {}).get("exit_zero") else "error"}
+
+
 def test_task_severity_examples() -> None:
-    assert editor("mypyc-active")["typing"]["task_severity"]["mypyc"] == {"mypy": "error", "ruff": "error"}
+    assert editor("mypyc-active")["typing"]["task_severity"]["mypyc"] == _severity("mypyc")
     warn = editor("pypy-supported")["typing"]["task_severity"]
-    assert warn == {"cpython": {"mypy": "warning", "ruff": "warning"}, "pypy": {"mypy": "warning", "ruff": "warning"}}
-    # the default `off` profile: mypy does not run, ruff's few rules fail the check
-    assert editor("script")["typing"]["task_severity"]["cpython"] == {"mypy": "warning", "ruff": "error"}
+    assert warn == {"cpython": _severity("warn"), "pypy": _severity("warn")}
+    assert editor("script")["typing"]["task_severity"]["cpython"] == _severity("off")
+    if (project.TEMPLATE / "template-repo").is_file():  # the shipped profiles
+        assert editor("mypyc-active")["typing"]["task_severity"]["mypyc"] == {"mypy": "error", "ruff": "error"}
+        assert warn == {"cpython": {"mypy": "warning", "ruff": "warning"}, "pypy": {"mypy": "warning", "ruff": "warning"}}
+        # the default `off` profile: mypy does not run, ruff's few rules fail the check
+        assert editor("script")["typing"]["task_severity"]["cpython"] == {"mypy": "warning", "ruff": "error"}
 
 
 def test_editor_json_lists_every_command_and_method() -> None:
@@ -297,6 +322,18 @@ if cmd[2] == "run" then
 end
 local bad = pt.sanitize({ schema = 1, backend = { active = "x", supported = { "calc.exe" } }, envs = { tools = "C:/w" } })
 check("sanitize", bad.backend.active == "cpython" and bad.envs.tools == ".venv", vim.inspect(bad))
+-- a long [tasks] help (the user's text, any language) is cut at a character boundary, never inside
+-- a UTF-8 sequence: a lone lead byte showed as a garbled character in the pickers
+for i, case in ipairs({
+  { string.rep("a", 199) .. "\195\177bc", string.rep("a", 199) },
+  { string.rep("a", 198) .. "\195\177bc", string.rep("a", 198) .. "\195\177" },
+  { string.rep("a", 198) .. "\240\159\152\128", string.rep("a", 198) },
+  { string.rep("a", 197) .. "\240\159\152\128x", string.rep("a", 197) },
+  { string.rep("a", 250), string.rep("a", 200) },
+}) do
+  local cut = pt.sanitize({ schema = 1, tasks = { { name = "gen", help = case[1] } } }).tasks[1].help
+  check("help cut at a character boundary " .. i, cut == case[2], vim.inspect({ #cut, cut:sub(-4) }))
+end
 local p = require("pytemplate.tasks").parse_line
 local m = p("src/a/x.py:12: error: Incompatible types  [assignment]")
 check("parse mypy", m and m.type == "E" and m.lnum == 12, vim.inspect(m))
@@ -305,14 +342,19 @@ check("parse ruff", m and m.type == "W" and m.col == 8, vim.inspect(m))
 check("parse note", p("src/x.py:5: note: see") == nil, "note not ignored")
 local tmpl = require("overseer.template.pytemplate")
 check("overseer provider", type(tmpl.generator) == "function", vim.inspect(tmpl))
+-- the templates of the plugin's root whatever overseer's search (the current buffer's folder): a
+-- buffer outside the project left no pyt template, and the preLaunchTask `pyt: compile` unfound
+local saved_constants = package.loaded["overseer.constants"]
+package.loaded["overseer.constants"] = saved_constants or { TAG = { RUN = "RUN", TEST = "TEST", BUILD = "BUILD", CLEAN = "CLEAN" } }
+for _, dir in ipairs({ root, root .. "/src", vim.fs.dirname(root), vim.fn.tempname() }) do
+  local okg, got = pcall(tmpl.generator, { dir = dir })
+  local names = okg and type(got) == "table" and vim.tbl_map(function(t) return t.name end, got) or got
+  check("overseer templates from " .. dir, type(names) == "table" and vim.tbl_contains(names, "pyt: help"), vim.inspect(names))
+end
+package.loaded["overseer.constants"] = saved_constants
 
--- mypyc prints paths relative to its stage (a copy of src/): they land on src/
-local pkg = pt.info().pkg
-local core = root .. "/src/" .. pkg .. "/core/__init__.py"
-m = p(pkg .. "/core/__init__.py:2: error: Incompatible types in assignment  [assignment]")
-check("parse mypyc stage path", m and m.type == "E" and pt.same_path(m.filename, core), vim.inspect(m))
-m = p("src/" .. pkg .. "/core/__init__.py:2: error: x  [misc]")
-check("parse mypy src path", m and pt.same_path(m.filename, core), vim.inspect(m))
+-- a relative path with no file under src/ stays root-relative; the stage->src mapping needs a
+-- real src/<pkg>/core, so it is checked hermetically in test_parser_maps_mypyc_stage_paths_to_src
 m = p("nowhere/x.py:1: error: y")
 check("parse a path found nowhere", m and pt.same_path(m.filename, root .. "/nowhere/x.py"), vim.inspect(m))
 
@@ -341,37 +383,37 @@ check(
   vim.inspect(denv)
 )
 
--- Windows: uv from PATH only as a real uv.exe, never a uv.cmd/uv.bat shim earlier on PATH
--- (pyt.cmd and pyt.ps1 do the same). The stub emulates Neovim's PATHEXT lookup.
+-- Windows: uv from PATH only as a real uv.exe, never a uv.cmd/uv.bat shim earlier on PATH, and
+-- only from PATH's absolute folders, never Neovim's current folder nor a relative or root-relative
+-- entry (pyt.cmd and pyt.ps1 do the same). The file system is faked, and so is vim.fn.exepath as
+-- Neovim answers on Windows with 'shell' = cmd.exe (is_executable_in_path prepends ".;" to PATH):
+-- the uv.exe of the current folder first.
 do
-  local tmp = vim.fs.normalize(vim.fn.tempname())
-  local dirs = { tmp .. "/shims", tmp .. "/bin" }
-  for i, f in ipairs({ dirs[1] .. "/uv.cmd", dirs[2] .. "/uv.exe" }) do
-    vim.fn.mkdir(dirs[i], "p")
-    vim.fn.writefile({ "" }, f)
-    vim.uv.fs_chmod(f, 493)
+  local files = { ["C:/cwd/uv.exe"] = true, ["C:/cwd/rel/uv.exe"] = true, ["C:/shims/uv.cmd"] = true, ["C:/bin/uv.exe"] = true }
+  local function fake(p)
+    return files[(tostring(p):gsub("\\", "/"))] == true
   end
-  local real, asked = vim.fn.exepath, {}
+  local real_stat, real_exec, real_exepath, asked = vim.uv.fs_stat, vim.fn.executable, vim.fn.exepath, {}
+  vim.uv.fs_stat = function(p)
+    return fake(p) and { type = "file" } or nil
+  end
+  vim.fn.executable = function(p)
+    return fake(p) and 1 or 0
+  end
   vim.fn.exepath = function(name)
     asked[#asked + 1] = name
-    for _, d in ipairs(dirs) do
-      for _, e in ipairs(name:find("%.") and { "" } or { ".com", ".exe", ".bat", ".cmd" }) do
-        if vim.uv.fs_stat(d .. "/" .. name .. e) then
-          return d .. "/" .. name .. e
-        end
-      end
-    end
-    return ""
+    return name == "uv.exe" and "C:\\cwd\\uv.exe" or ""
   end
-  local saved_env, saved_win = vim.env.UV, pt.is_win
+  local saved = { UV = vim.env.UV, PATH = vim.env.PATH, win = pt.is_win }
   vim.env.UV = nil
+  vim.env.PATH = 'rel;\\root-relative;C:\\shims;"C:\\bin";C:\\other'
   pt.is_win = true
   pt.reset()
   local okw, got = pcall(pt.uv)
-  pt.is_win, vim.fn.exepath, vim.env.UV = saved_win, real, saved_env
+  vim.uv.fs_stat, vim.fn.executable, vim.fn.exepath = real_stat, real_exec, real_exepath
+  vim.env.UV, vim.env.PATH, pt.is_win = saved.UV, saved.PATH, saved.win
   pt.reset()
-  local want = vim.fs.normalize(dirs[2] .. "/uv.exe")
-  check("windows uv is a real uv.exe", okw and got and vim.fs.normalize((got:gsub("\\", "/"))) == want, vim.inspect({ got, want, asked }))
+  check("windows uv is PATH's first real uv.exe", okw and got == "C:\\bin\\uv.exe", vim.inspect({ got, asked }))
 end
 
 -- basedpyright from uvx runs the version ./pyt check pins (editor.json typing.basedpyright)
@@ -472,18 +514,21 @@ def test_a_neovim_that_inherited_the_global_mode_runs_the_projects_runner(tmp_pa
     """A Neovim started with PYTEMPLATE_GLOBAL=1 in its environment (a shell a launcher left it in,
     a user export) handed it to the project's runner, which then ran in the installed template's
     global mode: every task exited 2 "needs a project". The launchers remove it; the plugin empties
-    it (the runner reads only "1")."""
+    it (the runner reads only "1"). uv keeps the folders it has outside the isolated XDG ones
+    (nvimtest.uv_dirs, as selftest --nvim does): from the moved XDG_CACHE_HOME and XDG_DATA_HOME it
+    downloaded python.cpython at every run, offline the test failed ("uv is set to offline mode"),
+    and on a full disk too. UV_OFFLINE proves it needs no download."""
     if not (os.environ.get("UV") or shutil.which("uv")):
         pytest.skip("uv not found")
     monkeypatch.setenv("PYTEMPLATE_GLOBAL", "1")
     for name in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON"):
         monkeypatch.delenv(name, raising=False)
-    r = _headless_lua(tmp_path, GLOBAL_MODE_CHECK, ROOT)
+    r = _headless_lua(tmp_path, GLOBAL_MODE_CHECK, ROOT, {**nvimtest.uv_dirs(os.environ), "UV_OFFLINE": "1"})
     out = r.stdout
     assert "PTRC 0\n./pyt [-v|-q]" in out and "Outside a project" not in out, out + r.stderr
 
 
-def _headless_lua(tmp_path: Path, lua: str, test_root: Path) -> subprocess.CompletedProcess[str]:
+def _headless_lua(tmp_path: Path, lua: str, test_root: Path, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Run `lua` in `nvim --headless --clean` with isolated XDG dirs (never the user's Neovim)."""
     exe = _nvim()
     if not exe:
@@ -494,6 +539,7 @@ def _headless_lua(tmp_path: Path, lua: str, test_root: Path) -> subprocess.Compl
     for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         env[var] = str(tmp_path / var.lower())
     env.update(NVIM_LOG_FILE=str(tmp_path / "nvim.log"), PT_TEST_ROOT=test_root.as_posix(), PT_PLUGIN=PLUGIN.as_posix(), PT_TMP=tmp_path.as_posix())
+    env.update(env_extra or {})
     return subprocess.run(  # the script quits itself; `cq!` only runs after a Lua error in it
         [exe, "--headless", "--clean", "-n", "-i", "NONE", "-c", f"luafile {script.as_posix()}", "-c", "cq!"],
         cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
@@ -694,12 +740,875 @@ def _project(tmp_path: Path, **typing: Any) -> Path:
     return project
 
 
+def _lay_out_project(dest: Path) -> None:
+    """A real project the .lazy.lua loader can run against: the shipped .lazy.lua, the plugin and
+    an empty pytemplate.toml (spec.lua needs both the config and the plugin to accept the folder)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(PLUGIN, dest / ".pytemplate" / "nvim")
+    shutil.copy2(ROOT / ".lazy.lua", dest / ".lazy.lua")
+    (dest / "pytemplate.toml").write_text("", encoding="utf-8")
+
+
+# lazy.nvim reads the file with loadstring (no chunk path); the loader finds its root from the cwd
+LAZY_LUA_ROOT_CHECK = r"""
+local a = vim.fs.normalize(vim.env.PT_TMP .. "/outer")
+package.loaded["lazy.core.config"] = { spec = { modules = {} } }
+vim.uv.chdir(a .. "/vendored/inner")
+local ok, spec = pcall(loadfile(a .. "/.lazy.lua"))
+local plugin
+for _, s in ipairs(ok and spec or {}) do
+  if s.name == "pytemplate.nvim" then plugin = s end
+end
+-- root is the folder of the trusted .lazy.lua (a), never the nested pytemplate.toml (a/vendored/inner)
+local good = plugin ~= nil and vim.fs.normalize(plugin.dir) == a .. "/.pytemplate/nvim"
+  and vim.fs.normalize(plugin.opts.root) == a
+io.stdout:write((good and "PTOK" or ("PTFAIL " .. vim.inspect({ ok = ok, plugin = plugin }))) .. "\n")
+vim.cmd(ok and "qa!" or "cq!")
+"""
+
+
+def test_lazy_lua_root_is_the_trusted_files_folder(tmp_path: Path) -> None:
+    """.lazy.lua's root is the folder of the .lazy.lua lazy.nvim read and trusted, never a nearer
+    pytemplate.toml: a folder cloned or vendored inside the project, with its own pytemplate.toml
+    but no .lazy.lua, must not become the root (its plugin code would run untrusted)."""
+    outer = tmp_path / "outer"
+    _lay_out_project(outer)
+    inner = outer / "vendored" / "inner"
+    (inner / ".pytemplate" / "nvim" / "lua" / "pytemplate").mkdir(parents=True)
+    (inner / "pytemplate.toml").write_text("", encoding="utf-8")
+    (inner / ".pytemplate" / "nvim" / "lua" / "pytemplate" / "init.lua").write_text("return {}\n", encoding="utf-8")
+    r = _headless_lua(tmp_path, LAZY_LUA_ROOT_CHECK, ROOT)
+    assert "PTOK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+# What lazy.nvim does at startup, with only outer/.lazy.lua in the (isolated) trust database:
+# find_local_spec picks the nearest .lazy.lua vim.fn.filereadable accepts, vim.secure.read reads it
+# (a link: the file it names, trusted), loadstring runs it. PT_LAZY, when set, is the pinned
+# lazy.nvim and its own find_local_spec runs; else a copy of it, word for word.
+LOCAL_SPEC_CHECK = r"""
+local outer = vim.env.PT_TMP .. "/outer"
+vim.fn.mkdir(vim.fn.stdpath("state"), "p")
+local trusted, msg
+if vim.fn.has("nvim-0.12") == 1 then
+  trusted, msg = vim.secure.trust({ action = "allow", path = outer .. "/.lazy.lua" })
+else
+  local b = vim.fn.bufadd(outer .. "/.lazy.lua")
+  vim.fn.bufload(b)
+  trusted, msg = vim.secure.trust({ action = "allow", bufnr = b })
+end
+local find_local_spec
+if vim.env.PT_LAZY then
+  vim.opt.rtp:prepend(vim.env.PT_LAZY)
+  local Config = require("lazy.core.config")
+  Config.options = vim.deepcopy(Config.defaults)
+  find_local_spec = require("lazy.core.plugin").find_local_spec
+else
+  find_local_spec = function()
+    local path = vim.uv.cwd()
+    while path and path ~= "" do
+      local file = path .. "/.lazy.lua"
+      if vim.fn.filereadable(file) == 1 then
+        return {
+          name = file,
+          import = function()
+            local data = vim.secure.read(file)
+            if data then
+              return loadstring(data, ".lazy.lua")()
+            end
+            return {}
+          end,
+        }
+      end
+      local p = vim.fn.fnamemodify(path, ":h")
+      if p == path then
+        break
+      end
+      path = p
+    end
+  end
+end
+local got = { trusted = trusted == true, msg = msg or vim.NIL, cases = {} }
+for _, folder in ipairs({ outer, outer .. "/vendor/dep" }) do
+  vim.uv.chdir(folder)
+  _G.PT_UNTRUSTED_RAN = nil
+  local found = find_local_spec()
+  local ok, spec = pcall(found and found.import or function() return {} end)
+  local root = vim.NIL
+  for _, s in ipairs(ok and type(spec) == "table" and spec or {}) do
+    if s.name == "pytemplate.nvim" then
+      root = vim.fs.normalize(s.opts.root) == vim.fs.normalize(outer) and "outer" or s.opts.root
+    end
+  end
+  got.cases[#got.cases + 1] = {
+    ok = ok,
+    err = not ok and tostring(spec) or vim.NIL,
+    ran = _G.PT_UNTRUSTED_RAN == true,
+    root = root,
+    entries = ok and type(spec) == "table" and #spec or -1,
+  }
+end
+io.stdout:write("PTSPEC" .. vim.json.encode(got) .. "\n")
+vim.cmd("qa!")
+"""
+
+# The spec.lua of a folder vendored into the project: never trusted, it must never run.
+UNTRUSTED_SPEC = '_G.PT_UNTRUSTED_RAN = true\nreturn function() return { { name = "untrusted" } } end\n'
+
+
+@pytest.mark.parametrize("lazy", ["copy", "pinned"])
+@pytest.mark.parametrize("nested", ["directory", "link"])
+def test_lazy_lua_never_runs_a_nested_folders_spec(tmp_path: Path, nested: str, lazy: str) -> None:
+    """A folder vendored inside the trusted project with a `.lazy.lua` that is no file of its own
+    must not become the loader's root: a DIRECTORY named .lazy.lua (lazy.nvim skips it and runs the
+    project's trusted file, whose loader took the directory's folder for its root through
+    vim.fs.root), or a SYMLINK to the project's .lazy.lua (vim.secure.read resolves it to the
+    trusted file). Both ran the folder's untrusted .pytemplate/nvim/spec.lua. From the project's
+    own folder its spec still loads; from the directory's folder the project's; from the link's
+    nothing. `pinned` runs the pinned lazy.nvim's own find_local_spec (./pyt selftest --nvim
+    installs it), `copy` the same code copied here."""
+    env: dict[str, str] = {}
+    if lazy == "pinned":
+        plugins = _pinned_plugins("lazy.nvim")
+        if plugins is None:
+            pytest.skip("no checkout of the pinned lazy.nvim (./pyt selftest --nvim makes one)")
+        env["PT_LAZY"] = plugins["lazy.nvim"].as_posix()
+    outer = tmp_path / "outer"
+    _lay_out_project(outer)
+    dep = outer / "vendor" / "dep"
+    (dep / ".pytemplate" / "nvim").mkdir(parents=True)
+    (dep / ".pytemplate" / "nvim" / "spec.lua").write_text(UNTRUSTED_SPEC, encoding="utf-8", newline="\n")
+    if nested == "directory":
+        (dep / ".lazy.lua").mkdir()
+    else:
+        try:
+            (dep / ".lazy.lua").symlink_to(Path("..") / ".." / ".lazy.lua")
+        except (OSError, NotImplementedError) as e:  # Windows without the symlink privilege
+            pytest.skip(f"cannot create a symbolic link here: {e}")
+    r = _headless_lua(tmp_path, LOCAL_SPEC_CHECK, ROOT, env)
+    line = next((x for x in r.stdout.splitlines() if x.startswith("PTSPEC")), None)
+    assert line is not None and r.returncode == 0, r.stdout + r.stderr
+    got = json.loads(line.removeprefix("PTSPEC"))
+    assert got["trusted"] is True, got
+    home, nested_case = got["cases"]
+    assert home["ok"] and not home["ran"] and home["root"] == "outer", home
+    assert nested_case["ok"] and not nested_case["ran"], f"the untrusted spec.lua ran: {nested_case}"
+    if nested == "directory":
+        assert nested_case["root"] == "outer", nested_case  # the project's own spec, as in any subfolder
+    else:
+        assert nested_case["entries"] == 0, nested_case  # a link's trust is not the folder's own
+
+
+# spec.lua schedules the notify, so vim.wait pumps the loop until it fires
+LAZY_LUA_UNSAFE_CHECK = r"""
+local a = vim.fs.normalize(vim.env.PT_UNSAFE_ROOT)
+package.loaded["lazy.core.config"] = { spec = { modules = { "lazyvim.plugins" } } }
+vim.uv.chdir(a)
+local notified
+vim.notify = function(msg) notified = msg end
+local ok, spec = pcall(loadfile(a .. "/.lazy.lua"))
+local bad
+for _, s in ipairs(ok and spec or {}) do
+  if s.name == "pytemplate.nvim" or s.import then bad = s end
+end
+vim.wait(1000, function() return notified ~= nil end)
+-- the integration is skipped (no plugin, no extras) with one notify, so the LazyVim plugins keep working
+local good = ok and bad == nil and type(notified) == "string" and notified:find("[", 1, true) ~= nil
+io.stdout:write((good and "PTOK" or ("PTFAIL " .. vim.inspect({ ok = ok, bad = bad, notified = notified }))) .. "\n")
+vim.cmd(ok and "qa!" or "cq!")
+"""
+
+
+def test_lazy_lua_refuses_a_runtimepath_unsafe_root(tmp_path: Path) -> None:
+    r"""A `[ ] { } * ? , \ ` ' $` in the project path is a 'runtimepath' glob: the plugin cannot load
+    there (require fails, E79), so spec.lua returns {} with one notify and the LazyVim plugins whose
+    opts call into it keep working. cmd_nvim.rtp_unsafe_char names the character for doctor/trust."""
+    root = tmp_path / "q[x]z"
+    _lay_out_project(root)
+    r = _headless_lua(tmp_path, LAZY_LUA_UNSAFE_CHECK, ROOT, {"PT_UNSAFE_ROOT": root.as_posix()})
+    assert "PTOK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+    assert cmd_nvim.rtp_unsafe_char(Path("/tmp/q[x]z")) == "["
+    assert cmd_nvim.rtp_unsafe_char(Path("/tmp/a,b")) == ","
+    assert cmd_nvim.rtp_unsafe_char(Path("/tmp/a`b"), windows=False) == "`"
+    assert cmd_nvim.rtp_unsafe_char(Path("/tmp/plain")) is None
+
+
+# What lazy.nvim does with the local spec: each plugin's dir goes on the runtimepath, and the plugin
+# loads by require, through Neovim's runtime search path (the rtp entries, each read as a glob).
+LAZY_LUA_GLOB_CHECK = r"""
+local root = vim.fs.normalize(vim.env.PT_UNSAFE_ROOT)
+package.loaded["lazy.core.config"] = { spec = { modules = {} } }
+vim.uv.chdir(root)
+local notified
+vim.notify = function(msg) notified = msg end
+local ok, spec = pcall(loadfile(root .. "/.lazy.lua"))
+for _, s in ipairs(ok and type(spec) == "table" and spec or {}) do
+  if s.dir then vim.opt.rtp:prepend(s.dir) end
+end
+_G.PT_SIBLING_RAN = nil
+local loaded = pcall(require, "pytemplate")
+vim.wait(1000, function() return notified ~= nil end, 10)
+io.stdout:write("PTGLOB" .. vim.json.encode({
+  ok = ok, entries = ok and type(spec) == "table" and #spec or -1, loaded = loaded,
+  ran = _G.PT_SIBLING_RAN == true, notified = notified or vim.NIL,
+}) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows forbids * and ? in a file name")
+@pytest.mark.parametrize(("name", "sibling"), [("g?", "g1"), ("my*game", "my game")])
+def test_a_project_path_neovim_globs_never_loads_a_siblings_plugin(tmp_path: Path, name: str, sibling: str) -> None:
+    """Neovim reads `*` and `?` in a 'runtimepath' entry as wildcards too (path.c's
+    path_has_exp_wildcard: `*?[{` on POSIX): with the project in `g?` the plugin's entry
+    `g?/.pytemplate/nvim` matched the sibling `g1/.pytemplate/nvim`, which sorts first, and
+    require("pytemplate") ran that folder's code, which nobody trusted (only g?/.lazy.lua was).
+    spec.lua refuses such a root like `[`: nothing goes on the runtimepath, one notify names the
+    character, and doctor and trust name it too."""
+    root = tmp_path / "q" / name
+    _lay_out_project(root)
+    plugin = tmp_path / "q" / sibling / ".pytemplate" / "nvim" / "lua" / "pytemplate"
+    plugin.mkdir(parents=True)
+    (plugin / "init.lua").write_text("_G.PT_SIBLING_RAN = true\nreturn { setup = function() end }\n", encoding="utf-8")
+    r = _headless_lua(tmp_path, LAZY_LUA_GLOB_CHECK, ROOT, {"PT_UNSAFE_ROOT": root.as_posix()})
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTGLOB")), None)
+    assert line is not None and r.returncode == 0, r.stdout + r.stderr
+    got = json.loads(line.removeprefix("PTGLOB"))
+    assert got["ok"] and not got["ran"], f"the sibling's untrusted plugin code ran: {got}"
+    bad = cmd_nvim.rtp_unsafe_char(PurePosixPath(root.as_posix()), windows=False)
+    assert bad is not None and got["entries"] == 0 and not got["loaded"], got
+    assert isinstance(got["notified"], str) and f"holds `{bad}`" in got["notified"], got
+
+
+# spec.lua's verdict on each root, with has('win32') answering as `windows` says
+SPEC_RTP_CHECK = r"""
+local cases = vim.json.decode(table.concat(vim.fn.readfile(vim.env.PT_TMP .. "/rtp.json"), "\n"))
+local real_has = vim.fn.has
+local got = {}
+for i, c in ipairs(cases) do
+  vim.fn.has = function(what)
+    if what == "win32" then return c.windows and 1 or 0 end
+    return real_has(what)
+  end
+  local notified
+  vim.notify = function(msg) notified = msg end
+  local spec = dofile(vim.env.PT_PLUGIN .. "/spec.lua")(c.root)
+  vim.wait(1000, function() return notified ~= nil end, 10)
+  local loads = false
+  for _, s in ipairs(spec) do
+    if s.name == "pytemplate.nvim" then loads = true end
+  end
+  got[i] = { loads = loads, notified = notified or vim.NIL }
+end
+vim.fn.has = real_has
+io.stdout:write("PTRTP" .. vim.json.encode(got) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_the_runtimepath_rule_is_the_same_in_spec_lua_and_cmd_nvim(tmp_path: Path) -> None:
+    r"""On Windows Neovim 0.12.5 globs only `* ? [` in a 'runtimepath' entry and never hands one to
+    'shell' (SPECIAL_WILDCHAR is POSIX only): a `'`, `{ }`, `]` or a backtick is a plain character
+    there, and spec.lua refused every project below C:\Users\O'Brien. A comma, `[` and `$` still
+    break it; POSIX keeps its whole set, `*` and `?` included (they were missing, and a sibling
+    folder the glob matched loaded its plugin code). spec.lua (the loader) and cmd_nvim (doctor,
+    trust) must give the same verdict, name the same character and list the same set."""
+    names = ["O'Brien", "a{b}c", "a]b", "a`b", "q[x]z", "a,b", "a$b", "plain"]
+    if sys.platform != "win32":
+        names += ["a\\b", "a?b", "a*b"]  # name characters off Windows only
+    cases = []
+    for name in names:
+        root = tmp_path / "roots" / name / "proj"
+        (root / ".pytemplate" / "nvim" / "lua" / "pytemplate").mkdir(parents=True)
+        (root / "pytemplate.toml").write_text("", encoding="utf-8")
+        (root / ".pytemplate" / "nvim" / "lua" / "pytemplate" / "init.lua").write_text("return {}\n", encoding="utf-8")
+        cases += [{"root": root.as_posix(), "windows": w} for w in (False, True)]
+    (tmp_path / "rtp.json").write_text(json.dumps(cases), encoding="utf-8")
+    r = _headless_lua(tmp_path, SPEC_RTP_CHECK, ROOT)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTRTP")), None)
+    assert line is not None, r.stdout + r.stderr
+    for case, got in zip(cases, json.loads(line[len("PTRTP") :]), strict=True):
+        windows = bool(case["windows"])
+        bad = cmd_nvim.rtp_unsafe_char(PurePosixPath(case["root"]), windows=windows)
+        if bad is None:
+            assert got["loads"] and got["notified"] is None, (case, got)
+        else:
+            assert not got["loads"] and f"holds `{bad}`" in got["notified"], (case, got)
+            assert got["notified"].endswith(f"a path without {cmd_nvim.rtp_unsafe_text(windows=windows)}."), got
+    win = PureWindowsPath(r"C:\Users\O'Brien\{proj}]")
+    assert cmd_nvim.rtp_unsafe_char(win, windows=True) is None and cmd_nvim.rtp_unsafe_char(win, windows=False) == "'"
+    assert cmd_nvim.rtp_unsafe_char(PureWindowsPath(r"C:\x\a`b"), windows=True) is None
+    for text, char in ((r"C:\a,b", ","), (r"C:\q[x]z", "["), (r"C:\$HOME\p", "$")):
+        assert cmd_nvim.rtp_unsafe_char(PureWindowsPath(text), windows=True) == char
+    for text, char in (("/home/u/game?", "?"), ("/home/u/my*game", "*")):
+        assert cmd_nvim.rtp_unsafe_char(PurePosixPath(text), windows=False) == char
+    assert cmd_nvim.rtp_unsafe_text(windows=True) == "[ * ? , or $"
+    assert cmd_nvim.rtp_unsafe_text(windows=False) == "[ ] { } * ? , \\ ` ' or $"
+
+
 def test_mypy_linter_follows_a_venv_created_later(tmp_path: Path) -> None:
     """nvim-lint's mypy is built when Neovim starts; `./pyt setup` (or any `uv run --locked`)
     may create .venv afterwards: the locked mypy must run then, not a mypy found on PATH."""
     project = _project(tmp_path, profile="warn", mypy=True)
     r = _headless_lua(tmp_path, MYPY_LINTER_CHECK, project)
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+PYTHON_ENV_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+package.loaded["lint.linters.mypy"] = { parser = function() return {} end }
+package.loaded["dap-python"] = { setup = function() end }
+package.loaded["dap"] = { adapters = { python = function(cb) cb({ type = "executable", command = "python", args = { "x" } }) end } }
+local pt = require("pytemplate")
+pt.config.root = vim.env.PT_TEST_ROOT
+local integ = require("pytemplate.integrations")
+local errors = {}
+local function check(name, ok, msg)
+  if not ok then errors[#errors + 1] = name .. ": " .. tostring(msg) end
+end
+check("the caller exports PYTHONHOME/PYTHONPATH", vim.env.PYTHONHOME ~= nil and vim.env.PYTHONPATH ~= nil, "test setup")
+-- mypy (nvim-lint REPLACES the environment with linter.env, so the keys must be absent)
+local linter = integ.mypy_linter()
+check("mypy env drops PYTHONHOME", linter.env.PYTHONHOME == nil, tostring(linter.env.PYTHONHOME))
+check("mypy env drops PYTHONPATH", linter.env.PYTHONPATH == nil, tostring(linter.env.PYTHONPATH))
+check("mypy keeps PYTHONUTF8", linter.env.PYTHONUTF8 == "1", tostring(linter.env.PYTHONUTF8))
+-- the Python language server (vim.lsp merges cmd_env over the environment; "" is unset for CPython)
+local opts = {}
+integ.lsp(nil, opts)
+local ce = opts.servers[pt.lsp_name()].cmd_env
+check("lsp cmd_env clears PYTHONHOME/PYTHONPATH", ce ~= nil and ce.PYTHONHOME == "" and ce.PYTHONPATH == "", vim.inspect(ce))
+-- the debug adapter (`python -m debugpy.adapter`): nvim-dap hands options.env to uv.spawn, which
+-- takes a list of "K=V" as the WHOLE environment, so the two names are left out of a full copy
+local captured
+require("pytemplate.dap").setup()
+require("dap").adapters.python(function(a) captured = a end, {})
+local ae = captured and captured.options and captured.options.env
+local names = {}
+for _, kv in ipairs(type(ae) == "table" and ae or {}) do
+  names[kv:match("^(=?[^=]+)=") or kv] = true
+end
+check("dap adapter env is a list of K=V", type(ae) == "table" and vim.islist(ae) and #ae > 0, vim.inspect(ae))
+check("dap adapter env drops PYTHONHOME/PYTHONPATH", not names.PYTHONHOME and not names.PYTHONPATH, vim.inspect(ae))
+check("dap adapter env keeps the rest", names.PT_KEEP_ME ~= nil, vim.inspect(ae))
+check("dap keeps the initialize timeout", captured and captured.options.initialize_timeout_sec == 30, vim.inspect(captured))
+io.stdout:write(#errors == 0 and "PTLUA OK\n" or ("PTLUA FAIL\n" .. table.concat(errors, "\n") .. "\n"))
+vim.cmd(#errors == 0 and "qa!" or "cq!")
+"""
+
+
+def test_plugin_python_tools_drop_pythonhome_and_pythonpath(tmp_path: Path) -> None:
+    """The launchers, init.pyt_env and proc.base_env keep PYTHONHOME and PYTHONPATH off every
+    tool the runner starts (a PYTHONHOME kills a Python, a PYTHONPATH shadows the stdlib). The
+    tools the plugin starts itself must be cleared too: mypy (env), the uvx basedpyright Python
+    entry point (cmd_env) and the debug adapter (options.env). Else mypy diagnostics silently
+    vanish and no Python language server starts, while ./pyt check in the same shell works."""
+    project = _project(tmp_path, profile="warn", mypy=True)
+    env_extra = {"PYTHONHOME": str(tmp_path / "home"), "PYTHONPATH": str(tmp_path / "path"), "PT_KEEP_ME": "1"}
+    r = _headless_lua(tmp_path, PYTHON_ENV_CHECK, project, env_extra)
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+# The adapter's options.env through uv.spawn, as nvim-dap's session.lua spawns an executable
+# adapter (spawn_opts.env = options.env): the program sees exactly that environment.
+DAP_SPAWN_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+package.loaded["dap-python"] = { setup = function() end }
+package.loaded["dap"] = { adapters = { python = function(cb)
+  cb({ type = "executable", command = "python", args = { "-m", "debugpy.adapter" } })
+end } }
+local pt = require("pytemplate")
+pt.config.root = vim.env.PT_TEST_ROOT
+require("pytemplate.dap").setup()
+local adapter
+require("dap").adapters.python(function(a) adapter = a end, { type = "python", request = "launch" })
+local chunks, code = {}, nil
+local stdout = assert(vim.uv.new_pipe(false))
+local handle = vim.uv.spawn(vim.env.PT_PYTHON, {
+  args = { "-c", "import json, os; print(json.dumps(dict(os.environ)))" },
+  stdio = { nil, stdout, nil },
+  env = adapter.options.env,
+  hide = true,
+}, function(c) code = c end)
+if handle then
+  stdout:read_start(function(_, data) if data then chunks[#chunks + 1] = data end end)
+  vim.wait(60000, function() return code ~= nil end, 20)
+  vim.wait(500)
+end
+io.stdout:write("PTSPAWN" .. vim.json.encode({ code = code or -1, out = table.concat(chunks) }) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_the_debug_adapter_gets_the_whole_environment_but_pythonhome(tmp_path: Path) -> None:
+    """nvim-dap hands the adapter's options.env to uv.spawn, which takes a LIST of "K=V" as the
+    whole environment: the map {PYTHONHOME = "", PYTHONPATH = ""} was an empty list there, and the
+    adapter, with every program it launched in its own console (debugpy's internalConsole,
+    neotest's debug runs), ran without PATH, HOME, LANG or DISPLAY. A caller's PYTHONHOME must
+    still never reach it (it kills the adapter's Python before it answers)."""
+    project = _project(tmp_path)
+    env_extra = {"PYTHONHOME": str(tmp_path / "nowhere"), "PYTHONPATH": str(tmp_path / "path"), "PT_KEEP_ME": "kept"}
+    r = _headless_lua(tmp_path, DAP_SPAWN_CHECK, project, {**env_extra, "PT_PYTHON": sys.executable})
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTSPAWN")), None)
+    assert line is not None, r.stdout + r.stderr
+    got = json.loads(line[len("PTSPAWN") :])
+    assert got["code"] == 0 and got["out"].strip(), (got, r.stderr)  # a PYTHONHOME: no Python at all
+    seen = json.loads(got["out"])
+    names = {k.upper() for k in seen} if sys.platform == "win32" else set(seen)
+    assert seen.get("PT_KEEP_ME") == "kept" and "PATH" in names, sorted(seen)
+    assert "PYTHONHOME" not in names and "PYTHONPATH" not in names, sorted(seen)
+
+
+def _venv_has_debugpy(root: Path) -> bool:
+    venv = root / ".venv"
+    libs = [venv / "Lib"] if sys.platform == "win32" else sorted((venv / "lib").glob("python3*"))
+    return any((lib / "site-packages" / "debugpy" / "__init__.py").is_file() for lib in libs)
+
+
+# A real session through the pinned nvim-dap and nvim-dap-python, with the plugin's adapter: the
+# debuggee (a program that writes its environment) runs in debugpy's internalConsole, the console
+# of neotest's debug runs and of every configuration that names none.
+REAL_DAP_ENV_CHECK = r"""
+vim.g.loaded_python3_provider = 0
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+vim.opt.rtp:prepend(vim.env.PT_NVIM_DAP)
+vim.opt.rtp:prepend(vim.env.PT_NVIM_DAP_PYTHON)
+local pt = require("pytemplate")
+pt.config.root = vim.env.PT_TEST_ROOT
+require("pytemplate.dap").setup()
+local dap = require("dap")
+local out = vim.env.PT_OUT
+dap.run({
+  type = "python", request = "launch", name = "environment", program = vim.env.PT_PROG,
+  args = { out }, console = "internalConsole", justMyCode = false,
+})
+local ok = vim.wait(90000, function() return vim.uv.fs_stat(out) ~= nil end, 100)
+pcall(dap.terminate)
+vim.wait(1000, function() return dap.session() == nil end, 50)
+io.stdout:write("PTDAP" .. vim.json.encode({ ok = ok }) .. "\n")
+vim.cmd("qa!")
+"""
+
+ENV_DUMP = """\
+import json, os, sys
+tmp = sys.argv[1] + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(dict(os.environ), f)
+os.replace(tmp, sys.argv[1])
+"""
+
+
+def test_a_real_debug_session_keeps_the_environment(tmp_path: Path) -> None:
+    """The same through the pinned nvim-dap and nvim-dap-python themselves: a program debugged in
+    debugpy's internalConsole ran with only DEBUGPY_* and LC_CTYPE (5 variables), not Neovim's
+    environment. Skipped without their checkouts (./pyt selftest --nvim makes them) or debugpy."""
+    plugins = _pinned_plugins("nvim-dap", "nvim-dap-python")
+    if plugins is None:
+        pytest.skip("no checkout of the pinned nvim-dap and nvim-dap-python (./pyt selftest --nvim installs them)")
+    if not _venv_has_debugpy(ROOT):
+        pytest.skip("no debugpy in .venv (./pyt sync)")
+    prog, out = tmp_path / "prog.py", tmp_path / "env.json"
+    prog.write_text(ENV_DUMP, encoding="utf-8")
+    extra = {
+        "PT_NVIM_DAP": plugins["nvim-dap"].as_posix(), "PT_NVIM_DAP_PYTHON": plugins["nvim-dap-python"].as_posix(),
+        "PT_PROG": prog.as_posix(), "PT_OUT": out.as_posix(), "PT_KEEP_ME": "kept", "PYTHONHOME": str(tmp_path / "nowhere"),
+    }  # fmt: skip
+    r = _headless_lua(tmp_path, REAL_DAP_ENV_CHECK, ROOT, extra)
+    assert out.is_file(), r.stdout + r.stderr
+    seen = json.loads(out.read_text(encoding="utf-8"))
+    assert seen.get("PT_KEEP_ME") == "kept" and "PATH" in {k.upper() for k in seen}, sorted(seen)
+    assert "PYTHONHOME" not in seen, sorted(seen)
+
+
+# The interpreter a configuration without one gets, once venv-selector's uv flow (LazyVim's
+# lang.python) saw a PEP 723 script: venv.update_paths(<its python>, "uv") runs
+# path.update_python_dap, which replaces dap-python's resolve_python for the whole session. With
+# PT_NVIM_DAP set: the pinned nvim-dap, nvim-dap-python and venv-selector themselves; else
+# stand-ins that follow their code (dap-python's get_python_path order: VIRTUAL_ENV, CONDA_PREFIX,
+# resolve_python). Nothing is spawned: the adapter is resolved and its enrich_config called.
+DAP_PYTHON_CHOICE_CHECK = r"""
+vim.g.loaded_python3_provider = 0
+vim.env.VIRTUAL_ENV = nil -- pytest runs under uv run, which exports it
+vim.env.CONDA_PREFIX = nil
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local is_win = vim.fn.has("win32") == 1
+if vim.env.PT_NVIM_DAP then
+  vim.opt.rtp:prepend(vim.env.PT_NVIM_DAP)
+  vim.opt.rtp:prepend(vim.env.PT_NVIM_DAP_PYTHON)
+  vim.opt.rtp:prepend(vim.env.PT_VENV_SELECTOR)
+else
+  local dp = {}
+  local function python_exe(venv)
+    return venv .. (is_win and "\\Scripts\\python.exe" or "/bin/python")
+  end
+  local function get_python_path()
+    local venv = os.getenv("VIRTUAL_ENV")
+    if venv then return python_exe(venv) end
+    venv = os.getenv("CONDA_PREFIX")
+    if venv then return python_exe(venv) end
+    if dp.resolve_python then return dp.resolve_python() end
+    return nil
+  end
+  local function enrich_config(config, on_config)
+    if not config.pythonPath and not config.python then
+      config.pythonPath = get_python_path()
+    end
+    on_config(config)
+  end
+  dp.setup = function()
+    package.loaded["dap"].adapters.python = function(cb)
+      cb({ type = "executable", command = "python", args = { "-m", "debugpy.adapter" }, enrich_config = enrich_config, options = {} })
+    end
+  end
+  package.loaded["dap-python"] = dp
+  package.loaded["dap"] = { adapters = {} }
+  package.loaded["venv-selector.venv"] = {
+    update_paths = function(py) dp.resolve_python = function() return py end end,
+  }
+end
+local pt = require("pytemplate")
+pt.config.root = vim.env.PT_TEST_ROOT
+require("pytemplate.dap").setup()
+require("venv-selector.venv").update_paths(vim.env.PT_SCRIPT_PY, "uv") -- .pytemplate/pyt.py was opened
+local dap = require("dap")
+local function python_for(config)
+  local got
+  config.type, config.request = "python", "launch"
+  dap.adapters.python(function(adapter)
+    adapter.enrich_config(config, function(c) got = c end)
+  end, config)
+  return got and (got.pythonPath or got.python) or vim.NIL
+end
+local root = pt.config.root
+local out = {
+  app = python_for({ program = root .. "/src/main.py" }),
+  tests = python_for({ module = "pytest" }),
+  script = python_for({ program = root .. "/tools/script.py" }),
+  unclosed = python_for({ program = root .. "/tools/unclosed.py" }),
+  named = python_for({ program = root .. "/src/main.py", python = "/own/python" }),
+}
+vim.env.VIRTUAL_ENV = vim.env.PT_TMP .. "/active"
+out.virtual_env = python_for({ program = root .. "/src/main.py" })
+io.stdout:write("PTCHOICE" .. vim.json.encode(out) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def _dap_python_choice(tmp_path: Path, extra: dict[str, str]) -> None:
+    project = _project(tmp_path)
+    py = project / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    py.parent.mkdir(parents=True)
+    py.write_bytes(b"")
+    (project / "tools").mkdir()
+    script = "# /// script\n# requires-python = '>=3.11'\n# dependencies = ['rich']\n# ///\nprint('tool')\n"
+    (project / "tools" / "script.py").write_bytes(script.replace("\n", "\r\n").encode())  # a CRLF checkout
+    (project / "tools" / "unclosed.py").write_text("# /// script\n# dependencies = []\nprint('x')\n", encoding="utf-8")
+    script_py = tmp_path / "script-env" / "bin" / "python"
+    r = _headless_lua(tmp_path, DAP_PYTHON_CHOICE_CHECK, project, {**extra, "PT_SCRIPT_PY": script_py.as_posix()})
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTCHOICE")), None)
+    assert line is not None, r.stdout + r.stderr
+    got: dict[str, str] = json.loads(line[len("PTCHOICE") :])
+    assert Path(got["app"]) == py and Path(got["tests"]) == py and Path(got["unclosed"]) == py, (got, py)
+    assert Path(got["script"]) == script_py and got["named"] == "/own/python", got
+    assert Path(got["virtual_env"]).parent.parent == tmp_path / "active", got
+
+
+def test_the_debugger_keeps_venv_after_a_pep_723_script_was_opened(tmp_path: Path) -> None:
+    """venv-selector's uv flow (LazyVim's lang.python) activates the environment of every PEP 723
+    script it sees, .pytemplate/pyt.py included, and replaces dap-python's resolve_python for the
+    rest of the session: F5 on launch.json's CPython configuration then ran src/main.py on the
+    runner's script environment (ModuleNotFoundError: rich). A configuration without an
+    interpreter gets .venv, unless its program is such a script itself (the environment
+    venv-selector gave it) or $VIRTUAL_ENV names one (dap-python's rule)."""
+    _dap_python_choice(tmp_path, {})
+
+
+def test_the_real_dap_python_keeps_venv_after_venv_selector_switched_it(tmp_path: Path) -> None:
+    """The same through the pinned nvim-dap, nvim-dap-python and venv-selector themselves.
+    Skipped without their checkouts (./pyt selftest --nvim makes them)."""
+    plugins = _pinned_plugins("nvim-dap", "nvim-dap-python", "venv-selector.nvim")
+    if plugins is None:
+        pytest.skip("no checkout of the pinned nvim-dap, nvim-dap-python and venv-selector (./pyt selftest --nvim installs them)")
+    extra = {
+        "PT_NVIM_DAP": plugins["nvim-dap"].as_posix(), "PT_NVIM_DAP_PYTHON": plugins["nvim-dap-python"].as_posix(),
+        "PT_VENV_SELECTOR": plugins["venv-selector.nvim"].as_posix(),
+    }  # fmt: skip
+    _dap_python_choice(tmp_path, extra)
+
+
+WIN_MYPY_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+package.loaded["lint.linters.mypy"] = { parser = function() return {} end }
+local pt = require("pytemplate")
+pt.is_win = true -- simulate the cmd.exe /C wrapping nvim-lint does on Windows, on any host
+pt.config.root = vim.env.PT_TEST_ROOT -- a path holding & (a cmd.exe metacharacter)
+local integ = require("pytemplate.integrations")
+local errors = {}
+local function check(name, ok, msg)
+  if not ok then errors[#errors + 1] = name .. ": " .. tostring(msg) end
+end
+local linter = integ.mypy_linter()
+check("no append_fname on Windows", linter.append_fname == false, tostring(linter.append_fname))
+-- nvim-lint's own Windows route (lua/lint.lua M.lint at the pinned commit 3d55c8f): the linter
+-- becomes `cmd.exe /C <cmd> <args...>` through unpack(), then every element is evaluated. A
+-- function as the whole `args` made unpack() fail, and mypy never ran on Windows.
+check("args is a list, as nvim-lint takes it", type(linter.args) == "table", type(linter.args))
+vim.api.nvim_buf_set_name(0, pt.config.root .. "/src/app.py")
+local function eval(x)
+  if type(x) == "function" then
+    return x()
+  end
+  return x
+end
+local ok, wrapped = pcall(function()
+  return vim.tbl_map(eval, { "/C", linter.cmd, unpack(linter.args or {}) })
+end)
+check("nvim-lint can wrap the linter in cmd.exe", ok, wrapped)
+local args = ok and wrapped or {}
+check("cmd.exe runs the bare mypy", args[2] == "mypy", tostring(args[2]))
+check("the file argument is root-relative (native), never the absolute path", args[#args] == "src\\app.py", tostring(args[#args]))
+-- the buffer is read at every run: another buffer, another argument
+vim.api.nvim_buf_set_name(0, pt.config.root .. "/src/other.py")
+local again = ok and vim.tbl_map(eval, { "/C", linter.cmd, unpack(linter.args) }) or {}
+check("the file argument follows the linted buffer", again[#again] == "src\\other.py", tostring(again[#again]))
+local pe
+for i, a in ipairs(args) do
+  if a == "--python-executable" then pe = args[i + 1] end
+end
+check("--python-executable is root-relative too", pe == ".venv\\Scripts\\python.exe", tostring(pe))
+io.stdout:write(#errors == 0 and "PTLUA OK\n" or ("PTLUA FAIL\n" .. table.concat(errors, "\n") .. "\n"))
+vim.cmd(#errors == 0 and "qa!" or "cq!")
+"""
+
+
+def test_windows_mypy_linter_uses_root_relative_paths(tmp_path: Path) -> None:
+    r"""On Windows nvim-lint wraps the linter in `cmd.exe /C`, which splits an absolute path at &
+    (no space), removes ^ and expands %NAME% (libuv quotes only a space, tab or quote). The linter
+    runs with cwd = root, so the buffer path and --python-executable go as root-relative paths,
+    which carry none of the root's own such characters (A9-05)."""
+    project = tmp_path / "R&D" / "proj"
+    (project / ".pytemplate").mkdir(parents=True)
+    (project / "src").mkdir()
+    (project / "pytemplate.toml").write_text("", encoding="utf-8")
+    data = json.loads((ROOT / ".pytemplate" / "editor.json").read_text(encoding="utf-8"))
+    data["pypy_enabled"] = True
+    data["typing"].update(profile="warn", mypy=True, python_version="3.11")
+    (project / ".pytemplate" / "editor.json").write_text(json.dumps(data), encoding="utf-8")
+    r = _headless_lua(tmp_path, WIN_MYPY_CHECK, project)
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+def _pinned_plugins(*names: str) -> dict[str, Path] | None:
+    """Checkouts of the plugins `names` at the commits nvimtest.LOCK pins, or None: the plugins
+    `selftest --nvim` installed in its default --dir, or in the lazy.nvim folder PT_NVIM_PLUGINS
+    names. Tests that run a plugin's own code (not a stand-in) skip without them."""
+    git = shutil.which("git")
+    if not git:
+        return None
+    lock = json.loads(nvimtest.LOCK.read_text(encoding="utf-8"))
+    data = nvimtest.Layout(nvimtest.default_dir()).home("XDG_DATA_HOME")
+    folders = [Path(os.environ["PT_NVIM_PLUGINS"])] if os.environ.get("PT_NVIM_PLUGINS") else []
+    folders += [data / "nvim" / "lazy", data / "nvim-data" / "lazy"]  # stdpath('data') off Windows, on it
+    for lazy in folders:
+        found: dict[str, Path] = {}
+        for name in names:
+            folder = lazy / name
+            if not folder.is_dir():
+                break
+            r = subprocess.run([git, "-C", str(folder), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30, check=False)
+            if r.returncode != 0 or r.stdout.strip() != lock.get(name, {}).get("commit"):
+                break
+            found[name] = folder
+        else:
+            return found
+    return None
+
+
+# nvim-lint's own M.lint (the pinned plugin, not a stand-in) with Windows faked: it wraps the
+# linter as `cmd.exe /C <cmd> <args...>` with unpack(linter.args), after LazyVim's merge
+# (lazyvim/plugins/linting.lua: tbl_deep_extend over nvim-lint's mypy). uv.spawn is replaced by a
+# recorder, so nothing runs; a function as the whole `args` made unpack() raise before the spawn.
+REAL_LINT_CHECK = r"""
+vim.g.loaded_python3_provider = 0
+local real_has = vim.fn.has
+vim.fn.has = function(what)
+  if what == "win32" then
+    return 1
+  end
+  return real_has(what)
+end
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+vim.opt.rtp:prepend(vim.env.PT_NVIM_LINT)
+local spawned = {}
+vim.uv.spawn = function(cmd, opts)
+  spawned[#spawned + 1] = { cmd = cmd, args = opts.args, cwd = opts.cwd }
+  return nil, "ENOENT: not spawned by the test"
+end
+local notes = {}
+vim.notify = function(msg)
+  notes[#notes + 1] = msg
+end
+vim.notify_once = vim.notify
+local pt = require("pytemplate")
+pt.config.root = vim.env.PT_TEST_ROOT
+local lint = require("lint")
+local opts = { linters = {}, linters_by_ft = {} }
+require("pytemplate.integrations").lint(nil, opts)
+for name, linter in pairs(opts.linters) do -- LazyVim's merge
+  if type(linter) == "table" and type(lint.linters[name]) == "table" then
+    lint.linters[name] = vim.tbl_deep_extend("force", lint.linters[name], linter)
+  else
+    lint.linters[name] = linter
+  end
+end
+vim.cmd.edit(vim.fn.fnameescape(pt.config.root .. "/src/app.py"))
+local ok, err = pcall(lint.lint, lint.linters.mypy)
+lint.try_lint({ "mypy" })
+io.stdout:write("PTLINT" .. vim.json.encode({ is_win = pt.is_win, ok = ok, err = tostring(err), spawned = spawned, notes = notes }) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_the_windows_mypy_linter_runs_through_the_real_nvim_lint(tmp_path: Path) -> None:
+    r"""The pinned nvim-lint itself, not a stand-in, wraps the plugin's mypy linter on Windows:
+    `cmd.exe /C mypy <args> src\app.py` must reach the spawn (a function as the whole `args` made
+    its unpack() raise at every lint, and mypy never ran on Windows). Skipped without a checkout of
+    the pinned nvim-lint (./pyt selftest --nvim makes one)."""
+    plugins = _pinned_plugins("nvim-lint")
+    if plugins is None:
+        pytest.skip("no checkout of the pinned nvim-lint (./pyt selftest --nvim installs one)")
+    project = _project(tmp_path, profile="warn", mypy=True)
+    (project / "src" / "app.py").write_text("x: int = 1\n", encoding="utf-8")
+    r = _headless_lua(tmp_path, REAL_LINT_CHECK, project, {"PT_NVIM_LINT": plugins["nvim-lint"].as_posix()})
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTLINT")), None)
+    assert line is not None, r.stdout + r.stderr
+    got = json.loads(line[len("PTLINT") :])
+    assert got["is_win"] is True and got["ok"] is True, got
+    assert len(got["spawned"]) == 2, got  # lint() and try_lint(): each reached the spawn
+    for spawn in got["spawned"]:
+        args = spawn["args"]
+        assert spawn["cmd"] == "cmd.exe" and args[:2] == ["/C", "mypy"] and args[-1] == "src\\app.py", spawn
+        assert "--show-column-numbers" in args and Path(spawn["cwd"]) == project, spawn
+    assert not [n for n in got["notes"] if "unpack" in n], got["notes"]
+
+
+# The pinned overseer.nvim's own template search and dap listener (not a stand-in): it builds the
+# search from the current buffer (overseer.commands' get_search_params), here a file outside the
+# project. run_task must find `pyt: help`, and the listener must run a launch configuration's
+# preLaunchTask and resume nvim-dap (it logged "Could not find template" and never resumed: F5 on
+# the mypyc configuration, preLaunchTask `pyt: compile`, did nothing and said nothing).
+OVERSEER_OUTSIDE_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+vim.opt.rtp:prepend(vim.env.PT_OVERSEER)
+vim.opt.rtp:prepend(vim.env.PT_NVIM_DAP)
+local pt = require("pytemplate")
+pt.setup({ root = vim.env.PT_TEST_ROOT })
+local overseer = require("overseer")
+overseer.setup({})
+local got = {}
+vim.cmd.edit(vim.fn.fnameescape(vim.env.PT_TMP .. "/outside/notes.txt"))
+got.buffer = vim.api.nvim_buf_get_name(0)
+local done = false
+overseer.run_task({ name = "pyt: help", autostart = false }, function(task, err)
+  got.run_task = task and task.name or ("error: " .. tostring(err))
+  done = true
+end)
+vim.wait(20000, function()
+  return done
+end)
+local co = coroutine.create(function()
+  local cfg = require("overseer.dap").listener({ type = "python", request = "launch", name = "app", preLaunchTask = "pyt: help" })
+  got.resumed = cfg and cfg.name or "no config"
+end)
+local okc, errc = coroutine.resume(co)
+got.listener_error = not okc and tostring(errc) or nil
+vim.wait(60000, function() -- `./pyt help` takes about a second; the run stays under _headless_lua's limit
+  return got.resumed ~= nil
+end)
+io.stdout:write("PTOVERSEER" .. vim.json.encode(got) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_overseer_finds_the_projects_tasks_from_a_buffer_outside_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pinned overseer.nvim searches templates from the current buffer's folder: with a file
+    outside the project current (a stdlib module reached by go-to-definition or by stepping into
+    it), the provider offered no pyt template, :OverseerRun and <leader>jj listed none, and the
+    preLaunchTask of the mypyc launch configuration was never found, so F5 started nothing and
+    said nothing (A9-01). The provider serves the plugin's root whatever the buffer. Skipped
+    without checkouts of the pinned overseer.nvim and nvim-dap (./pyt selftest --nvim makes them)."""
+    plugins = _pinned_plugins("overseer.nvim", "nvim-dap")
+    if plugins is None:
+        pytest.skip("no checkout of the pinned overseer.nvim and nvim-dap (./pyt selftest --nvim installs them)")
+    if not (os.environ.get("UV") or shutil.which("uv")):
+        pytest.skip("uv not found")
+    for name in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "PYTEMPLATE_GLOBAL"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "notes.txt").write_text("not the project's\n", encoding="utf-8")
+    extra = {"PT_OVERSEER": plugins["overseer.nvim"].as_posix(), "PT_NVIM_DAP": plugins["nvim-dap"].as_posix()}
+    r = _headless_lua(tmp_path, OVERSEER_OUTSIDE_CHECK, ROOT, extra)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTOVERSEER")), None)
+    assert line is not None, r.stdout + r.stderr
+    got = json.loads(line[len("PTOVERSEER") :])
+    assert Path(got["buffer"]) == tmp_path / "outside" / "notes.txt", got
+    assert got["run_task"] == "pyt help", got
+    assert got.get("listener_error") is None and got.get("resumed") == "app", got
+
+
+HEALTH_CWD_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local pt = require("pytemplate")
+pt.setup({ root = vim.env.PT_TEST_ROOT })
+local got = {}
+for _, dir in ipairs({ vim.env.PT_TEST_ROOT, vim.env.PT_TEST_ROOT .. "/src", vim.env.PT_TMP .. "/outside" }) do
+  vim.cmd.cd(vim.fn.fnameescape(dir))
+  vim.cmd("checkhealth pytemplate")
+  local lines = vim.tbl_filter(function(l)
+    return l:find("cwd", 1, true) ~= nil
+  end, vim.api.nvim_buf_get_lines(0, 0, -1, false))
+  got[#got + 1] = table.concat(lines, "\n")
+  vim.cmd("bwipeout!")
+end
+io.stdout:write("PTHEALTH" .. vim.json.encode(got) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_checkhealth_says_where_the_cwd_is(tmp_path: Path) -> None:
+    """:checkhealth pytemplate called any cwd that is not the root "a subdirectory of the root",
+    also one outside the project after :cd (the plugin keeps serving the root it was loaded for):
+    the line users read when things behave differently said the cwd was inside (A9-04)."""
+    project = _project(tmp_path)
+    (tmp_path / "outside").mkdir()
+    r = _headless_lua(tmp_path, HEALTH_CWD_CHECK, project)
+    line = next((ln for ln in r.stdout.replace("\r", "\n").splitlines() if ln.startswith("PTHEALTH")), None)
+    assert line is not None, r.stdout + r.stderr
+    at_root, below, outside = json.loads(line[len("PTHEALTH") :])
+    assert at_root == "", at_root
+    assert "is a subdirectory of the root" in below and "outside" not in below, below
+    assert "is outside the project" in outside and "subdirectory" not in outside, outside
+
+
+BOM_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local pt = require("pytemplate")
+pt.setup({ root = vim.env.PT_TEST_ROOT })
+local info = pt.info()
+-- schema 1 means editor.json was read; the FALLBACK is schema 0 (typing off, no commands)
+io.stdout:write((info.schema == 1 and "PTOK" or ("PTFAIL " .. vim.inspect(info))) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_editor_json_with_a_bom_is_read(tmp_path: Path) -> None:
+    """render leaves a UTF-8 BOM an editor or PS 5.1 added to a generated file (it hashes without
+    one), so the plugin must accept it in editor.json: else info() falls back (typing off, no
+    commands, an unpinned basedpyright) and tells the user to run ./pyt render, which changes
+    nothing."""
+    project = _project(tmp_path)
+    editor_json = project / ".pytemplate" / "editor.json"
+    editor_json.write_bytes(b"\xef\xbb\xbf" + editor_json.read_bytes())
+    r = _headless_lua(tmp_path, BOM_CHECK, project)
+    assert "PTOK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
 
 
 STALE_MYPY_CHECK = r"""
@@ -841,6 +1750,12 @@ end
 
 STAGE_PATHS_CHECK = LUA_PRELUDE + r"""
 local src = root .. "/src/demo/app.py"
+-- mypyc prints paths relative to its stage (a copy of src/): a bare relative path whose file
+-- exists under src/ lands on src/, and a src/ path stays (like the VS Code MYPYC matcher)
+local m = p("demo/app.py:2: error: Incompatible types in assignment  [assignment]")
+check("bare relative maps to src", m and m.type == "E" and pt.same_path(m.filename, src) and m.lnum == 2, vim.inspect(m))
+m = p("src/demo/app.py:3: error: x  [misc]")
+check("src path stays", m and pt.same_path(m.filename, src), vim.inspect(m))
 local stages = {
   ".build/mypyc-dev/stage/", ".build/mypyc-release/stage/", ".build/wsl/mypyc-dev/stage/",
   ".build\\mypyc-dev\\stage\\", root .. "/.build/mypyc-dev/stage/", root .. "/.build/wsl/mypyc-release/stage/",
@@ -850,7 +1765,7 @@ for _, stage in ipairs(stages) do
   local m = p(stage .. "demo/app.py:45: ValueError")
   check("stage " .. stage, m and pt.same_path(m.filename, src) and m.lnum == 45 and m.text == "ValueError", vim.inspect(m))
 end
-local m = p(".build/mypyc-dev/stage/main.py:5: KeyError")
+m = p(".build/mypyc-dev/stage/main.py:5: KeyError")
 check("stage main.py", m and pt.same_path(m.filename, root .. "/src/main.py"), vim.inspect(m))
 m = p("x.build/mypyc-dev/stage/main.py:5: KeyError")
 check("x.build is no stage", m and pt.same_path(m.filename, root .. "/x.build/mypyc-dev/stage/main.py"), vim.inspect(m))
@@ -986,6 +1901,11 @@ m = p("tests/test_x.py:14: AssertionError", lenient)
 check("pytest crash lines stay errors", m and m.type == "E", vim.inspect(m))
 m = p("  /r/src/x.py:3:5 - warning: y", { mypy = "E", ruff = "E" })
 check("basedpyright keeps its own", m and m.type == "W", vim.inspect(m))
+-- ruff's syntax errors are a hyphenated name (invalid-syntax), not a coded rule: still ruff, so
+-- they follow the profile like F401 (the VS Code RUFF matcher accepts both), never always "E"
+local syntax_line = "src/p/_bad.py:2:1: invalid-syntax: unexpected EOF while parsing"
+check("invalid-syntax follows the profile", (p(syntax_line, lenient) or {}).type == "W" and (p(syntax_line, { mypy = "E", ruff = "E" }) or {}).type == "E", vim.inspect(p(syntax_line, lenient)))
+check("invalid-syntax keeps its text", (p(syntax_line, lenient) or {}).text == "invalid-syntax: unexpected EOF while parsing", vim.inspect(p(syntax_line, lenient)))
 
 -- editor.json of this project: cpython (active) on the warn profile, mypyc on its own
 local E, W = { mypy = "E", ruff = "E" }, { mypy = "W", ruff = "W" }

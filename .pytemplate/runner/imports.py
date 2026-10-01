@@ -19,6 +19,16 @@ def _is_type_checking(test: ast.expr) -> bool:
     return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
 
 
+def type_checking(test: ast.expr) -> bool | None:
+    """True for the test `TYPE_CHECKING` (or `typing.TYPE_CHECKING`), False for `not
+    TYPE_CHECKING`, None for any other: mypy reads the first as true and the second as false."""
+    if _is_type_checking(test):
+        return True
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not) and _is_type_checking(test.operand):
+        return False
+    return None
+
+
 def iter_runtime_nodes(tree: ast.AST) -> list[ast.AST]:
     """Return every node except those under `if TYPE_CHECKING:` (they do not exist at runtime).
 
@@ -30,11 +40,9 @@ def iter_runtime_nodes(tree: ast.AST) -> list[ast.AST]:
     while stack:
         node = stack.pop()
         out.append(node)
-        if isinstance(node, ast.If) and _is_type_checking(node.test):
-            stack.extend(node.orelse)
-            continue
-        if isinstance(node, ast.If) and isinstance(node.test, ast.UnaryOp) and isinstance(node.test.op, ast.Not) and _is_type_checking(node.test.operand):
-            stack.extend(node.body)
+        checking = type_checking(node.test) if isinstance(node, ast.If) else None
+        if isinstance(node, ast.If) and checking is not None:
+            stack.extend(node.orelse if checking else node.body)
             continue
         stack.extend(ast.iter_child_nodes(node))
     return out

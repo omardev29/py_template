@@ -8,6 +8,7 @@ The running parts (logs, timeouts, exit codes, signals, the step kinds) are in t
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,6 +31,7 @@ from runner.project import PRESETS, ROOT  # noqa: E402
 from runner.ui import PytError  # noqa: E402
 
 AVAILABLE = ["flet", "raylib", "script"]
+
 HOST = Host("windows")  # a display, no Flutter restriction
 DEFAULTS = {"cpython": "exe", "mypyc": "exe", "pypy": "portable"}
 SCRIPT = PresetInfo("script", ("cpython", "mypyc"), DEFAULTS, gui=False, tasks=("ci",))
@@ -317,10 +320,11 @@ def _preset_config(name: str) -> Config:
     return cfg
 
 
-def test_host_gaps_match_the_generated_ci_matrix() -> None:
+def test_host_gaps_match_the_generated_ci_matrix(minimal_ci_template: Path) -> None:
     """Drift guard: the generated ci.yml leaves a backend out of a runner's row exactly where
     e2e.HOST_GAPS says the runner's platform cannot install it (a new runner label, or a gap
-    added on one side only, fails here)."""
+    added on one side only, fails here). The rows are render.ci_workflow's, written into the
+    tests' own CI template: a project edits or deletes its own (README)."""
     runners = {"ubuntu-latest": "linux-x86_64", "windows-latest": "windows-x86_64", "macos-latest": "macos-aarch64"}
     for preset in e2e.DEFAULT_PRESETS:
         cfg = _preset_config(preset)
@@ -378,6 +382,22 @@ def test_detect_host_gui_modes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert e2e.detect_host("on").display == ""
 
 
+def test_detect_host_without_a_home_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path.home() raises for a UID without a passwd entry and no HOME (a container started with
+    --user 4242, CLAUDE.md 15.1): looking for ~/flutter ended every selftest --e2e in a
+    RuntimeError traceback before its plan (A10-02). There is no ~/flutter then."""
+
+    def no_home(cls: type[Path]) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(e2e, "host_os", lambda: "linux")
+    monkeypatch.setattr(e2e, "host_arch", lambda: "x86_64")
+    monkeypatch.setattr(e2e.shutil, "which", lambda name, *a, **k: None)  # no flutter on PATH
+    monkeypatch.setattr(Path, "home", classmethod(no_home))
+    assert e2e.flet_build_reason("linux").startswith("needs the Flutter SDK")
+    assert e2e.detect_host("off").flet_build.startswith("needs the Flutter SDK")
+
+
 def test_default_base_is_short() -> None:
     """Right in the temp folder, whatever that is (selftest --mutation's workers move it deeper:
     below macOS's own it passed 80 characters), and short on Windows (MAX_PATH)."""
@@ -410,6 +430,162 @@ def test_prepare_base_refuses_a_base_another_user_can_change(tmp_path: Path, mon
     e2e._prepare_base(fresh)
     assert (fresh / e2e.MARKER).is_file() and fresh.stat().st_mode & 0o777 == 0o700
     e2e._prepare_base(fresh)  # its own base: reused
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes (Windows %TEMP% is per user)")
+@pytest.mark.parametrize("harness", ["e2e", "nvim", "mutation"])
+def test_a_base_another_user_makes_after_the_check_is_refused(harness: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scratch base was checked before it existed, then made with mkdir(exist_ok=True): a
+    folder another user created in between (the default /tmp/pt-e2e-<uid> is predictable; mode
+    0777 so the suite can write in it) was taken, and every step ran code from it. The folder
+    is checked again once it exists."""
+    from runner import mutation, nvimtest
+
+    base = tmp_path / "pt-base"
+    module = {"e2e": e2e, "nvim": nvimtest, "mutation": mutation}[harness]
+    real = module.check_private_dir
+
+    def check_then_the_other_user_wins(path: Path, option: str) -> None:
+        real(path, option)  # nothing there yet: passes
+        path.mkdir()
+        path.chmod(0o777)  # the other user's folder appears
+
+    monkeypatch.setattr(module, "check_private_dir", check_then_the_other_user_wins)
+    with pytest.raises(PytError, match="written by every user"):
+        if harness == "e2e":
+            e2e._prepare_base(base)
+        elif harness == "nvim":
+            nvimtest._prepare_dir(nvimtest.Layout(base))
+        else:
+            mutation.prepare_base(base, tmp_path / "project")
+    assert not any(base.iterdir())  # no marker: nothing runs from it
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes (Windows %TEMP% is per user)")
+@pytest.mark.parametrize("harness", ["e2e", "nvim", "mutation"])
+def test_a_base_that_is_a_link_to_no_folder_is_one_error_line(harness: str, tmp_path: Path) -> None:
+    """A --base (--dir, TMPDIR's base) that is a symbolic link whose folder is gone: the check
+    of its owner stat()ed the target, and FileNotFoundError ended the harness in an
+    internal-error traceback, exit 1. One error line, exit 2."""
+    from runner import mutation, nvimtest
+
+    base = tmp_path / "pt-base"
+    base.symlink_to(tmp_path / "gone")
+    with pytest.raises(PytError, match=re.escape(f"{base} is a link that leads to no folder")) as e:
+        if harness == "e2e":
+            e2e._prepare_base(base)
+        elif harness == "nvim":
+            nvimtest._prepare_dir(nvimtest.Layout(base))
+        else:
+            mutation.prepare_base(base, tmp_path / "project")
+    assert e.value.code == 2 and "\n" not in str(e.value)
+    assert base.is_symlink() and not (tmp_path / "gone").exists()  # nothing made
+
+
+@pytest.mark.parametrize("harness", ["e2e", "nvim", "mutation"])
+@pytest.mark.parametrize("failing", ["exists", "iterdir", "resolve"])
+def test_a_base_it_cannot_look_into_is_one_error_line(harness: str, failing: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A --base (--dir, TMPDIR's base) the harness cannot look into: below a folder the user may
+    not enter (Path.exists raises PermissionError there on Python 3.11-3.13, which python.cpython
+    may be), one of the user's own without its read bit (iterdir, on every Python), a link loop
+    (Path.resolve raises RuntimeError on 3.11 and 3.12). The exception ended the harness in an
+    internal-error traceback, exit 1: one error line naming the folder, exit 2, nothing made.
+    Faked, as those Pythons do: the suite may run as root, who enters every folder, and on 3.14."""
+    from runner import mutation, nvimtest
+
+    base = tmp_path / "noenter" / "pt-base"
+    if failing == "iterdir":
+        base.mkdir(mode=0o700, parents=True)  # the user's own, empty
+    real = getattr(Path, failing)
+    error: Exception = RuntimeError(f"Symlink loop from {str(base)!r}") if failing == "resolve" else PermissionError(errno.EACCES, "Permission denied", str(base))
+
+    def refused(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == base:
+            raise error
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, failing, refused)
+    reason = "Symlink loop from" if failing == "resolve" else "Permission denied"
+    expected = {
+        "e2e": f"selftest --e2e: cannot use --base {base}: {reason}",
+        "nvim": f"cannot use --dir {base}: {reason}",
+        "mutation": f"selftest --mutation: cannot use the scratch folder {base}: {reason}",
+    }[harness]
+    with pytest.raises(PytError, match=re.escape(expected)) as e:
+        if harness == "e2e":
+            e2e._prepare_base(base)
+        elif harness == "nvim":
+            nvimtest._prepare_dir(nvimtest.Layout(base))
+        else:
+            mutation.prepare_base(base, tmp_path / "project")
+    assert e.value.code == 2 and "\n" not in str(e.value)
+    if failing == "resolve":  # the git isolation of each harness resolves it first (check_ceiling)
+        with pytest.raises(PytError, match=re.escape(f"cannot use {base}: Symlink loop from")):
+            e2e.check_ceiling(base)
+    monkeypatch.undo()
+    assert not base.exists() or not any(base.iterdir())  # nothing made
+
+
+@pytest.mark.parametrize("harness", ["e2e", "nvim", "mutation"])
+def test_a_base_it_cannot_create_is_one_error_line(harness: str, tmp_path: Path) -> None:
+    """A --base (--dir, TMPDIR's base) below a file (or in a folder it may not write) ended in
+    an internal-error traceback, exit 1 (--mutation's base still did, on every Python): one
+    error line, exit 2, as nvimtest's --dir says it."""
+    from runner import mutation, nvimtest
+
+    afile = tmp_path / "afile"
+    afile.write_text("x", encoding="utf-8")
+    base = afile / "e2e"
+    # the reason is the OS's own: POSIX says ENOTDIR, Windows "Cannot create a file when that
+    # file already exists" (Path.mkdir tried the parent, the file)
+    reason = "Not a directory" if sys.platform != "win32" else ""
+    expected = {
+        "e2e": f"selftest --e2e: cannot create --base {base}: {reason}",
+        "nvim": f"cannot create --dir {base}: {reason}",
+        "mutation": f"selftest --mutation: cannot create the scratch folder {base}: {reason}",
+    }[harness]
+    with pytest.raises(PytError, match=re.escape(expected)) as e:
+        if harness == "e2e":
+            e2e._prepare_base(base)
+        elif harness == "nvim":
+            nvimtest._prepare_dir(nvimtest.Layout(base))
+        else:
+            mutation.prepare_base(base, tmp_path / "project")
+    assert e.value.code == 2 and "\n" not in str(e.value)
+    assert afile.read_text(encoding="utf-8") == "x"
+
+
+@pytest.mark.parametrize("harness", ["e2e", "nvim", "mutation"])
+def test_a_base_whose_marker_cannot_be_written_is_one_error_line(harness: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A --base (--dir, TMPDIR's base) of the user's that cannot take the harness's marker (a
+    read-only folder, a read-only mount): the PermissionError ended --nvim and --mutation in an
+    internal-error traceback, exit 1; one error line, exit 2, as --e2e says it."""
+    from runner import mutation, nvimtest
+
+    base = tmp_path / "pt-base"
+    marker = {"e2e": e2e.MARKER, "nvim": nvimtest.DIR_MARKER, "mutation": mutation.MARKER}[harness]
+    real = Path.write_text
+
+    def read_only(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self == base / marker:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", read_only)
+    expected = {
+        "e2e": f"selftest --e2e: cannot create --base {base}: Permission denied",
+        "nvim": f"cannot create --dir {base}: Permission denied",
+        "mutation": f"selftest --mutation: cannot create the scratch folder {base}: Permission denied",
+    }[harness]
+    with pytest.raises(PytError, match=re.escape(expected)) as e:
+        if harness == "e2e":
+            e2e._prepare_base(base)
+        elif harness == "nvim":
+            nvimtest._prepare_dir(nvimtest.Layout(base))
+        else:
+            mutation.prepare_base(base, tmp_path / "project")
+    assert e.value.code == 2 and "\n" not in str(e.value)
+    assert not (base / marker).exists()
 
 
 # --- options -----------------------------------------------------------------------------------
@@ -455,11 +631,50 @@ def test_scrub_env() -> None:
     assert environ["UV"] == "uv.exe", "the input is not modified"
 
 
+def test_the_scratch_projects_never_get_the_users_lock_mode_nor_pytest_options() -> None:
+    """--e2e makes its projects anew: the user's UV_LOCKED or UV_FROZEN (a CI or shell setting for
+    the user's own projects) made every preset's `new` refuse to lock, and every other row SKIP;
+    a PYTEST_ADDOPTS such as `-n auto` failed every `test` step (A10-03). They go, as they go for
+    --mutation's workers and plain selftest (envs.LOCK_MODE, PYTEST_VARIABLES)."""
+    from runner import envs
+
+    user = {"UV_LOCKED": "1", "uv_frozen": "1", "PYTEST_ADDOPTS": "-n auto", "PYTEST_PLUGINS": "xdist", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+    assert e2e.scrub_env({**user, "HOME": "keep"}) == {"HOME": "keep"}
+    assert {*envs.LOCK_MODE, *e2e.PYTEST_VARIABLES} <= e2e.SCRUBBED
+
+
 def test_isolate_git_sets_the_ceiling_above_the_base(tmp_path: Path) -> None:
     env: dict[str, str] = {}
     e2e.isolate_git(env, tmp_path / "base")
     assert env["GIT_CEILING_DIRECTORIES"] == str(tmp_path.resolve())
     assert env["GIT_CONFIG_NOSYSTEM"] == "1" and not Path(env["GIT_CONFIG_GLOBAL"]).exists()
+
+
+def test_a_base_whose_parent_path_holds_the_path_separator_is_refused(tmp_path: Path) -> None:
+    """GIT_CEILING_DIRECTORIES is a list split at os.pathsep (':' on POSIX, where Finder writes a
+    typed '/' as ':'; ';' on Windows) with no escape: the parent `.../a:b` read as `.../a` and `b`,
+    no parent of the projects, and git in the base saw the user's repository around it (`new`
+    skipped git init, `setup` installed its hook there). Refused; the separator in the base's own
+    name is harmless, since the ceiling is its parent."""
+    env: dict[str, str] = {}
+    base = tmp_path / f"a{os.pathsep}b" / "e2e"
+    with pytest.raises(PytError, match=re.escape(f"holds {os.pathsep!r}, which GIT_CEILING_DIRECTORIES reads as a separator")) as e:
+        e2e.isolate_git(env, base)
+    assert e.value.code == 2 and env == {} and not base.parent.exists()
+    e2e.isolate_git(env, tmp_path / f"e2e{os.pathsep}1")
+    assert env["GIT_CEILING_DIRECTORIES"] == str(tmp_path.resolve())
+
+
+@needs_git
+def test_git_reads_a_ceiling_that_holds_the_path_separator_as_two_folders(tmp_path: Path) -> None:
+    """Why check_ceiling refuses such a base: git splits the list, and the parent of a base below
+    `a:b` stops nothing (git 2.43 and Git for Windows alike, with their own separator)."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, env=git_env(tmp_path))
+    below = tmp_path / f"a{os.pathsep}b" / "e2e"
+    below.mkdir(parents=True)
+    env = {**e2e.scrub_env(git_env(tmp_path)), "GIT_CEILING_DIRECTORIES": str(below.resolve().parent)}
+    r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=below, env=env, capture_output=True, text=True, check=False)
+    assert r.returncode == 0 and Path(r.stdout.strip()).resolve() == tmp_path.resolve(), r.stderr
 
 
 def test_child_env_is_scrubbed_and_git_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

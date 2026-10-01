@@ -83,7 +83,11 @@ PYRIGHT_RE = r"^\s+((?:[A-Za-z]:)?[^:]+?):(\d+):(\d+) - (error|warning|info)(?:r
 # pytest crash lines: `tests\test_x.py:15: AssertionError` (long tracebacks) or
 # `C:\p\tests\test_x.py:15: assert 1 == 2` (--tb=line). Intermediate frames end in "" or "in f".
 _PYTEST_TAIL = r":(\d+): ((?:(?:[A-Z]\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\b.*)$"
-PYTEST_RE = r"^((?:[A-Za-z]:)?[^:\s][^:]*\.py)" + _PYTEST_TAIL
+# The `-ra` summary of a green run (every preset's addopts), `SKIPPED [1] tests/x.py:5: reason`,
+# is no problem: with a reason such as `ConnectionError: ...` the path group read `SKIPPED [1]
+# tests/x.py` (the Neovim parser skips it too: tasks.parse_line). Every pytest matcher starts so.
+_NO_SKIP_SUMMARY = r"(?!SKIPPED \[\d+\] )"
+PYTEST_RE = r"^" + _NO_SKIP_SUMMARY + r"((?:[A-Za-z]:)?[^:\s][^:]*\.py)" + _PYTEST_TAIL
 # Under the mypyc backend pytest imports the stage (-o pythonpath=<stage>): an interpreted module
 # prints as `.build/mypyc-dev/stage/<pkg>/x.py` (relative or absolute; `.build/wsl/...` under WSL)
 # and a compiled one as the stage-relative path mypyc recorded, `<pkg>/core/x.py`. Both map back
@@ -165,7 +169,10 @@ def problem_matchers(cfg: Config, kinds: set[str], profiles: list[str]) -> list[
         staged: list[str] = []
         if compiled:
             module = r"(?:" + compiled + r")(?:[\\/][^:]*)?\.py"
-            staged = [r"^" + _STAGE + r"([^:\s][^:]*\.py)" + _PYTEST_TAIL, r"^(" + module + r")" + _PYTEST_TAIL]
+            staged = [
+                r"^" + _NO_SKIP_SUMMARY + _STAGE + r"([^:\s][^:]*\.py)" + _PYTEST_TAIL,
+                r"^" + _NO_SKIP_SUMMARY + r"(" + module + r")" + _PYTEST_TAIL,
+            ]
             # exactly one matcher per line: VS Code's result must not depend on their order
             regexp = r"^(?!" + _STAGE + r"|" + module + r":)" + PYTEST_RE[1:]
         out.append(_matcher("pytest", "pytest", AUTODETECT, "error", {"regexp": regexp, "file": 1, "line": 2, "message": 3}))

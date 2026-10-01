@@ -20,9 +20,19 @@ and how to install it.
    the project does the same.
 4. Start Neovim from the project folder (lazy.nvim only reads `.lazy.lua` from the cwd upward).
 
-`.lazy.lua` imports the LazyVim extras `lang.python`, `lang.toml`, `dap.core`, `test.core` and
-`editor.overseer`. `./pyt nvim extras` enables them in your own `lazyvim.json`, which avoids
+The integration imports the LazyVim extras `lang.python`, `lang.toml`, `dap.core`, `test.core`
+and `editor.overseer`. `./pyt nvim extras` enables them in your own `lazyvim.json`, which avoids
 LazyVim's import-order warning and keeps their plugins installed when you work elsewhere.
+
+`.lazy.lua` is a thin, static loader: it finds the folder of the trusted file lazy.nvim read (as
+lazy.nvim finds it: the nearest `.lazy.lua` file up from Neovim's folder, which must be that
+folder's own file, never a link) and runs `.pytemplate/nvim/spec.lua`, so all the logic lives in
+`.pytemplate/nvim/` (trusted with `.lazy.lua`) and a later fix there needs no re-trust. The loader
+changed once, in September 2026: trust the new file once after taking it. Because Neovim reads a runtimepath entry as
+a file glob, a project path holding `[ ] { } * ? , \ ` `` ` `` `'` or `$` (on Windows only
+`[ * ? , $`) cannot carry the plugin (from `game?` the glob also names a folder `game1` next to it,
+whose code would load): the integration is skipped with one message so your other plugins keep
+working (`./pyt nvim doctor` names the character; move the project to a plain path).
 
 ## What you get
 
@@ -32,7 +42,7 @@ LazyVim's import-order warning and keeps their plugins installed when you work e
 | ruff | The language server from `.venv`: the same version as `./pyt check`. |
 | mypy | nvim-lint runs `.venv`'s mypy from the project root with `.mypy.ini`; off with the `off` typing profile, the default on cpython and pypy (`typing.relaxed = "off"`): `./pyt mode --typing warn` (or `strict`) turns it on; errors shown with the profile's severity (warn: warnings). With PyPy supported it checks the 3.11 syntax like `./pyt check`. |
 | Tasks | overseer templates `pyt: <command>` for every `./pyt` command and every `pytemplate.toml` `[tasks]` entry (they replace the `tasks.json` ones). Output of check/lint/test/build becomes diagnostics and quickfix items. |
-| Debugging | nvim-dap with the generated `.vscode/launch.json`; the adapter is `.venv`'s debugpy (else Mason's, else an ephemeral `uv run --with debugpy`). |
+| Debugging | nvim-dap with the generated `.vscode/launch.json`; the adapter is `.venv`'s debugpy (else Mason's, else an ephemeral `uv run --with debugpy`). A configuration that names no interpreter runs on `.venv`, also after venv-selector activated the environment of a PEP 723 script (`.pytemplate/pyt.py`); such a script itself keeps that environment, and an activated `$VIRTUAL_ENV` wins. |
 | Tests | neotest runs pytest with the active backend's interpreter (`.venv`, `.venv-pypy`); mypyc and "all backends" runs go through `pyt: test`. |
 | Health | `:checkhealth pytemplate` |
 
@@ -74,6 +84,7 @@ vim.g.pytemplate_render_on_save = false   -- default true
 
 ## Files
 
+- `spec.lua`: the body of `.lazy.lua` (`dofile`'d with the project root): the LazyVim extras and the plugin spec, skipped when the path is runtimepath-unsafe.
 - `lua/pytemplate/init.lua`: project root, `.pytemplate/editor.json` (validated data), environments, uv lookup, the runner argv.
 - `lua/pytemplate/tasks.lua`: task definitions, output parser, pickers, keymaps, `:Pyt`.
 - `lua/pytemplate/integrations.lua`: opts for nvim-lspconfig, nvim-lint, neotest, overseer, which-key, venv-selector.

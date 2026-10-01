@@ -55,7 +55,8 @@ from typing import Any
 from . import proc, ui
 from .cmd_build import COMPAT
 from .config import BACKENDS, METHODS, Config
-from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, check_private_dir, host_arch, host_os, scratch_name, user_path, venv_python
+from .envs import LOCK_MODE
+from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, base_lock, check_private_dir, host_arch, host_os, make_private_dir, scratch_name, user_path, venv_python
 from .ui import PytError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
@@ -67,8 +68,17 @@ MARKER = ".pytemplate-e2e"  # in the base dir: only a dir carrying it is ever wi
 # GIT_CONFIG_*): isolate_git sets the ones the children get.
 # (UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON: uv refuses them next to the --python-preference of
 # the launchers' uv call, which the launchers drop them for)
+# A user's PYTEST_ADDOPTS (-n auto, --lf...), PYTEST_PLUGINS and PYTEST_DISABLE_PLUGIN_AUTOLOAD
+# would change what every run of the runner's own tests means (selftest --mutation's workers):
+# the last one drops Hypothesis's plugin, which defines --hypothesis-seed (mutation.Runs.run
+# always passes it), so every worker's pytest would exit 4 (usage). Neither they nor the user's
+# lock mode (envs.LOCK_MODE: UV_LOCKED, UV_FROZEN, settings for the user's own projects) reach a
+# project the harnesses make: under UV_LOCKED every preset's `new` refused to lock, and a
+# PYTEST_ADDOPTS failed every `test` step.
+PYTEST_VARIABLES = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD")
 SCRUBBED = frozenset(
     {"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON", "PYTHONHOME", "PYTHONPATH"}
+    | {*LOCK_MODE, *PYTEST_VARIABLES}
 )
 SCRUBBED_PREFIXES = ("PYTEMPLATE_", "GIT_")
 
@@ -462,6 +472,31 @@ def scrub_env(environ: Mapping[str, str], drop_dirs: Sequence[str] = ()) -> dict
     return env
 
 
+def unusable(e: OSError | RuntimeError) -> str:
+    """Why a scratch folder cannot be looked into: an OSError's reason (the message names the
+    folder already), or a link loop's RuntimeError (Path.resolve on Python 3.11 and 3.12)."""
+    return str(e.strerror or e) if isinstance(e, OSError) else str(e)
+
+
+def check_ceiling(base: Path) -> None:
+    """Refuse a scratch folder (the base, --dir) that isolate_git cannot keep git inside:
+    GIT_CEILING_DIRECTORIES is a list of folders separated by os.pathsep (':' on POSIX, ';' on
+    Windows) with no escape, so a parent path that holds it falls apart into pieces that are no
+    parent of the projects, and the ceiling stops nothing: git in the base saw the user's
+    repository around it, `new` skipped git init there and `setup` installed pytemplate's hook in
+    that repository, where it stayed. Called before anything is created."""
+    try:
+        parent = str(base.resolve().parent)
+    except RuntimeError as e:  # a link loop (Python 3.11 and 3.12): it was an internal-error traceback
+        raise PytError(f"cannot use {base}: {unusable(e)}: pick another folder") from None
+    if os.pathsep in parent:
+        raise PytError(
+            f"{base} cannot hold the scratch projects: its parent folder {parent} holds {os.pathsep!r}, which "
+            "GIT_CEILING_DIRECTORIES reads as a separator, so git there would see a repository around it "
+            f"(./pyt new would skip git init, setup would install its hook there). Pick a folder whose path has no {os.pathsep!r}"
+        )
+
+
 def isolate_git(env: dict[str, str], base: Path) -> None:
     """Keep every git the suite starts inside the base, away from the user's configuration.
 
@@ -471,8 +506,9 @@ def isolate_git(env: dict[str, str], base: Path) -> None:
     around the base (the hook stayed behind, or replaced that repository's own).
     GIT_CONFIG_GLOBAL (a file that does not exist) and GIT_CONFIG_NOSYSTEM: a user's
     core.hooksPath, init.templateDir or commit.gpgsign would change what `setup` installs and
-    what the first commit runs.
+    what the first commit runs. A base it cannot keep git inside is refused (check_ceiling).
     """
+    check_ceiling(base)
     env["GIT_CEILING_DIRECTORIES"] = str(base.resolve().parent)
     env["GIT_CONFIG_GLOBAL"] = str(base / "no-global-gitconfig")
     env["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -636,8 +672,18 @@ def preset_info(name: str) -> PresetInfo:
     return PresetInfo(name, tuple(cfg.backend.supported), dict(cfg.deploy.default), cfg.app.gui, cfg.backend.active, tuple(cfg.tasks))
 
 
+def _home_flutter() -> Path | None:
+    """The Flutter of ~/flutter (where flet build installs its own), or None. Path.home() raises
+    for a UID without a passwd entry and no HOME (a container's --user 4242): no home, no Flutter."""
+    try:
+        home = Path.home()
+    except RuntimeError:
+        return None
+    return next(iter(sorted(home.glob("flutter/*/bin/flutter*"))), None)
+
+
 def flet_build_reason(os_name: str) -> str:
-    flutter = shutil.which("flutter") or next(iter(sorted(Path.home().glob("flutter/*/bin/flutter*"))), None)
+    flutter = proc.find_program("flutter") or _home_flutter()
     if not flutter:
         return "needs the Flutter SDK (flet build installs ~3 GB): not in PATH or ~/flutter"
     if os_name == "windows":
@@ -654,7 +700,7 @@ def detect_host(gui: str) -> Host:
     wrap: tuple[str, ...] = ()
     headless_linux = os_name == "linux" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if gui != "off" and headless_linux:
-        xvfb = shutil.which("xvfb-run")
+        xvfb = proc.find_program("xvfb-run")
         if xvfb:
             wrap = (xvfb, "-a", "-s", "-screen 0 1280x720x24")  # depth 24: GLX has no 8-bit visuals
         elif gui == "auto":
@@ -678,14 +724,14 @@ def child_env(base: Path) -> dict[str, str]:
     env = scrub_env(os.environ, own)
     uv_dir = str(Path(proc.find_uv()).parent)
     key = next((k for k in env if k.upper() == "PATH"), "PATH")
-    if not shutil.which("uv", path=env.get(key, "")):
+    if not proc.find_program("uv", path=env.get(key, "")):
         env[key] = os.pathsep.join(p for p in (uv_dir, env.get(key, "")) if p)
     isolate_git(env, base)
     return env
 
 
 def _git_top(env: Mapping[str, str]) -> str:
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git is None:
         return ""
     try:
@@ -733,7 +779,14 @@ class Context:
 
 def rmtree(path: Path) -> None:
     """Remove a tree even with read-only files (.git objects) and paths over 260 characters. A
-    symlink or a junction (a --base on another disk) goes as a link, never what it names."""
+    symlink or a junction (a --base on another disk) goes as a link, never what it names.
+
+    POSIX: a folder without its write, read or search bit (a test of the runner that chmodded one
+    and was stopped, or failed, before it put the mode back: selftest --mutation's workers leave
+    such folders) is made the owner's rwx again, links neither followed nor changed, and the tree
+    removed once more (rmtree_posix). The retry of a single step made it worse: rmtree is
+    fd-based there, and os.open(name) without its flags raised TypeError, which no caller
+    catches, after a chmod to 0o200 had taken the folder's read and search bits."""
     from .cmd_env import _is_link  # imported here: cmd_env imports much this module never needs
 
     if _is_link(path):
@@ -746,6 +799,7 @@ def rmtree(path: Path) -> None:
     target = long_path(path) if IS_WINDOWS else str(path)
 
     def retry(func: Callable[..., object], name: str, exc: object) -> None:
+        # Windows (rmtree works by path there): a read-only file or folder loses the attribute
         error = exc[1] if isinstance(exc, tuple) else exc  # onerror's exc_info (3.11), onexc's exception
         if isinstance(error, BaseException) and os.path.islink(name):
             raise error  # chmod follows a link: it made the folder a symlinked base names 0o200
@@ -754,7 +808,9 @@ def rmtree(path: Path) -> None:
 
     for attempt in range(5):
         try:
-            if sys.version_info >= (3, 12):
+            if not IS_WINDOWS:
+                rmtree_posix(path)
+            elif sys.version_info >= (3, 12):
                 shutil.rmtree(target, onexc=retry)
             else:
                 shutil.rmtree(target, onerror=retry)
@@ -767,11 +823,28 @@ def rmtree(path: Path) -> None:
             time.sleep(1 + attempt)  # a just-exited exe or an antivirus scan may still hold a file
 
 
+def rmtree_posix(path: Path) -> None:
+    """shutil.rmtree, and when a folder stopped it (no write, read or search bit), once more with
+    every folder of the tree the owner's rwx again: cmd_env._make_writable only adds bits, never
+    follows nor changes a link, and goes top-down, so each folder opens before it is entered. What
+    the owner cannot change (another user's folder) still raises OSError, for the caller to name."""
+    from .cmd_env import _make_writable  # imported here: cmd_env imports much this module never needs
+
+    if os.path.islink(path):  # a link goes as a link (os.walk would enter the folder it names)
+        os.unlink(path)
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        _make_writable(path)
+        shutil.rmtree(path)
+
+
 def kill_tree(child: subprocess.Popen[bytes]) -> None:
     if child.poll() is not None:
         return
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(child.pid)], stdin=subprocess.DEVNULL, capture_output=True, check=False)
+        proc.taskkill(child.pid)
     else:
         import signal
 
@@ -800,7 +873,8 @@ def run_logged(argv: Sequence[str], cwd: Path, env: Mapping[str, str], log: Path
         with log.open("ab") as err, out_path.open("w+b") as out:
             err.write(f"$ {proc.show(list(argv))}\n  (in {cwd})\n".encode())
             err.flush()
-            child = subprocess.Popen(list(argv), cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=not IS_WINDOWS)
+            program = proc.program(argv[0])  # Windows: a bare name (cmd.exe, git), never from the caller's folder
+            child = subprocess.Popen([program, *argv[1:]], cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=not IS_WINDOWS)
             end = "interrupted"
             try:
                 code = child.wait(timeout=timeout)
@@ -848,7 +922,7 @@ def _log_note(log: Path, text: str) -> None:
 
 
 def _git(ctx: Context, log: Path, timeout: float, *args: str) -> tuple[int | None, str]:
-    git = shutil.which("git") or "git"
+    git = proc.find_program("git") or "git"
     return run_logged([git, *args], ctx.project, ctx.env, log, timeout)
 
 
@@ -884,7 +958,7 @@ def do_verify(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
                 problems.append(f"copied {name}/")
     if not (p / "pyt").is_file():
         problems.append("no ./pyt launcher")
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git is None:
         notes.append("git not found: the repository and the exec bits are not checked")
     elif not (p / ".git").exists():
@@ -909,7 +983,7 @@ def do_commit(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
     commit fails (the step before changed nothing), except a first commit under --reuse."""
     from .hooks import HOOK, MARKER as HOOK_MARKER
 
-    if shutil.which("git") is None:
+    if proc.find_program("git") is None:
         return SKIP, "git not found"
     if not (ctx.project / ".git").exists():
         return FAIL, "no git repository"
@@ -1015,7 +1089,17 @@ def do_build(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
 
 
 def runtime_python(ctx: Context, backend: str) -> Path:
-    return venv_python(ctx.project / (f".venv-pypy{ENV_SUFFIX}" if backend == "pypy" else f".venv{ENV_SUFFIX}"))
+    """The interpreter of the e2e PROJECT's environment. The project lives in the base and its own
+    runner may compute a different ENV_SUFFIX than this one's: on WSL with a Windows checkout the
+    default base is on the Linux file system, so the project's runner made `.venv`, not
+    `.venv-wsl` (and the reverse with `--base` on /mnt/c). Take whichever of the two suffixes
+    (this runner's first) the project actually made, so the smoke runs use the project's own env."""
+    stem = ".venv-pypy" if backend == "pypy" else ".venv"
+    for suffix in dict.fromkeys((ENV_SUFFIX, "", "-wsl")):
+        python = venv_python(ctx.project / f"{stem}{suffix}")
+        if python.exists():
+            return python
+    return venv_python(ctx.project / f"{stem}{ENV_SUFFIX}")  # neither is there: name the expected one
 
 
 def _move(src: Path, dst: Path) -> None:
@@ -1060,7 +1144,12 @@ def _smoke(ctx: Context, step: Step, log: Path, target: Path) -> tuple[str, str]
     if step.method in ("exe", "nuitka"):
         commands.append([str(target)])
     elif step.method == "portable":
-        commands.append([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(target)] if IS_WINDOWS else [str(target)])
+        # On Windows through cmd, by its path relative to the working folder it was moved below:
+        # cmd /c read the absolute one, the base's own folders included, as a command line, and
+        # split it at an unquoted & (a profile folder C:\Users\R&D: the default base is in %TEMP%)
+        # or dropped the quotes list2cmdline put around a path with a blank and ( ) @ ^, so the
+        # smoke failed. The relative path holds only the app name, backend, method and target key.
+        commands.append([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", os.path.relpath(target, ctx.work)] if IS_WINDOWS else [str(target)])
     elif step.method == "pyz":
         # -S: no site-packages, so the .pyz must bring its own dependencies. Its bootstrap
         # extracts to the user cache: point that at the scratch dir.
@@ -1180,19 +1269,31 @@ def run_preset(ctx: Context, steps: list[Step], into: list[Result] | None = None
 
 
 def _prepare_base(base: Path) -> None:
-    if base.resolve() == ROOT or ROOT in base.resolve().parents:
-        raise PytError("selftest --e2e: the base dir cannot be inside this template")
-    if base.exists() and not base.is_dir():
-        raise PytError(f"selftest --e2e: {base} is not a directory")
-    check_private_dir(base, "--base")
-    if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
-        raise PytError(f"selftest --e2e: {base} is not empty and was not made by selftest --e2e (no {MARKER}): pick another --base")
-    base.mkdir(mode=0o700, parents=True, exist_ok=True)
-    (base / MARKER).write_text("Made by ./pyt selftest --e2e: safe to delete.\n", encoding="utf-8", newline="\n")
+    try:  # a --base it cannot look into: below a folder it may not enter (Path.exists raises
+        # PermissionError there on Python 3.11-3.13), its own without the read bit (iterdir, every
+        # Python), a link loop (Path.resolve raises RuntimeError on 3.11 and 3.12)
+        resolved = base.resolve()
+        if resolved == ROOT or ROOT in resolved.parents:
+            raise PytError("selftest --e2e: the base dir cannot be inside this template")
+        if base.exists() and not base.is_dir():
+            raise PytError(f"selftest --e2e: {base} is not a directory")
+        check_private_dir(base, "--base")
+        if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
+            raise PytError(f"selftest --e2e: {base} is not empty and was not made by selftest --e2e (no {MARKER}): pick another --base")
+    except (OSError, RuntimeError) as e:  # it was an internal-error traceback, exit 1
+        raise PytError(f"selftest --e2e: cannot use --base {base}: {unusable(e)}: pick another --base") from None
+    try:  # a --base below a file, in a folder it may not write, on a read-only mount
+        make_private_dir(base, "--base")
+        (base / MARKER).write_text("Made by ./pyt selftest --e2e: safe to delete.\n", encoding="utf-8", newline="\n")
+    except OSError as e:  # it was an internal-error traceback, exit 1 (nvimtest's --dir says it too)
+        raise PytError(f"selftest --e2e: cannot create --base {base}: {e.strerror or e}") from None
 
 
-def _cleanup(base: Path, presets: Sequence[str]) -> None:
-    """Remove what this run made (other presets kept by an earlier --keep stay), then the base if empty."""
+def _cleanup(base: Path, presets: Sequence[str], *, remove_base: bool = True) -> None:
+    """Remove what this run made (other presets kept by an earlier --keep stay), then the base if
+    empty. `remove_base=False` leaves the base itself: selftest holds a lock file in it and removes
+    the base only once the lock is released (`_remove_base`; its file cannot be deleted on Windows
+    while held)."""
     try:
         for p in presets:
             for d in (base / p, base / "logs" / p, base / "work" / p):
@@ -1200,8 +1301,23 @@ def _cleanup(base: Path, presets: Sequence[str]) -> None:
         for d in (base / "logs", base / "work"):
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
-        if {x.name for x in base.iterdir()} <= {MARKER}:
+        if remove_base and {x.name for x in base.iterdir()} <= {MARKER}:
             (base / MARKER).unlink(missing_ok=True)  # through a link too: that folder is the user's
+            rmtree(base)  # a symlinked base: only the link goes
+    except OSError as e:
+        ui.warn(f"could not remove {base}: {e}")
+
+
+def _remove_base(base: Path) -> None:
+    """Remove the base and its lock file once the lock is released, but only when nothing else is
+    left (an earlier --keep may have left another preset's projects). The marker and the lock
+    file go first, through a link too: a symlinked or junctioned base loses only its link and
+    what the run put in the folder it names, which is the user's (rmtree unlinks only a link,
+    and both files stayed there)."""
+    try:
+        if base.is_dir() and {x.name for x in base.iterdir()} <= {MARKER, "lock"}:
+            for name in (MARKER, "lock"):
+                (base / name).unlink(missing_ok=True)
             rmtree(base)  # a symlinked base: only the link goes
     except OSError as e:
         ui.warn(f"could not remove {base}: {e}")
@@ -1229,29 +1345,32 @@ def termination_as_interrupt() -> Iterator[None]:
     group (`timeout`, a closed terminal, uv forwarding it) never reaches them: without this the
     runner died at once and the running step (a build) went on as an orphan, writing into the
     base dir. The first signal also ignores the next ones, so the tree kill and the report run.
+    Only while a signal has its default handler, as proc.run and cmd_install do: a run started
+    under nohup (SIGHUP ignored, which uv hands the runner) keeps it ignored and survives a
+    closed terminal; the handler replaced SIG_IGN, and a hang-up ended the run with 130.
     """
-    saved: list[tuple[int, Any]] = []
+    installed: list[int] = []
     if sys.platform != "win32":
         import signal
 
-        watched = (signal.SIGTERM, signal.SIGHUP)
-
         def interrupt(signum: int, frame: object) -> None:
-            for sig in watched:
+            for sig in installed:
                 signal.signal(sig, signal.SIG_IGN)
             raise KeyboardInterrupt
 
         if threading.current_thread() is threading.main_thread():  # signal.signal works only there
-            for sig in watched:
-                saved.append((sig, signal.signal(sig, interrupt)))
+            for sig in (signal.SIGTERM, signal.SIGHUP):
+                if signal.getsignal(sig) is signal.SIG_DFL:
+                    signal.signal(sig, interrupt)
+                    installed.append(sig)
     try:
         yield
     finally:
         if sys.platform != "win32":
             import signal
 
-            for signum, handler in saved:
-                signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+            for signum in installed:
+                signal.signal(signum, signal.SIG_DFL)
 
 
 def selftest(cfg: Config, args: list[str]) -> int:
@@ -1274,47 +1393,57 @@ def selftest(cfg: Config, args: list[str]) -> int:
             "hide the template's own. Pick a --base outside that repository"
         )
     _prepare_base(base)
-    uv = proc.find_uv()
-    ui.step(f"selftest --e2e: {', '.join(opts.presets)} in {base}" + (" (--quick)" if opts.quick else " (--full)" if opts.full else ""))
-    results: list[Result] = []
-    interrupted = False
-    t0 = time.perf_counter()
-    with termination_as_interrupt():
-        try:
-            for info, steps in plans:
-                ctx = Context(info, base, base / info.name, base / "logs" / info.name, base / "work" / info.name, uv, env, opts)
-                for d in (ctx.logs, ctx.work):
-                    rmtree(d)
-                    d.mkdir(parents=True)
-                run_preset(ctx, steps, results)
-        except KeyboardInterrupt:
-            interrupted = True
-    seconds = time.perf_counter() - t0
-    failed = interrupted or any(r.status == FAIL for r in results)
-    if results:
-        _print_table(results, seconds)
-    kept = failed or opts.keep
-    if kept:
-        ui.report(f"kept for inspection: {base}  (logs in {base / 'logs'})")
-    else:
-        _cleanup(base, opts.presets)
-    if opts.as_json:
-        report = {
-            "ok": not failed,
-            "interrupted": interrupted,
-            "base": str(base),
-            "kept": kept,
-            "seconds": round(seconds, 1),
-            "host": asdict(host),
-            "options": asdict(opts),
-            "results": [asdict(r) for r in results],
-        }
-        print(json.dumps(report, indent=2))
-    if interrupted:
-        ui.error("interrupted")
-        return 130
-    if failed:
-        ui.error("selftest --e2e: some steps failed (table above)")
-        return 1
-    ui.ok("selftest --e2e: everything passed")
-    return 0
+    # One run at a time per base: a second run's do_new/rmtree would delete the projects and logs
+    # this one is building. _prepare_base above is non-destructive (mkdir + marker), so a second
+    # run is refused here. _cleanup removes only this run's projects under the lock; the base and
+    # its lock file go after it is released (_remove_base: the file cannot be deleted on Windows
+    # while held).
+    with base_lock(base, "selftest --e2e"):
+        uv = proc.find_uv()
+        ui.step(f"selftest --e2e: {', '.join(opts.presets)} in {base}" + (" (--quick)" if opts.quick else " (--full)" if opts.full else ""))
+        results: list[Result] = []
+        interrupted = False
+        t0 = time.perf_counter()
+        with termination_as_interrupt():
+            try:
+                for info, steps in plans:
+                    ctx = Context(info, base, base / info.name, base / "logs" / info.name, base / "work" / info.name, uv, env, opts)
+                    for d in (ctx.logs, ctx.work):
+                        rmtree(d)
+                        d.mkdir(parents=True)
+                    run_preset(ctx, steps, results)
+            except KeyboardInterrupt:
+                interrupted = True
+        seconds = time.perf_counter() - t0
+        failed = interrupted or any(r.status == FAIL for r in results)
+        if results:
+            _print_table(results, seconds)
+        kept = failed or opts.keep
+        if kept:
+            ui.report(f"kept for inspection: {base}  (logs in {base / 'logs'})")
+        else:
+            _cleanup(base, opts.presets, remove_base=False)
+        if opts.as_json:
+            report = {
+                "ok": not failed,
+                "interrupted": interrupted,
+                "base": str(base),
+                "kept": kept,
+                "seconds": round(seconds, 1),
+                "host": asdict(host),
+                "options": asdict(opts),
+                "results": [asdict(r) for r in results],
+            }
+            print(json.dumps(report, indent=2))
+        if interrupted:
+            ui.error("interrupted")
+            code = 130
+        elif failed:
+            ui.error("selftest --e2e: some steps failed (table above)")
+            code = 1
+        else:
+            ui.ok("selftest --e2e: everything passed")
+            code = 0
+    if not kept:  # the lock is released and its fd closed: remove the base and its lock file
+        _remove_base(base)
+    return code
