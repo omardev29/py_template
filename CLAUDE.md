@@ -2760,8 +2760,9 @@ Per method:
   - what a non-pure pyz cannot reach is a limit to document, not a goal: its native targets
     need the exact CPython minor of the lock (`cp314` wheels load only in 3.14), glibc >= 2.28
     (x86_64) / 2.35 (aarch64), macOS >= `MACOS_FLOOR`; no musl or Android wheels.
-- **pyz**: Python cannot import `.pyd/.so` from a zip, so `__main__.py` extracts to a per-build
-  cache (`%LOCALAPPDATA%` / `~/Library/Caches` / an absolute `$XDG_CACHE_HOME` or `~/.cache`,
+- **pyz**: Python cannot import `.pyd/.so` from a zip, so the bootstrap (`_pyz_bootstrap.py`,
+  which `__main__.py` starts) extracts to a per-build cache (`%LOCALAPPDATA%` /
+  `~/Library/Caches` / an absolute `$XDG_CACHE_HOME` or `~/.cache`,
   then `<name>/pyz/<build_id>/<key|pure>/`), guarded by a `.complete` marker and an atomic
   `os.replace`; a folder left without its marker (an interrupted prune, a DLL still loaded) is
   moved aside and re-extracted (`_discard`). On POSIX a member whose Unix mode has an x bit
@@ -2829,9 +2830,10 @@ Per method:
   candidate interpreter with a minimum-version probe, sets `PYTHONUTF8=1`;
   with `app.gui` its run lines are `start "" pyw/pythonw/pypyw` (`common.windowed`). `pyz-merge`
   (>= 2 parts; `_read_info` refuses a part without a valid `_pyz.json`, and `_member` names a
-  part whose member does not read, a bad CRC or deflate stream: it was a traceback) requires the same app
-  name, `min_python`, `deps` and app code (`common/app`, CRLF-normalised: Windows CI checkouts);
-  takes `common/app` and `__main__.py` from the first part, every `targets/<key>/lib` from ONE
+  part whose member does not read, a bad CRC or deflate stream: it was a traceback) requires
+  the same app name, `min_python`, `deps` and app code (`common/app`, CRLF-normalised: Windows
+  CI checkouts); takes `common/app` and the bootstrap (`pyz.BOOTSTRAP`: both stages) from the
+  first part, every `targets/<key>/lib` from ONE
   part (the one built on that platform, else the first), refuses two compiled overlays for one
   key, and when parts differ in purity moves each pure part's `common/lib` to
   `targets/<its host>/lib` (an older part without `host`: the single overlay key of a mypyc

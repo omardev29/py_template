@@ -1009,9 +1009,9 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
   included, gets `<name>: needs Python X.Y or newer`. It is tested on Windows, macOS and Linux
   with glibc; Linux with musl (Alpine), Android through Termux (`python <name>.pyz`, or
   `./<name>.pyz` through termux-exec), the BSDs and other CPUs are expected to work but untested
-  (the bootstrap needs only the standard library and a writable cache). On the maintainer's machine, a 1.7 MB pure pyz of a
-  project with PyPy supported used the compiled core on CPython 3.14 and ran the `.py` on PyPy and
-  on CPython 3.13.
+  (the bootstrap needs only the standard library and a writable cache). On the maintainer's
+  machine, a 1.7 MB pure pyz of a project with PyPy supported used the compiled core on CPython
+  3.14 and ran the `.py` on PyPy and on CPython 3.13.
 - **Not pure** (`runs on: <keys>`): native dependencies (raylib, flet, any platform wheel), or a
   dependency (a pin, a local library, a URL) that a marker leaves out on some target. It carries the dependencies of each target key and runs
   only there: the exact CPython minor of the lock (`cp314` wheels load only in 3.14, so a Python
