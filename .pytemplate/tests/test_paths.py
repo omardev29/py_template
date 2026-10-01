@@ -692,6 +692,24 @@ def test_the_install_tests_pass_in_a_project_with_install_and_uninstall_tasks(tm
 
 
 @needs_uv
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_real_apply_test_passes_in_a_project_without_the_git_hook(tmp_path: Path) -> None:
+    """[hooks] pre_commit = false is documented (README: apply then installs no hook).
+    test_real_apply_after_a_hand_edited_name ran apply in a copy of the project, its
+    pytemplate.toml included, and asserted that the hook was installed: it failed in every
+    project whose user had turned the hook off. It runs here in a copy with pre_commit = false."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    toml = own / "pytemplate.toml"
+    toml.write_bytes(config.set_value(toml.read_bytes().decode("utf-8"), "hooks", "pre_commit", False).encode("utf-8"))
+    r = _run_tests_in(own, tmp_path, ["test_apply.py::test_real_apply_after_a_hand_edited_name"])
+    skipped = re.search(r"SKIPPED \[1\] \S+: (needs PyPI.*)", r.stdout)
+    if r.returncode == 0 and skipped:
+        pytest.skip(skipped.group(1))
+    assert r.returncode == 0 and "1 passed" in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]
+
+
+@needs_uv
 def test_dry_run_mode_supports_pypy(unchanged: Path) -> None:
     if "pypy" in _copy_config(unchanged)["backend"]["supported"]:
         pytest.skip("this project already supports PyPy (the raylib preset): +pypy changes nothing")

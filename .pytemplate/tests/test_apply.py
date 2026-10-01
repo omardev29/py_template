@@ -2165,6 +2165,7 @@ def test_real_hand_edited_preset_is_refused(copy: Path) -> None:
 @needs_git
 def test_real_apply_after_a_hand_edited_name(copy: Path) -> None:
     old, new = rename.package_of(_copy_app(copy)["name"]), _new_name(copy)
+    _edit_copy(copy, "hooks", "pre_commit", True)  # the project's may be false: apply then installs no hook
     _git(copy, "init", "-q")
     _git(copy, "add", "-A")
     _git(copy, "commit", "-q", "-m", "init", "--no-verify")

@@ -3746,8 +3746,11 @@ short temp tree and unset `NVIM_APPNAME`.
   (`test_install._drop_tasks_named_like_builtins`), and
   `test_cli_core.test_every_command_rejects_an_unknown_argument` loads the configuration without
   it (each `install` of a clone ran the user's task, and 22 tests failed:
-  `test_paths.test_the_install_tests_pass_in_a_project_with_install_and_uninstall_tasks`).
-  A test that
+  `test_paths.test_the_install_tests_pass_in_a_project_with_install_and_uninstall_tasks`). Its
+  documented settings are its user's too: a test that needs one sets it in its copy
+  (`hooks.pre_commit` for `test_apply.test_real_apply_after_a_hand_edited_name`, which failed
+  with `pre_commit = false`:
+  `test_paths.test_the_real_apply_test_passes_in_a_project_without_the_git_hook`). A test that
   runs the real uv against the project's `.venv` (mypyc, the hook's ruff, the rename tidy-up,
   `uv pip install`, `uv run --frozen`) gives its Config the
   project's `python.cpython` (`real()` in test_mypyc_core and test_build_methods,
