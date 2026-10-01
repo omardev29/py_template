@@ -1213,9 +1213,18 @@ def test_ruff_skips_only_the_roots_own_folders(tmp_path: Path, monkeypatch: pyte
         assert not listed & set(skipped), (args, sorted(listed & set(skipped)))
 
 
-def test_the_ruff_exclude_holds_ruffs_own_defaults_at_the_root(tmp_path: Path) -> None:
-    """ruff_config replaces ruff's default `exclude` (each name at any depth) with the same names
-    anchored at the root: a ruff that adds a default must be looked at (RUFF_DEFAULT_EXCLUDE)."""
+def test_the_ruff_exclude_holds_ruffs_own_defaults_at_the_root() -> None:
+    """ruff_config replaces ruff's default `exclude` (each name at any depth) with the same names,
+    those a package can have anchored at the root (RUFF_DEFAULT_EXCLUDE)."""
+    exclude = render.ruff_config(preset_cfg(), "off")["exclude"]
+    assert sorted(exclude) == sorted(p if p.startswith(".") else f"./{p}" for p in render.RUFF_DEFAULT_EXCLUDE)
+
+
+@pytest.mark.skipif(not TEMPLATE_REPO, reason="the template repository pins ruff; a project's ./pyt lock --upgrade may move it on")
+def test_ruff_exclude_defaults_are_the_pinned_ruffs(tmp_path: Path) -> None:
+    """RUFF_DEFAULT_EXCLUDE is the locked ruff's own default list: a ruff that changes it must be
+    looked at when the template moves its pin. Only there: in a project, a newer ruff (./pyt lock
+    --upgrade) with another list, or another --show-settings layout, failed ./pyt selftest."""
     ruff = _ruff()
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     r = subprocess.run([*ruff, "check", "--isolated", "--show-settings", "a.py"], cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False)
@@ -1223,8 +1232,6 @@ def test_the_ruff_exclude_holds_ruffs_own_defaults_at_the_root(tmp_path: Path) -
     assert block, r.stdout[-2000:] + r.stderr
     defaults = re.findall(r'^\t"(.*)",$', block.group(1), re.M)
     assert defaults and sorted(defaults) == sorted(render.RUFF_DEFAULT_EXCLUDE), defaults
-    exclude = render.ruff_config(preset_cfg(), "off")["exclude"]
-    assert sorted(exclude) == sorted(p if p.startswith(".") else f"./{p}" for p in defaults)
 
 
 @pytest.mark.parametrize("absolute", [False, True], ids=["editor", "check"])

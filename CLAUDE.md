@@ -5645,8 +5645,10 @@ ruff:
   its excludes at the root (`./typings`) and replaces the default `exclude` with the same names
   anchored (`render.RUFF_DEFAULT_EXCLUDE`; the dot folders stay as they are) (8). Test:
   `test_render_core.py::test_ruff_skips_only_the_roots_own_folders`,
-  `test_the_ruff_exclude_holds_ruffs_own_defaults_at_the_root` (it compares the list with the
-  pinned ruff's), `test_cli_core.py::test_check_lint_and_fmt_see_every_folder_below_src_and_tests`,
+  `test_the_ruff_exclude_holds_ruffs_own_defaults_at_the_root`,
+  `test_ruff_exclude_defaults_are_the_pinned_ruffs` (the list against the locked ruff's, in the
+  template repository only: a project's `./pyt lock --upgrade` may move ruff on),
+  `test_cli_core.py::test_check_lint_and_fmt_see_every_folder_below_src_and_tests`,
   `test_hooks.py::test_real_ruff_checks_a_staged_file_in_a_folder_named_like_a_tool_folder`.
   Goes: never.
 - **`ruff format --check` prints nothing for stdin** (LIMITATION): a staged file fed on stdin
