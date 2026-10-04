@@ -13,8 +13,8 @@ from pathlib import Path
 from .. import envs, mypyc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
-from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT
-from .common import copy_tree, refuse_a_globbed_folder, remove_output
+from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT, TOOLS
+from .common import DOWNLOAD_RETRIES, copy_tree, refuse_a_globbed_folder, remove_output
 
 
 def _console(req: BuildRequest) -> bool:
@@ -188,6 +188,12 @@ def _flet_pack(req: BuildRequest) -> Path:
         # must go when app.name == pkg, the default. Linux keeps PyInstaller's _internal/.
         argv.append("--pyinstaller-build-args=--contents-directory=.")
     argv += cfg.deploy.exe.extra_args + req.extra
+    # flet pack bundles the Flet client from flet_desktop's cache, which the first build on a
+    # machine fills with one download from GitHub and no retry: a transient HTTP 500 failed the
+    # build (15.1). Fetched first with flet_desktop's own code, in flet pack's folder and
+    # environment, trying a transient failure again; nothing is downloaded when it is cached.
+    pauses = [f"{p:g}" for p in DOWNLOAD_RETRIES]
+    envs.uv_run(envs.tool_env(cfg), ["python", TOOLS / "flet_client.py", *pauses], cwd=work)
     envs.uv_run(envs.tool_env(cfg), argv, cwd=work, extra_env=size_env)
     ui.info("Flet: the Flutter client is inside the executable (it is not downloaded on first startup)")
     return out

@@ -17,6 +17,7 @@ import re
 import shlex
 import shutil
 import tarfile
+import time
 import urllib.request
 import zipfile
 import zlib
@@ -28,6 +29,7 @@ from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT, rel
 from ..ui import PytError
+from . import common
 from .common import copy_tree, refuse_a_globbed_folder, remove_output
 
 # Nuitka is not in uv.lock (`uv run --with`), so it is pinned here to keep builds reproducible:
@@ -258,28 +260,46 @@ def _flet_client_archive(cfg: Config) -> Path:
     ui.info(f"  downloading the Flet client to bundle: {source}")
     archive.parent.mkdir(parents=True, exist_ok=True)
     partial = archive.with_suffix(archive.suffix + ".part")
-    try:
-        with urllib.request.urlopen(url, timeout=300) as r, partial.open("wb") as f:  # noqa: S310 (https URL or the user's mirror)
-            announced = r.headers.get("Content-Length")
-            written = 0
-            while chunk := r.read(1 << 20):
-                f.write(chunk)
-                written += len(chunk)
-        # http.client ends a body cut short (a closed connection, a ragged TLS end) like a whole
-        # one when the server announced its length: only the count shows it
-        if announced is not None and announced.strip().isdecimal() and written != int(announced):
-            problem = f"the download ended after {written} of {int(announced)} bytes"
+    # A failure that may not happen again (common.transient: GitHub's release downloads answer
+    # HTTP 500 for a few seconds at times), and a download that is no whole archive, are tried
+    # again after each pause of common.DOWNLOAD_RETRIES; nothing of a failed attempt is kept
+    pauses = common.DOWNLOAD_RETRIES
+    for attempt in range(len(pauses) + 1):
+        last = attempt == len(pauses)
+        try:
+            problem = _download(url, partial, name)
+        except (OSError, ValueError, http.client.HTTPException) as e:  # IncompleteRead is no OSError
+            partial.unlink(missing_ok=True)
+            why = str(e) or type(e).__name__
+            if last or not common.transient(e):
+                raise PytError(f"cannot download the Flet client {source}: {why}", 3) from None
         else:
-            problem = archive_problem(partial, name)
-    except (OSError, ValueError, http.client.HTTPException) as e:  # IncompleteRead is no OSError
-        partial.unlink(missing_ok=True)
-        raise PytError(f"cannot download the Flet client {source}: {str(e) or type(e).__name__}", 3) from None
-    if problem:
-        partial.unlink(missing_ok=True)
-        raise PytError(f"the Flet client downloaded from {source} is not a whole archive: {problem}. Build again to retry", 3)
+            if not problem:
+                break
+            partial.unlink(missing_ok=True)
+            if last:
+                raise PytError(f"the Flet client downloaded from {source} is not a whole archive: {problem}. Build again to retry", 3)
+            why = problem
+        ui.warn(f"the Flet client download failed ({why}): trying again in {pauses[attempt]:g} s")
+        time.sleep(pauses[attempt])
     partial.replace(archive)
     _fingerprint(archive)
     return archive
+
+
+def _download(url: str, partial: Path, name: str) -> str:
+    """Download `url` into `partial`; return why it is no whole archive `name` ("" when it is)."""
+    with urllib.request.urlopen(url, timeout=300) as r, partial.open("wb") as f:  # noqa: S310 (https URL or the user's mirror)
+        announced = r.headers.get("Content-Length")
+        written = 0
+        while chunk := r.read(1 << 20):
+            f.write(chunk)
+            written += len(chunk)
+    # http.client ends a body cut short (a closed connection, a ragged TLS end) like a whole one
+    # when the server announced its length: only the count shows it
+    if announced is not None and announced.strip().isdecimal() and written != int(announced):
+        return f"the download ended after {written} of {int(announced)} bytes"
+    return archive_problem(partial, name)
 
 
 def fingerprint_file(archive: Path) -> Path:
