@@ -5611,6 +5611,15 @@ uv:
   deselects `test_presets.py::test_init_round_trip_through_every_preset_is_byte_identical`
   (13.2). Test: `test_workflows.py::test_what_the_selftest_workflow_reads_by_text_exists`.
   Goes: when `envs.MIN_UV` reaches a uv that writes the same bytes.
+- **uv writes the lock format revision of its own release** (LIMITATION: uv 0.12.22 and newer
+  write `revision = 5`, 0.12.21 and older 3; each reads the other's and leaves a lock that still
+  holds as it is, so the line says which uv last re-locked, not what the lock holds): the last
+  `uv lock` of that same round trip runs on the uv at hand, and next to the template's own lock
+  (revision 3) uv 0.12.23 failed the test on every CI job that takes the newest uv (October 2026).
+  Fix: the test reads uv.lock without its `revision` line (`test_presets._snapshot` with
+  `lock_revision=False`, `LOCK_REVISION`). Test:
+  `test_presets.py::test_a_round_trip_reads_uv_lock_without_the_revision_of_the_uv_that_wrote_it`.
+  Goes: never (uv versions keep meeting in one project).
 - **uv 0.10.12 (the floor) says nothing about a stale lock under `--quiet`** (LIMITATION: it
   prints "The lockfile at `uv.lock` needs to be updated" as plain output, which `--quiet` hides;
   0.12.19 prints it as an `error:`; `-qq` hides every error in any uv): `uv --quiet sync
