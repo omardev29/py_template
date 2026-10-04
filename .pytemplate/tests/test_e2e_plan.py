@@ -893,6 +893,21 @@ def test_a_round_trip_that_gives_a_file_back_with_lf_restores_it(tmp_path: Path)
     assert e2e.state_changes(before, e2e.project_state(tmp_path)) == ["~ .ruff.toml"]
 
 
+def test_a_link_of_the_project_is_compared_by_what_it_names(tmp_path: Path) -> None:
+    # A round trip must give a symbolic link back as the link it was: the path it names counts,
+    # never the bytes it leads to (a link that names nothing has none)
+    (tmp_path / "data.txt").write_text("data", encoding="utf-8")
+    try:
+        os.symlink("data.txt", tmp_path / "link.txt")
+    except OSError as e:  # Windows without the right to make links
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+    before = e2e.project_state(tmp_path)
+    assert before["link.txt"] == "-> data.txt"
+    (tmp_path / "link.txt").unlink()
+    os.symlink("gone.txt", tmp_path / "link.txt")
+    assert e2e.state_changes(before, e2e.project_state(tmp_path)) == ["~ link.txt"]
+
+
 # --- template-e2e.yml (template repository only: ./pyt new does not copy template-*.yml) --------
 
 

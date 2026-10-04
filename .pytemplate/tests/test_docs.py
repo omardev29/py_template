@@ -390,6 +390,17 @@ def test_the_runner_gives_the_manuals_flutter_size(monkeypatch: pytest.MonkeyPat
     assert not re.search(r"~\d+ GB", (flet.__doc__ or "").replace(size, "")), "another size in the flet method's docstring"
 
 
+def test_the_manual_gives_the_pauses_of_a_download_tried_again() -> None:
+    # A transient failure of the Flet client's download (flet pack's, through tools/flet_client.py,
+    # and the nuitka and portable builds' own) is tried again after each pause of
+    # common.DOWNLOAD_RETRIES: the manual says how long a build may wait, for flet pack and Nuitka
+    from runner.methods import common
+
+    *first, last = (f"{p:g}" for p in common.DOWNLOAD_RETRIES)
+    said = f"after {', '.join(first)} and {last} seconds"
+    assert " ".join(_text().split()).count(said) == 2, f"the manual does not say {said!r} for flet pack and nuitka"
+
+
 # --- links and style -----------------------------------------------------------------------------
 
 

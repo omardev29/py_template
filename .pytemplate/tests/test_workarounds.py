@@ -315,7 +315,7 @@ def _http_error(code: int) -> Exception:
     return urllib.error.HTTPError("https://github.com/x", code, {500: "Internal Server Error", 404: "Not Found"}.get(code, "?"), email.message.Message(), None)
 
 
-@pytest.mark.parametrize("failure", ["HTTP 500", "HTTP 503", "connection reset", "timed out", "chunked cut", "cut short"])
+@pytest.mark.parametrize("failure", ["HTTP 500", "HTTP 503", "connection reset", "reset without a message", "timed out", "chunked cut", "cut short"])
 def test_a_transient_flet_client_download_failure_is_tried_again(build_dirs: Path, monkeypatch: pytest.MonkeyPatch, pauses: list[float], capsys: pytest.CaptureFixture[str], failure: str) -> None:
     # GitHub's release downloads, where the client comes from, answer HTTP 500 for a few seconds
     # at times: both flet exe builds of the e2e at PR 7's merge failed on one, and a nuitka or a
@@ -327,6 +327,7 @@ def test_a_transient_flet_client_download_failure_is_tried_again(build_dirs: Pat
         "HTTP 500": _http_error(500),
         "HTTP 503": _http_error(503),
         "connection reset": urllib.error.URLError(ConnectionResetError(104, "Connection reset by peer")),
+        "reset without a message": ConnectionResetError(),
         "timed out": TimeoutError("The read operation timed out"),
         "chunked cut": _http_response(client[:1000], announce=len(client), chunked=True, cut=True),
         "cut short": _http_response(client[:1000], announce=len(client)),
@@ -334,7 +335,19 @@ def test_a_transient_flet_client_download_failure_is_tried_again(build_dirs: Pat
     urls = _serve_client(monkeypatch, [first, _http_response(client)])
     archive = nuitka._flet_client_archive(make({"app": {"preset": "flet"}}))
     assert archive.read_bytes() == client and len(urls) == 2 and pauses == [common.DOWNLOAD_RETRIES[0]]
-    assert f"trying again in {common.DOWNLOAD_RETRIES[0]:g} s" in capsys.readouterr().err
+    # The warning says why: the error's own words, or its name when it has none
+    why = {
+        "HTTP 500": "(HTTP Error 500: Internal Server Error)",
+        "HTTP 503": "(HTTP Error 503: ?)",
+        "connection reset": "Connection reset by peer>)",
+        "reset without a message": "(ConnectionResetError)",
+        "timed out": "(The read operation timed out)",
+        "chunked cut": "(IncompleteRead(",
+        "cut short": f"(the download ended after 1000 of {len(client)} bytes)",
+    }[failure]
+    err = capsys.readouterr().err
+    assert f"the Flet client download failed {why}" in err or f"{why}: trying again" in err, err
+    assert f"trying again in {common.DOWNLOAD_RETRIES[0]:g} s" in err
 
 
 @pytest.mark.parametrize("failure", ["HTTP 404", "no such host scheme", "disk"])
@@ -346,6 +359,8 @@ def test_a_flet_client_download_that_cannot_work_is_never_tried_again(build_dirs
     with pytest.raises(PytError, match="cannot download the Flet client") as info:
         nuitka._flet_client_archive(make({"app": {"preset": "flet"}}))
     assert info.value.code == 3 and len(urls) == 1 and pauses == []
+    why = {"HTTP 404": "HTTP Error 404: Not Found", "no such host scheme": "unknown url type: 'htps'", "disk": "No space left on device"}[failure]
+    assert str(info.value).endswith(why), str(info.value)  # the error's own words
     assert list((build_dirs / "build" / "flet-client" / FakeUv.VERSION).iterdir()) == []
 
 
