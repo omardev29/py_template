@@ -424,9 +424,22 @@ def test_git_dash_runs_the_launcher() -> None:
 
 @needs_windows
 def test_msys2_login_minimal_path() -> None:
-    """MSYS2 login shell with the minimal PATH (uv is not on it): the install folders are searched."""
+    """MSYS2 login shell with the minimal PATH (uv is not on it): the install folders are searched.
+
+    The uv this suite runs with is found where the official installer puts it, in
+    %USERPROFILE%\\.local\\bin (the template's CI copies it there); else UV_INSTALL_DIR, the first
+    install folder the launcher searches, names its folder. setup-uv and pipx put uv on the
+    process PATH only, which the login shell replaces: every new project's selftest failed so in
+    the Windows e2e ("pyt: uv not found")."""
     bash = _need(_msys2("usr/bin/bash.exe"), "MSYS2 bash.exe")
-    env = _clean_env(MSYSTEM="UCRT64", CHERE_INVOKING="1", MSYS2_PATH_TYPE="minimal", PTCMD=probe_cmd("./pyt", 3))
+    found: dict[str, str] = {}
+    profile = os.environ.get("USERPROFILE")
+    if not (profile and (Path(profile) / ".local" / "bin" / "uv.exe").is_file()):
+        uv = os.environ.get("UV") or shutil.which("uv")
+        if not uv:
+            pytest.skip("uv not found")
+        found["UV_INSTALL_DIR"] = str(Path(uv).parent)
+    env = _clean_env(MSYSTEM="UCRT64", CHERE_INVOKING="1", MSYS2_PATH_TYPE="minimal", PTCMD=probe_cmd("./pyt", 3), **found)
     Run([bash, "-lc", 'eval "$PTCMD"'], ROOT, env).check(3, ROOT, "sh:bash:msys")
 
 

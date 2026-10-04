@@ -4840,7 +4840,9 @@ short temp tree and unset `NVIM_APPNAME`.
   hand; the gate): `./pyt render --check` first, then `setup` and `./pyt selftest` on
   macos and windows-latest (Windows through `pyt.ps1`, `--basetemp` in `RUNNER_TEMP`, git's
   default CRLF checkout), with what the tests look for: MSYS2 with dash
-  and uv copied to `~\.local\bin` (the login-shell test); xonsh 0.24.2 and Neovim v0.12.5; the
+  and uv copied to `~\.local\bin` (the login-shell test, which elsewhere names the folder of the
+  uv it runs with in `UV_INSTALL_DIR`: in a new project's selftest of the Windows e2e, setup-uv's
+  uv is on the process PATH only, which the login shell replaces); xonsh 0.24.2 and Neovim v0.12.5; the
   UPX `upx.find` finds (the pinned download on Windows). Job `uv-floor` (a bare Linux runner):
   setup-uv with `resolution-strategy: lowest` takes the oldest uv the `required-version`
   accepts, checked against `envs.MIN_UV`, then setup and the suite, minus
