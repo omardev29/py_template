@@ -4608,7 +4608,11 @@ short temp tree and unset `NVIM_APPNAME`.
   backend) and a `[preset.*]` option edit (`e2e.OPTION_EDITS` with `config.set_value`, then
   `./pyt apply`: pyproject.toml and uv.lock must follow, `doctor` passes, a second `apply`
   changes nothing). A round trip must give back the project's files (`project_state`: not
-  `.git`, environments, builds, caches). `flet build` is SKIP unless Flutter and (Windows)
+  `.git`, environments, builds, caches; each read as render reads a generated file, without a
+  BOM and with CRLF as LF: a Windows checkout holds CRLF, and the generated files a `mode` round
+  trip rewrote twice came back LF, the same files to git and the runner, which failed every
+  `--full` run on Windows, `test_e2e_plan.test_a_round_trip_that_gives_a_file_back_with_lf_restores_it`).
+  `flet build` is SKIP unless Flutter and (Windows)
   Developer Mode are available; GUI runs are SKIP without a display (Linux uses `xvfb-run`)
   or on Windows/macOS CI. A filter shows what it leaves out (SKIP rows `<b> (not supported)`,
   `build (none selected)`); one that tests nothing in any preset exits 2 before anything is
