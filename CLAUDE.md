@@ -4256,7 +4256,12 @@ short temp tree and unset `NVIM_APPNAME`.
   3.14, made uv replace the `.venv` of a project on another minor with an empty one under the
   running suite, and dozens of later tests failed (a `python.cpython = "3.13"` project).
   `conftest._the_project_environment_stays` fails the test after which the interpreter of
-  `.venv` (or `.venv-wsl`) changed, naming it. A dry run of `mode` asks for changes the
+  `.venv` (or `.venv-wsl`) changed, naming it. A test that builds in tmp_path (`mypyc.BUILD`
+  moved there) gives its tree no `typings/` (`test_mypyc_core.src_tree`, the tests that move it
+  by hand alike) or a compile-time mypy.ini folder in the project (`COMPILE_INI_DIR`): that ini
+  names typings/ relative to its folder (6.2), and on Windows tmp_path may be on another drive
+  than the project, where `os.path.relpath` raises ValueError (dozens of tests failed in every
+  raylib project of the Windows e2e). A dry run of `mode` asks for changes the
   project has not made (`test_paths._another_backend`, `_supports_and_typing`): mode prints only
   real changes, and after `./pyt mode mypyc` or `./pyt mode --typing strict` it said "unchanged".
   So does `test_config_rules.test_mode_edits_a_taplo_formatted_config`: in a project that

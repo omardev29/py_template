@@ -1604,12 +1604,17 @@ def test_shipped_configs_pass_the_compile_rules(preset: str) -> None:
 
 @pytest.fixture
 def src_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A tmp src/ that mypyc.py and config.compiled_paths use instead of the project's."""
+    """A tmp src/ that mypyc.py and config.compiled_paths use instead of the project's, and no
+    typings/: the project's own (a raylib project's stub) is no part of this tree, and the
+    compile-time mypy.ini names it relative to the build folder in tmp_path, which on Windows
+    may be on another drive than the project (os.path.relpath raised ValueError: dozens of
+    tests failed in every raylib project there, the Windows e2e)."""
     src = tmp_path / "src"
     src.mkdir()
     monkeypatch.setattr(mypyc, "SRC", src)
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(lintc, "SRC", src)
+    monkeypatch.setattr(render, "typings_dir", lambda: None)
     return src
 
 
@@ -3154,10 +3159,16 @@ def _ini(text: str) -> configparser.RawConfigParser:
 COMPILED_KEYS = list(render.load_profile("mypyc")["mypy_compiled"])
 
 
+# The folder of the compile-time mypy.ini, as mypyc.build passes it: in the project, like
+# typings/, which it names relatively (a folder in tmp_path may be on another Windows drive than a
+# raylib project's typings/, where os.path.relpath raises ValueError)
+COMPILE_INI_DIR = ROOT / ".build" / "mypyc-dev"
+
+
 @pytest.mark.parametrize("for_compile", [False, True])
-def test_mypy_ini_relaxes_compile_exclude(for_compile: bool, tmp_path: Path) -> None:
+def test_mypy_ini_relaxes_compile_exclude(for_compile: bool) -> None:
     cfg = make({"compile": {"modules": ["myapp.core"], "exclude": ["myapp.core.loose", "myapp.core.sub"]}})
-    ini = _ini(render.mypy_ini(cfg, "mypyc", for_compile=tmp_path if for_compile else None))
+    ini = _ini(render.mypy_ini(cfg, "mypyc", for_compile=COMPILE_INI_DIR if for_compile else None))
     assert COMPILED_KEYS and all(ini.getboolean("mypy-myapp.core.*", key) for key in COMPILED_KEYS)
     for section in ("mypy-myapp.core.loose.*", "mypy-myapp.core.sub.*"):  # x.* covers x itself too
         assert all(ini.getboolean(section, key) is False for key in COMPILED_KEYS)
@@ -3189,7 +3200,7 @@ def test_compile_mypy_ini_finds_typings_in_any_project_folder(tmp_path: Path, mo
 
 
 @pytest.mark.parametrize("supported", [["cpython", "mypyc"], ["cpython", "pypy", "mypyc"]])
-def test_mypy_ini_checks_as_min_python_while_pypy_is_supported(supported: list[str], tmp_path: Path) -> None:
+def test_mypy_ini_checks_as_min_python_while_pypy_is_supported(supported: list[str]) -> None:
     """VS Code's mypy extension reads .mypy.ini and passes no --python-version: without
     python_version there it checked as the .venv's Python and missed the 3.11 API errors that
     `./pyt check` (render.mypy_cli_args) and the Neovim linter report."""
@@ -3199,7 +3210,7 @@ def test_mypy_ini_checks_as_min_python_while_pypy_is_supported(supported: list[s
     for profile in ("strict", "mypyc", "warn", "off"):
         assert _ini(render.mypy_ini(cfg, profile)).get("mypy", "python_version", fallback=None) == expected
     # mypyc compiles for the interpreter it runs on: the compile-time ini never pins another one
-    assert _ini(render.mypy_ini(cfg, "mypyc", for_compile=tmp_path)).get("mypy", "python_version", fallback=None) is None
+    assert _ini(render.mypy_ini(cfg, "mypyc", for_compile=COMPILE_INI_DIR)).get("mypy", "python_version", fallback=None) is None
 
 
 @needs_venv

@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_dev, cmd_env, config, envs, mypyc, presets, tasks  # noqa: E402
+from runner import cmd_dev, cmd_env, config, envs, mypyc, presets, render, tasks  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import flet, nuitka, portable, pyz, wheel  # noqa: E402
 from runner.ui import PytError  # noqa: E402
@@ -266,6 +266,7 @@ def test_compile_annotate_writes_the_report_on_every_build(tmp_path: Path, monke
     monkeypatch.setattr(config, "SRC", src)
     monkeypatch.setattr(mypyc, "BUILD", build)
     monkeypatch.setattr(mypyc, "ANNOTATE_HTML", html)
+    monkeypatch.setattr(render, "typings_dir", lambda: None)  # this tree has none (a raylib project's is on another drive than tmp_path, maybe)
     specs: list[dict[str, Any]] = []
 
     def fake_run(argv: list[Any], **_kw: Any) -> subprocess.CompletedProcess[str]:

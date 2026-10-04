@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_build, cmd_env, config, e2e, envs, lintc, mypyc, proc, shells, upx  # noqa: E402
+from runner import cmd_build, cmd_env, config, e2e, envs, lintc, mypyc, proc, render, shells, upx  # noqa: E402
 from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import common, nuitka, portable  # noqa: E402
@@ -652,6 +652,7 @@ def test_mypyc_build_asks_msvc_for_english_messages(tmp_path: Path, monkeypatch:
     for module in (mypyc, config, lintc):
         monkeypatch.setattr(module, "SRC", src)
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
+    monkeypatch.setattr(render, "typings_dir", lambda: None)  # this tree has none (a raylib project's is on another drive than tmp_path, maybe)
     monkeypatch.setattr(proc, "find_uv", lambda: "uv")
     seen: list[dict[str, str]] = []
 
