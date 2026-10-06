@@ -69,9 +69,16 @@ def _write(root: Path, files: dict[str, bytes]) -> None:
         path.write_bytes(data)
 
 
-def _snapshot(root: Path, lf: bool = False) -> dict[str, str]:
+# The lock format revision of the uv that last wrote uv.lock (uv 0.12.22 and newer write 5, older
+# ones 3; each reads the other's and leaves a lock that still holds alone: CLAUDE.md 15.1)
+LOCK_REVISION = re.compile(rb"^revision = \d+\r?\n", re.MULTILINE)
+
+
+def _snapshot(root: Path, lf: bool = False, lock_revision: bool = True) -> dict[str, str]:
     """Every file (sha256) and folder under root, without .build/ (scratch) and caches; `lf`
-    reads CRLF as LF (a Windows checkout with core.autocrlf, which the runner writes back as LF)."""
+    reads CRLF as LF (a Windows checkout with core.autocrlf, which the runner writes back as LF),
+    and `lock_revision=False` reads uv.lock without its `revision` line, which says which uv wrote
+    it last, not what it holds."""
     out: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
@@ -80,6 +87,8 @@ def _snapshot(root: Path, lf: bool = False) -> dict[str, str]:
         data = path.read_bytes() if path.is_file() else None
         if data is not None and lf:
             data = data.replace(b"\r\n", b"\n")
+        if data is not None and not lock_revision and rel.as_posix() == "uv.lock":
+            data = LOCK_REVISION.sub(b"", data, count=1)
         out[rel.as_posix()] = "<dir>" if data is None else hashlib.sha256(data).hexdigest()
     return out
 
@@ -3621,7 +3630,10 @@ def test_round_trip_problem_names_what_a_round_trip_changes(tmp_path: Path) -> N
 def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, network: None, git_env: None) -> None:
     """current -> every other preset -> current gives back the same bytes: every init removes
     the previous preset's dependencies, tables and files (and the template root is exactly what
-    `__init script --name myapp --force` writes)."""
+    `__init script --name myapp --force` writes). uv.lock's `revision` line is left out: the
+    round trip's last lock is written by the uv at hand, which may write another revision than
+    the one that wrote the project's (uv 0.12.22's 5 next to the template's 3 failed every
+    selftest with the newest uv)."""
     cfg = config.load(set(cli.COMMANDS))
     reason = _round_trip_problem(cfg)
     if reason:
@@ -3629,12 +3641,36 @@ def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, 
     env = _child_env(tmp_path)
     copy_root = tmp_path / "copy"
     presets.copy_template(copy_root)
-    before = _snapshot(copy_root, lf=True)
+    before = _snapshot(copy_root, lf=True, lock_revision=False)
     for preset in [*(p for p in PRESETS if p != cfg.app.preset), cfg.app.preset]:
         r = _pyt(copy_root, "__init", preset, "--force", cwd=copy_root, env=env)
         assert r.returncode == 0, f"init {preset}:\n{r.stderr[-4000:]}"
-    after = _snapshot(copy_root, lf=True)
+    after = _snapshot(copy_root, lf=True, lock_revision=False)
     assert sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k)) == []
+
+
+def test_a_round_trip_reads_uv_lock_without_the_revision_of_the_uv_that_wrote_it(tmp_path: Path) -> None:
+    """The round trip's last `uv lock` runs on the uv at hand: uv 0.12.22 and newer write
+    `revision = 5`, older ones 3, into the same lock, and the template's own uv.lock was written by
+    an older one. Read with its revision line, the same lock was a difference, and
+    test_init_round_trip_through_every_preset_is_byte_identical failed on every CI job that runs
+    the newest uv; a package the round trip leaves behind stays one."""
+    lock = 'version = 1\nrevision = {}\nrequires-python = ">=3.14"\n\n[[package]]\nname = "rich"\nversion = "14.1.0"\n'
+    old, new, other = tmp_path / "old", tmp_path / "new", tmp_path / "other"
+    texts = {
+        old: lock.format(3),
+        new: lock.format(5).replace("\n", "\r\n"),
+        other: lock.format(5) + '\n[[package]]\nname = "raylib"\nversion = "6.0.1.0"\n',
+    }
+    for root, text in texts.items():
+        root.mkdir()
+        (root / "uv.lock").write_text(text, encoding="utf-8", newline="")
+    assert _snapshot(old, lf=True) != _snapshot(new, lf=True)  # every byte counts by default
+    assert _snapshot(old, lf=True, lock_revision=False) == _snapshot(new, lf=True, lock_revision=False)
+    assert _snapshot(old, lf=True, lock_revision=False) != _snapshot(other, lf=True, lock_revision=False)
+    (old / "notes.txt").write_text("revision = 3\n", encoding="utf-8")  # only uv.lock's own line goes
+    (new / "notes.txt").write_text("revision = 5\n", encoding="utf-8")
+    assert _snapshot(old, lf=True, lock_revision=False)["notes.txt"] != _snapshot(new, lf=True, lock_revision=False)["notes.txt"]
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv not found")

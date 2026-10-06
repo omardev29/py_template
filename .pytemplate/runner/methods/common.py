@@ -5,15 +5,19 @@ from __future__ import annotations
 import configparser
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 import platform
 import re
 import shutil
+import socket
+import ssl
 import sys
 import sysconfig
 import tempfile
 import tomllib
+import urllib.error
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -835,6 +839,30 @@ def requirements_digest(requirements: Path) -> str:
         if line and not line[0].isspace() and not line.startswith(("#", "-")):
             lines.append(line.rstrip("\\").strip())
     return hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest()[:16]
+
+
+# The pauses, in seconds, before each new attempt at a download that failed in a way that may
+# not happen again (transient): GitHub's release downloads, where the Flet client comes from,
+# answer HTTP 500 for a few seconds at times, and both flet exe builds of an e2e run failed on one
+# (CLAUDE.md 15.1). tools/flet_client.py gets them as its arguments.
+DOWNLOAD_RETRIES = (5.0, 15.0, 45.0)
+# What a dropped, refused or timed-out connection, a name the resolver could not look up now, or a
+# body cut short raise (http.client's IncompleteRead is no OSError)
+_TRANSIENT_ERRORS = (ConnectionError, TimeoutError, socket.gaierror, http.client.HTTPException)
+
+
+def transient(e: BaseException) -> bool:
+    """Whether a download that raised `e` may work when tried again: a 5xx, 408 or 429 answer, a
+    connection refused, reset or timed out, a name lookup that failed, a body cut short. Never a
+    4xx, a certificate this machine does not trust, a URL urllib cannot open, nor an error of the
+    local disk. tools/flet_client.py mirrors it (it runs in .venv, without the runner)."""
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code >= 500 or e.code in (408, 429)
+    if isinstance(e, urllib.error.URLError) and isinstance(e.reason, BaseException):
+        e = e.reason
+    if isinstance(e, ssl.SSLError):
+        return not isinstance(e, ssl.SSLCertVerificationError)
+    return isinstance(e, _TRANSIENT_ERRORS)
 
 
 # What glob reads as a pattern in a path (glob.has_magic). PyInstaller finds its hooks, and Nuitka

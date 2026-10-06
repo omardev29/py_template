@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_build, cmd_env, config, e2e, envs, lintc, mypyc, proc, shells, upx  # noqa: E402
+from runner import cmd_build, cmd_env, config, e2e, envs, lintc, mypyc, proc, render, shells, upx  # noqa: E402
 from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import common, nuitka, portable  # noqa: E402
@@ -245,14 +245,18 @@ def test_nuitka_bundles_the_flet_client(build_dirs: Path, monkeypatch: pytest.Mo
 
 
 def _serve_client(monkeypatch: pytest.MonkeyPatch, responses: list[Any], archive: str = FakeUv.ARCHIVE) -> list[str]:
-    """envs.uv answers flet_desktop's query with `archive`; urlopen hands out `responses` in order."""
+    """envs.uv answers flet_desktop's query with `archive`; urlopen hands out `responses` in order
+    (an exception among them is raised, as urlopen raises an HTTP error or a dropped connection)."""
     fake = FakeUv()
     fake.ARCHIVE = archive
     urls: list[str] = []
 
     def urlopen(url: str, timeout: float = 0) -> Any:
         urls.append(url)
-        return responses.pop(0)
+        response = responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
     monkeypatch.delenv("FLET_CLIENT_URL", raising=False)
     monkeypatch.setattr(envs, "uv", fake)
@@ -260,8 +264,16 @@ def _serve_client(monkeypatch: pytest.MonkeyPatch, responses: list[Any], archive
     return urls
 
 
+@pytest.fixture
+def pauses(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The pauses of common.DOWNLOAD_RETRIES between download attempts, recorded, never waited."""
+    slept: list[float] = []
+    monkeypatch.setattr(nuitka.time, "sleep", slept.append)
+    return slept
+
+
 @pytest.mark.parametrize("case", ["cut", "chunked cut", "not an archive", "damaged zip"])
-def test_a_flet_client_download_cut_short_is_never_cached(build_dirs: Path, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+def test_a_flet_client_download_cut_short_is_never_cached(build_dirs: Path, monkeypatch: pytest.MonkeyPatch, pauses: list[float], case: str) -> None:
     # http.client ends a body cut short (the connection closed, a ragged TLS end) like a whole
     # one when the server announced its length: the short file was cached as the client, every
     # later build bundled it and reported success, and the app failed at its first start.
@@ -270,28 +282,86 @@ def test_a_flet_client_download_cut_short_is_never_cached(build_dirs: Path, monk
     client = _client_archive(zip_format)
     name = "flet-windows.zip" if zip_format else FakeUv.ARCHIVE
     if case == "cut":
-        bad = _http_response(client[: len(client) // 2], announce=len(client))
+        bad = lambda: _http_response(client[: len(client) // 2], announce=len(client))  # noqa: E731
         message = f"ended after {len(client) // 2} of {len(client)} bytes"
     elif case == "chunked cut":
-        bad = _http_response(client[: len(client) // 2], announce=len(client), chunked=True, cut=True)
+        bad = lambda: _http_response(client[: len(client) // 2], announce=len(client), chunked=True, cut=True)  # noqa: E731
         message = "cannot download the Flet client"
     elif case == "not an archive":
-        bad = _http_response(b"<html>a proxy's error page</html>")
+        bad = lambda: _http_response(b"<html>a proxy's error page</html>")  # noqa: E731
         message = "not a whole archive"
     else:
         damaged = bytearray(client)
         damaged[len(damaged) // 3] ^= 0xFF  # same length, one byte of a member changed
-        bad = _http_response(bytes(damaged))
+        bad = lambda: _http_response(bytes(damaged))  # noqa: E731
         message = "not a whole archive"
-    urls = _serve_client(monkeypatch, [bad, _http_response(client)], name)
+    tries = len(common.DOWNLOAD_RETRIES) + 1
+    urls = _serve_client(monkeypatch, [*(bad() for _ in range(tries)), _http_response(client)], name)
     with pytest.raises(PytError, match=message) as info:
         nuitka._flet_client_archive(make({"app": {"preset": "flet"}}))
-    assert info.value.code == 3
+    # every attempt failed alike: one per pause, and nothing of them is kept
+    assert info.value.code == 3 and len(urls) == tries and pauses == list(common.DOWNLOAD_RETRIES)
     folder = build_dirs / "build" / "flet-client" / FakeUv.VERSION
     assert list(folder.iterdir()) == []  # neither the archive nor a .part
     # The next build downloads it again, whole
     archive = nuitka._flet_client_archive(make({"app": {"preset": "flet"}}))
-    assert archive == folder / name and archive.read_bytes() == client and len(urls) == 2
+    assert archive == folder / name and archive.read_bytes() == client and len(urls) == tries + 1
+
+
+def _http_error(code: int) -> Exception:
+    import email.message
+    import urllib.error
+
+    return urllib.error.HTTPError("https://github.com/x", code, {500: "Internal Server Error", 404: "Not Found"}.get(code, "?"), email.message.Message(), None)
+
+
+@pytest.mark.parametrize("failure", ["HTTP 500", "HTTP 503", "connection reset", "reset without a message", "timed out", "chunked cut", "cut short"])
+def test_a_transient_flet_client_download_failure_is_tried_again(build_dirs: Path, monkeypatch: pytest.MonkeyPatch, pauses: list[float], capsys: pytest.CaptureFixture[str], failure: str) -> None:
+    # GitHub's release downloads, where the client comes from, answer HTTP 500 for a few seconds
+    # at times: both flet exe builds of the e2e at PR 7's merge failed on one, and a nuitka or a
+    # portable flet build stopped the same way at its one request
+    import urllib.error
+
+    client = _client_archive()
+    first: Any = {
+        "HTTP 500": _http_error(500),
+        "HTTP 503": _http_error(503),
+        "connection reset": urllib.error.URLError(ConnectionResetError(104, "Connection reset by peer")),
+        "reset without a message": ConnectionResetError(),
+        "timed out": TimeoutError("The read operation timed out"),
+        "chunked cut": _http_response(client[:1000], announce=len(client), chunked=True, cut=True),
+        "cut short": _http_response(client[:1000], announce=len(client)),
+    }[failure]
+    urls = _serve_client(monkeypatch, [first, _http_response(client)])
+    archive = nuitka._flet_client_archive(make({"app": {"preset": "flet"}}))
+    assert archive.read_bytes() == client and len(urls) == 2 and pauses == [common.DOWNLOAD_RETRIES[0]]
+    # The warning says why: the error's own words, or its name when it has none
+    why = {
+        "HTTP 500": "(HTTP Error 500: Internal Server Error)",
+        "HTTP 503": "(HTTP Error 503: ?)",
+        "connection reset": "Connection reset by peer>)",
+        "reset without a message": "(ConnectionResetError)",
+        "timed out": "(The read operation timed out)",
+        "chunked cut": "(IncompleteRead(",
+        "cut short": f"(the download ended after 1000 of {len(client)} bytes)",
+    }[failure]
+    err = capsys.readouterr().err
+    assert f"the Flet client download failed {why}" in err or f"{why}: trying again" in err, err
+    assert f"trying again in {common.DOWNLOAD_RETRIES[0]:g} s" in err
+
+
+@pytest.mark.parametrize("failure", ["HTTP 404", "no such host scheme", "disk"])
+def test_a_flet_client_download_that_cannot_work_is_never_tried_again(build_dirs: Path, monkeypatch: pytest.MonkeyPatch, pauses: list[float], failure: str) -> None:
+    # A 404 (a FLET_CLIENT_URL that names nothing), a URL urllib cannot open, a full disk: the
+    # same answer the next time, so the build stops at once, without minutes of pauses
+    first: Any = {"HTTP 404": _http_error(404), "no such host scheme": ValueError("unknown url type: 'htps'"), "disk": OSError(28, "No space left on device")}[failure]
+    urls = _serve_client(monkeypatch, [first, _http_response(_client_archive())])
+    with pytest.raises(PytError, match="cannot download the Flet client") as info:
+        nuitka._flet_client_archive(make({"app": {"preset": "flet"}}))
+    assert info.value.code == 3 and len(urls) == 1 and pauses == []
+    why = {"HTTP 404": "HTTP Error 404: Not Found", "no such host scheme": "unknown url type: 'htps'", "disk": "No space left on device"}[failure]
+    assert str(info.value).endswith(why), str(info.value)  # the error's own words
+    assert list((build_dirs / "build" / "flet-client" / FakeUv.VERSION).iterdir()) == []
 
 
 def test_a_damaged_cached_flet_client_is_downloaded_again(build_dirs: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -319,6 +389,148 @@ def test_the_flet_client_follows_flet_client_url(build_dirs: Path, monkeypatch: 
     assert urls == ["https://mirror.example/flet-linux.tar.gz"]
     assert archive.name == FakeUv.ARCHIVE and archive.read_bytes() == client  # cached under flet_desktop's own name
     assert "(FLET_CLIENT_URL)" in capsys.readouterr().err
+
+
+def _flet_client_tool() -> types.ModuleType:
+    """tools/flet_client.py, which methods/exe runs in .venv before flet pack."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("pt_flet_client", ROOT / ".pytemplate" / "tools" / "flet_client.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fake_flet_desktop(monkeypatch: pytest.MonkeyPatch, outcomes: list[BaseException | None]) -> list[int]:
+    """A flet_desktop whose ensure_client_cached() raises each exception of `outcomes` in turn
+    (None: it returns, the client is cached); returns the list its calls are counted in."""
+    calls: list[int] = []
+    module = types.ModuleType("flet_desktop")
+
+    def ensure_client_cached() -> Path:
+        calls.append(1)
+        outcome = outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+        return Path("/home/user/.flet/client/flet-desktop-full-1.0.1")
+
+    module.ensure_client_cached = ensure_client_cached  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "flet_desktop", module)
+    return calls
+
+
+@pytest.mark.parametrize("failure", ["HTTP 500", "connection reset", "archive cut short", "chunked cut"])
+def test_flet_pack_gets_its_client_again_after_a_transient_failure(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: str) -> None:
+    # flet pack's own download (flet_desktop.ensure_client_cached, one urlopen, no retry) got an
+    # HTTP 500 from GitHub at PR 7's merge, and both exe builds of the macOS flet e2e failed
+    import http.client
+    import tarfile
+    import urllib.error
+
+    tool = _flet_client_tool()
+    slept: list[float] = []
+    monkeypatch.setattr(tool.time, "sleep", slept.append)
+    monkeypatch.delenv("FLET_VIEW_PATH", raising=False)
+    first = {
+        "HTTP 500": _http_error(500),
+        "connection reset": urllib.error.URLError(ConnectionResetError(104, "Connection reset by peer")),
+        "archive cut short": tarfile.ReadError("unexpected end of data"),  # flet_desktop extracts right after
+        "chunked cut": http.client.IncompleteRead(b"x" * 10, 90),
+    }[failure]
+    calls = _fake_flet_desktop(monkeypatch, [first, first, None])
+    assert tool.main(["5", "15", "45"]) == 0
+    assert len(calls) == 3 and slept == [5.0, 15.0]
+    assert "the Flet client download failed" in capsys.readouterr().err
+    # Every attempt failing: the last error is raised, as flet pack would have raised it
+    calls = _fake_flet_desktop(monkeypatch, [_http_error(500)] * 3)
+    slept.clear()
+    with pytest.raises(urllib.error.HTTPError):
+        tool.main(["1", "2"])
+    assert len(calls) == 3 and slept == [1.0, 2.0]
+
+
+def test_flet_pack_never_waits_for_a_client_download_that_cannot_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import urllib.error
+
+    tool = _flet_client_tool()
+    slept: list[float] = []
+    monkeypatch.setattr(tool.time, "sleep", slept.append)
+    monkeypatch.delenv("FLET_VIEW_PATH", raising=False)
+    calls = _fake_flet_desktop(monkeypatch, [_http_error(404), None])
+    with pytest.raises(urllib.error.HTTPError):
+        tool.main(["5", "15", "45"])  # a FLET_CLIENT_URL that names nothing
+    assert len(calls) == 1 and slept == []
+    # A FLET_VIEW_PATH that exists: flet pack copies the client from there and downloads nothing
+    monkeypatch.setenv("FLET_VIEW_PATH", str(tmp_path))
+    calls = _fake_flet_desktop(monkeypatch, [AssertionError("flet_desktop downloaded")])
+    assert tool.main(["5"]) == 0 and calls == []
+    # A flet_desktop without ensure_client_cached (another [preset.flet] version), or none at all:
+    # flet pack gets its client its own way, and the script never stops a build that would work
+    monkeypatch.delenv("FLET_VIEW_PATH")
+    monkeypatch.setitem(sys.modules, "flet_desktop", types.ModuleType("flet_desktop"))
+    assert tool.main(["5"]) == 0
+    monkeypatch.setitem(sys.modules, "flet_desktop", None)  # `import flet_desktop` raises ImportError
+    assert tool.main(["5"]) == 0 and slept == []
+
+
+def test_flet_client_tool_reads_a_failure_as_the_runner_does() -> None:
+    # The script runs in .venv without the runner: its copy of the rule must not drift from
+    # common.transient (the nuitka and portable downloads), plus the archive a cut download left
+    import http.client
+    import socket
+    import ssl
+    import urllib.error
+    import zlib
+
+    tool = _flet_client_tool()
+    errors: list[BaseException] = [
+        _http_error(500), _http_error(502), _http_error(404), _http_error(403),
+        urllib.error.HTTPError("u", 408, "Request Timeout", None, None),  # type: ignore[arg-type]
+        urllib.error.HTTPError("u", 429, "Too Many Requests", None, None),  # type: ignore[arg-type]
+        urllib.error.URLError(ConnectionRefusedError(111, "Connection refused")),
+        urllib.error.URLError(socket.gaierror(-3, "Temporary failure in name resolution")),
+        urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed")),
+        urllib.error.URLError(ssl.SSLError(1, "EOF occurred in violation of protocol")),
+        urllib.error.URLError(FileNotFoundError(2, "No such file")),
+        urllib.error.URLError("unknown url type: htps"),
+        ConnectionResetError(104, "reset"), TimeoutError("timed out"), http.client.IncompleteRead(b"", 10),
+        http.client.RemoteDisconnected("closed"), OSError(28, "No space left on device"),
+        PermissionError(13, "denied"), ValueError("unknown url type"),
+    ]  # fmt: skip
+    for e in errors:
+        assert tool.transient(e) == common.transient(e), repr(e)
+    assert [common.transient(e) for e in errors] == [
+        True, True, False, False, True, True, True, True, False, True, False, False,
+        True, True, True, True, False, False, False,
+    ]  # fmt: skip
+    for unreadable in (EOFError("Compressed file ended"), zlib.error("bad"), __import__("tarfile").ReadError("x"), __import__("zipfile").BadZipFile("x")):
+        assert tool.transient(unreadable) and not common.transient(unreadable)
+
+
+def test_flet_client_tool_runs_as_a_script(tmp_path: Path) -> None:
+    # As methods/exe starts it: `python flet_client.py PAUSE...`, flet_desktop from .venv
+    fake = tmp_path / "flet_desktop"
+    fake.mkdir()
+    (fake / "__init__.py").write_text(
+        "import os, pathlib, urllib.error\n"
+        "def ensure_client_cached():\n"
+        "    mark = pathlib.Path(os.environ['PT_MARK'])\n"
+        "    if not mark.exists():\n"
+        "        mark.write_text('1')\n"
+        "        raise urllib.error.HTTPError('https://github.com/x', int(os.environ['PT_CODE']), 'boom', None, None)\n"
+        "    return mark\n",
+        encoding="utf-8",
+    )
+    tool = ROOT / ".pytemplate" / "tools" / "flet_client.py"
+    for code, rc in (("500", 0), ("404", 1)):
+        mark = tmp_path / f"mark-{code}"
+        env = {k: v for k, v in os.environ.items() if k != "FLET_VIEW_PATH"}
+        env.update(PYTHONPATH=str(tmp_path), PT_MARK=str(mark), PT_CODE=code)
+        r = subprocess.run([sys.executable, str(tool), "0"], env=env, capture_output=True, text=True, timeout=60)
+        assert r.returncode == rc, r.stderr
+        assert ("trying again in 0 s" in r.stderr) == (code == "500")
+        assert ("HTTP Error 404" in r.stderr) == (code == "404")
 
 
 def test_nuitka_includes_flet_only_for_the_flet_preset(build_dirs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -455,6 +667,7 @@ def test_mypyc_build_asks_msvc_for_english_messages(tmp_path: Path, monkeypatch:
     for module in (mypyc, config, lintc):
         monkeypatch.setattr(module, "SRC", src)
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
+    monkeypatch.setattr(render, "typings_dir", lambda: None)  # this tree has none (a raylib project's is on another drive than tmp_path, maybe)
     monkeypatch.setattr(proc, "find_uv", lambda: "uv")
     seen: list[dict[str, str]] = []
 

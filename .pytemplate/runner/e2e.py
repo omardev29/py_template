@@ -597,7 +597,11 @@ def lock_problems(lock: Path, pins: Mapping[str, str], template_lock: Path | Non
 
 def project_state(root: Path) -> dict[str, str]:
     """{path relative to root: sha256} of the files a round trip must restore (STATE_SKIP_*:
-    no environments, builds, caches or .git). A missing root is empty."""
+    no environments, builds, caches or .git), each read as render reads a generated file: without
+    a UTF-8 BOM and with CRLF as LF (render._norm). A Windows checkout holds CRLF, render leaves a
+    file whose content does not change and writes LF, so a round trip of mode gave back with LF
+    the generated files it rewrote twice, the same files to git and the runner: every --full run
+    failed on Windows. A missing root is empty."""
     state: dict[str, str] = {}
     for folder, dirs, files in os.walk(root):
         dirs[:] = sorted(d for d in dirs if d not in STATE_SKIP_DIRS and not d.startswith(".venv"))
@@ -606,7 +610,10 @@ def project_state(root: Path) -> dict[str, str]:
                 continue
             path = Path(folder, name)
             key = path.relative_to(root).as_posix()
-            state[key] = "-> " + os.readlink(path) if path.is_symlink() else hashlib.sha256(path.read_bytes()).hexdigest()
+            if path.is_symlink():
+                state[key] = "-> " + os.readlink(path)
+            else:
+                state[key] = hashlib.sha256(path.read_bytes().removeprefix(b"\xef\xbb\xbf").replace(b"\r\n", b"\n")).hexdigest()
     return state
 
 

@@ -127,6 +127,8 @@ typings/                          project stubs (raylib preset: the corrected ra
 .pytemplate/runner/editors/       vscode.py, nvim.py: editor file generators
 .pytemplate/runner/methods/       exe, portable, pyz, wheel, nuitka, flet (+ common.py)
 .pytemplate/tools/mypyc_build.py  runs INSIDE .venv (needs mypy + setuptools), calls mypycify
+.pytemplate/tools/flet_client.py  runs INSIDE .venv (needs flet_desktop) before flet pack: the
+                                  Flet client into flet_desktop's cache, a transient failure retried
 .pytemplate/tools/mutation_cr.py  Cosmic Ray's side of selftest --mutation (PEP 723; its uv script
                                   lock mutation_cr.py.lock next to it; an environment of its own)
 .pytemplate/templates/            typing/*.toml, vscode/settings.json, nvim/lazy.lua, ci.yml,
@@ -3011,8 +3013,14 @@ Per method:
   `--pyinstaller-build-args=--python-option=X utf8` (one argv item: flet pack forwards each
   value unchanged). It bundles
   the Flutter client (plain PyInstaller would
-  download ~40 MB on first start). `flet` and `flet-desktop` must share a version, else Flet
-  pip-installs `flet-desktop` at runtime, bypassing `uv.lock`.
+  download ~40 MB on first start), from flet_desktop's cache (`~/.flet/client`), which the first
+  build on a machine fills with one download from GitHub and no retry: an HTTP 500 there failed
+  both exe builds of an e2e run (15.1). `exe._flet_pack` first runs `tools/flet_client.py` in flet
+  pack's folder and environment (flet_desktop's own `ensure_client_cached`, so the same flavor,
+  version, `FLET_CLIENT_URL` and cache folder), which tries a transient failure again after each
+  pause of `common.DOWNLOAD_RETRIES` and downloads nothing when the client is cached. `flet` and
+  `flet-desktop` must share a version, else Flet pip-installs `flet-desktop` at runtime, bypassing
+  `uv.lock`.
 - **portable**: `dist/<n>-<b>-portable-<key>/` (no `-<key>` with `runtime = "system"`, which
   bundles no interpreter) with `app/`, `lib/` (`uv pip install --target`), `runtime/` (pruned
   copy of the interpreter's `base_prefix` through `\\?\` extended paths, `portable.long_path`:
@@ -3327,7 +3335,12 @@ Per method:
   download is cached only when it delivered every byte the server announced (Content-Length)
   and the archive reads to its end the way flet_desktop extracts it (`nuitka.archive_problem`:
   zipfile CRCs, or tarfile over gzip and the gzip trailer); a cached archive is checked again
-  at every build and downloaded anew when damaged. 61 MB with UPX; ~25 min build.
+  at every build and downloaded anew when damaged. A failed attempt keeps nothing, and one that
+  may work a moment later (`common.transient`: a 5xx, 408 or 429 answer, a connection refused,
+  reset or timed out, a name lookup that failed, a body cut short; never a 4xx, an untrusted
+  certificate or a local disk error) or a download that is no whole archive is tried again
+  after each pause of `common.DOWNLOAD_RETRIES` (5, 15 and 45 s): GitHub's release downloads
+  answer HTTP 500 for a few seconds at times (15.1). 61 MB with UPX; ~25 min build.
 - **flet** (`flet build`): requires `app.preset == "flet"`. Windows needs Developer Mode, for
   every target (Flutter symlinks the plugins of the Windows desktop flet build turns on there;
   checked in the registry by `methods.flet._developer_mode`) and Visual
@@ -4243,7 +4256,12 @@ short temp tree and unset `NVIM_APPNAME`.
   3.14, made uv replace the `.venv` of a project on another minor with an empty one under the
   running suite, and dozens of later tests failed (a `python.cpython = "3.13"` project).
   `conftest._the_project_environment_stays` fails the test after which the interpreter of
-  `.venv` (or `.venv-wsl`) changed, naming it. A dry run of `mode` asks for changes the
+  `.venv` (or `.venv-wsl`) changed, naming it. A test that builds in tmp_path (`mypyc.BUILD`
+  moved there) gives its tree no `typings/` (`test_mypyc_core.src_tree`, the tests that move it
+  by hand alike) or a compile-time mypy.ini folder in the project (`COMPILE_INI_DIR`): that ini
+  names typings/ relative to its folder (6.2), and on Windows tmp_path may be on another drive
+  than the project, where `os.path.relpath` raises ValueError (dozens of tests failed in every
+  raylib project of the Windows e2e). A dry run of `mode` asks for changes the
   project has not made (`test_paths._another_backend`, `_supports_and_typing`): mode prints only
   real changes, and after `./pyt mode mypyc` or `./pyt mode --typing strict` it said "unchanged".
   So does `test_config_rules.test_mode_edits_a_taplo_formatted_config`: in a project that
@@ -4590,7 +4608,11 @@ short temp tree and unset `NVIM_APPNAME`.
   backend) and a `[preset.*]` option edit (`e2e.OPTION_EDITS` with `config.set_value`, then
   `./pyt apply`: pyproject.toml and uv.lock must follow, `doctor` passes, a second `apply`
   changes nothing). A round trip must give back the project's files (`project_state`: not
-  `.git`, environments, builds, caches). `flet build` is SKIP unless Flutter and (Windows)
+  `.git`, environments, builds, caches; each read as render reads a generated file, without a
+  BOM and with CRLF as LF: a Windows checkout holds CRLF, and the generated files a `mode` round
+  trip rewrote twice came back LF, the same files to git and the runner, which failed every
+  `--full` run on Windows, `test_e2e_plan.test_a_round_trip_that_gives_a_file_back_with_lf_restores_it`).
+  `flet build` is SKIP unless Flutter and (Windows)
   Developer Mode are available; GUI runs are SKIP without a display (Linux uses `xvfb-run`)
   or on Windows/macOS CI. A filter shows what it leaves out (SKIP rows `<b> (not supported)`,
   `build (none selected)`); one that tests nothing in any preset exits 2 before anything is
@@ -4827,7 +4849,9 @@ short temp tree and unset `NVIM_APPNAME`.
   hand; the gate): `./pyt render --check` first, then `setup` and `./pyt selftest` on
   macos and windows-latest (Windows through `pyt.ps1`, `--basetemp` in `RUNNER_TEMP`, git's
   default CRLF checkout), with what the tests look for: MSYS2 with dash
-  and uv copied to `~\.local\bin` (the login-shell test); xonsh 0.24.2 and Neovim v0.12.5; the
+  and uv copied to `~\.local\bin` (the login-shell test, which elsewhere names the folder of the
+  uv it runs with in `UV_INSTALL_DIR`: in a new project's selftest of the Windows e2e, setup-uv's
+  uv is on the process PATH only, which the login shell replaces); xonsh 0.24.2 and Neovim v0.12.5; the
   UPX `upx.find` finds (the pinned download on Windows). Job `uv-floor` (a bare Linux runner):
   setup-uv with `resolution-strategy: lowest` takes the oldest uv the `required-version`
   accepts, checked against `envs.MIN_UV`, then setup and the suite, minus
@@ -5587,6 +5611,15 @@ uv:
   deselects `test_presets.py::test_init_round_trip_through_every_preset_is_byte_identical`
   (13.2). Test: `test_workflows.py::test_what_the_selftest_workflow_reads_by_text_exists`.
   Goes: when `envs.MIN_UV` reaches a uv that writes the same bytes.
+- **uv writes the lock format revision of its own release** (LIMITATION: uv 0.12.22 and newer
+  write `revision = 5`, 0.12.21 and older 3; each reads the other's and leaves a lock that still
+  holds as it is, so the line says which uv last re-locked, not what the lock holds): the last
+  `uv lock` of that same round trip runs on the uv at hand, and next to the template's own lock
+  (revision 3) uv 0.12.23 failed the test on every CI job that takes the newest uv (October 2026).
+  Fix: the test reads uv.lock without its `revision` line (`test_presets._snapshot` with
+  `lock_revision=False`, `LOCK_REVISION`). Test:
+  `test_presets.py::test_a_round_trip_reads_uv_lock_without_the_revision_of_the_uv_that_wrote_it`.
+  Goes: never (uv versions keep meeting in one project).
 - **uv 0.10.12 (the floor) says nothing about a stale lock under `--quiet`** (LIMITATION: it
   prints "The lockfile at `uv.lock` needs to be updated" as plain output, which `--quiet` hides;
   0.12.19 prints it as an `error:`; `-qq` hides every error in any uv): `uv --quiet sync
@@ -6065,6 +6098,23 @@ Flet (flet, flet-desktop, flet pack, flet build):
   `test_the_flet_client_follows_flet_client_url`,
   `test_build_methods.py::test_a_bundled_portable_flet_app_carries_its_desktop_client`. Goes:
   never.
+- **The client comes from GitHub's release downloads in one request, with no retry**
+  (LIMITATION, flet_desktop 1.0.1's `__download_with_progress`: one `urlopen`; GitHub's release
+  downloads answer HTTP 500 for a few seconds at times): `flet pack` fills flet_desktop's cache
+  with that download the first time on a machine, and on October 1, 2026 one HTTP 500 failed both
+  exe builds of the macOS flet e2e at PR 7's merge; the nuitka and portable builds' own download
+  stopped at its first failure too. Fix: `exe._flet_pack` runs `tools/flet_client.py` first
+  (flet_desktop's own `ensure_client_cached`, in flet pack's folder and environment), which tries
+  a transient failure again after each pause of `common.DOWNLOAD_RETRIES`, and
+  `nuitka._flet_client_archive` does the same (`common.transient`) (10). Test:
+  `test_build_methods.py::test_flet_pack_gets_the_flet_client_first_in_its_own_folder`,
+  `test_workarounds.py::test_flet_pack_gets_its_client_again_after_a_transient_failure`,
+  `test_flet_pack_never_waits_for_a_client_download_that_cannot_work`,
+  `test_flet_client_tool_reads_a_failure_as_the_runner_does`,
+  `test_flet_client_tool_runs_as_a_script`,
+  `test_a_transient_flet_client_download_failure_is_tried_again`,
+  `test_a_flet_client_download_that_cannot_work_is_never_tried_again`. Goes: the script when
+  flet_desktop retries a transient failure itself; the runner's own retries never.
 - **flet_desktop names the client it looks for from the machine and folder the app runs in**
   (LIMITATION, Flet 1.0.1): on Linux `flet-linux-<distro>[-light]-<arch>.tar.gz`, the distro from
   the user's glibc bracket (`FLET_LINUX_DISTRO` overrides it) and the flavor from
@@ -7352,6 +7402,11 @@ Code coupling (rename together):
   `mypyc_build.extra_cflags`/`compiler_type` <-> the wheel's `SETUP_PY`
   (`test_wheel_setup_py_adds_the_same_flags_as_the_stage`); `mypyc.COMPILER_ENV` <-> the
   variables setuptools' `configure_system` reads.
+- `tools/flet_client.transient` <-> `methods/common.transient`, plus the archive errors of a cut
+  download (the script runs in `.venv`, without the runner;
+  `test_flet_client_tool_reads_a_failure_as_the_runner_does`); it calls flet_desktop's
+  `ensure_client_cached`, as flet_cli's `get_flet_bin_path` does, and skips it for an existing
+  `FLET_VIEW_PATH`, as that function does.
 - `envs.MIN_UV` <-> the presets' `python.pypy` pin and default `python.cpython`, and the newest
   uv flag the runner uses (7); `hooks.launcher_of` <-> `hooks.sh_literal`; `cmd_env._msvc`
   <-> setuptools' `_find_vc2017` component choice (`test_msvc_component_matches_setuptools`)

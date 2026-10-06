@@ -30,7 +30,7 @@ from runner import cmd_build, config, envs, mypyc, presets, proc, upx  # noqa: E
 from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import common, exe, nuitka  # noqa: E402
-from runner.project import ROOT, SRC  # noqa: E402
+from runner.project import ROOT, SRC, TOOLS  # noqa: E402
 from runner.ui import PytError  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
@@ -286,6 +286,8 @@ def _flet_pack(sandbox: Path, monkeypatch: pytest.MonkeyPatch, cfg: Config, back
         # What flet pack 1.0.1 writes: PyInstaller's output into <cwd>/<--distpath>, then (Linux)
         # a desktop entry next to it whose Exec is the absolute path of the executable
         assert cwd is not None
+        if args[:2] != ["flet", "pack"]:
+            return  # the Flet client fetched first (tools/flet_client.py)
         dist = cwd / args[args.index("--distpath") + 1]
         name = cfg.app.name
         (dist / name).mkdir(parents=True)
@@ -303,6 +305,19 @@ def _flet_pack(sandbox: Path, monkeypatch: pytest.MonkeyPatch, cfg: Config, back
     assert out == sandbox / "dist" / f"{cfg.app.name}-{backend}-exe" and (out / cfg.app.name).is_dir()
     assert rec.calls[-1][1] == sandbox / "build" / "flet-pack" / backend  # flet pack wipes <cwd>/build
     return rec
+
+
+def test_flet_pack_gets_the_flet_client_first_in_its_own_folder(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # flet pack downloads the Flet client (flet_desktop.ensure_client_cached) with one request
+    # and no retry: an HTTP 500 of GitHub's release download failed both exe builds of the e2e
+    # at PR 7's merge (macOS). tools/flet_client.py fetches it first, retrying, in flet pack's
+    # own folder and environment, so flet_desktop picks the same client and cache folder
+    rec = _flet_pack(sandbox, monkeypatch, _flet_cfg(), "cpython", windows=False, macos=False)
+    assert len(rec.calls) == 2
+    (fetch, fetch_cwd, fetch_env), (pack, pack_cwd, _) = rec.calls
+    assert fetch == ["python", str(TOOLS / "flet_client.py"), *(f"{p:g}" for p in common.DOWNLOAD_RETRIES)]
+    assert pack[:2] == ["flet", "pack"] and fetch_cwd == pack_cwd == sandbox / "build" / "flet-pack" / "cpython"
+    assert fetch_env == {}  # the caller's own FLET_* variables, as flet pack gets them
 
 
 @pytest.mark.parametrize("backend", ["cpython", "mypyc"])

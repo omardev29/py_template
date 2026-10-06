@@ -960,7 +960,10 @@ compiled modules (plus `deploy.exe.hidden_imports`), `src/assets/`, the icon and
 folder on every start; `onedir` starts faster.
 
 The flet preset uses `flet pack` instead: PyInstaller plus Flet's Flutter client inside the
-executable (with plain PyInstaller the app would download about 40 MB at first start). Its
+executable (with plain PyInstaller the app would download about 40 MB at first start). The first
+build on a machine downloads that client once from GitHub into `~/.flet/client`; a failure that
+may not happen again (GitHub's HTTP 500 for a few seconds, a dropped connection) is tried again
+after 5, 15 and 45 seconds. Its
 onedir build is a flat folder on Windows (`<name>.exe` next to its files) and keeps
 PyInstaller's `_internal/` on Linux; on macOS `flet pack` always builds an `.app`. On Linux it
 also writes `<name>.desktop` into `dist/<name>-<backend>-exe/`, a desktop entry whose `Exec` is
@@ -1131,7 +1134,8 @@ without them, so the build stops there too (exit 2), as exe's does ([exe](#exe))
   client archive is bundled, as `flet pack` does. The first build downloads it once into
   `.build/flet-client/` from GitHub, or from `FLET_CLIENT_URL` when you set it (Flet's own
   variable, for a mirror). A download cut short is refused, never cached, and a damaged cached
-  archive is downloaded again.
+  archive is downloaded again; a failed download that may work a moment later (an HTTP 500, a
+  dropped connection, a download cut short) is tried again after 5, 15 and 45 seconds.
 
 ### flet build
 
