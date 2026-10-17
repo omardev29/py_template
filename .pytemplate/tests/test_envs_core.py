@@ -425,7 +425,9 @@ def test_ensure_python_never_takes_a_prerelease(monkeypatch: pytest.MonkeyPatch,
         return pytest.fail(f"uv {argv}")  # never installs it
 
     monkeypatch.setattr(envs, "uv", fake)
-    monkeypatch.setattr(envs.proc, "output", lambda argv, **kw: "3.15.0rc2\n" if argv[0] == "/uv/cpython-3.15/bin/python3.15" else pytest.fail(argv))
+    # ensure_python hands the interpreter on as a Path: \uv\cpython-3.15\... on Windows
+    python = Path("/uv/cpython-3.15/bin/python3.15")
+    monkeypatch.setattr(envs.proc, "output", lambda argv, **kw: "3.15.0rc2\n" if Path(argv[0]) == python else pytest.fail(str(argv)))
     with pytest.raises(PytError) as e:
         envs.ensure_python("3.15")
     assert e.value.code == 3

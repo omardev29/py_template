@@ -5359,21 +5359,24 @@ def test_flet_build_pyproject_points_at_the_staged_app(extra: str, expected: dic
 
 
 def test_flet_build_pins_the_dart_packages_flets_template_leaves_loose() -> None:
-    """Flet 1.0.1's build template overrides jni to 1.0.0 but leaves jni_flutter free, and
-    jni_flutter 1.0.4 (October 1, 2026) declares jni ^1.0.0 while its code needs 1.1.0: every
-    Android build stopped in Dart's compile ("The generated bindings expect package:jni ^1.1.0,
-    but 1.0.x was imported"). The build project pins it through [tool.flet.flutter.pubspec]
-    dependency_overrides, which flet merges into pubspec.yaml; the project's own entries win."""
+    """Flet 1.0.1's build template overrides jni to 1.0.0, and the Android packages whose new
+    releases carry bindings for jni 1.1 stopped every Android build in Dart's compile ("The
+    generated bindings expect package:jni ^1.1.0, but 1.0.x was imported"): jni_flutter 1.0.4
+    (October 1, 2026, which declared jni ^1.0.0) and shared_preferences_android 2.5.0 (October
+    17, a dependency of flet's shared_preferences). The build project holds them at their last
+    releases for jni 1.0 through [tool.flet.flutter.pubspec] dependency_overrides, which flet
+    merges into pubspec.yaml; the project's own entries win."""
     import tomllib
 
     from runner.methods import flet
 
+    pinned = {"jni_flutter": "1.0.3", "shared_preferences_android": "2.4.28"}
     head = '[project]\nname = "a"\nversion = "1"\n\n'
     tool = tomllib.loads(flet.build_pyproject(make({}), tomllib.loads(head), []))["tool"]["flet"]
-    assert tool["flutter"]["pubspec"]["dependency_overrides"] == {"jni_flutter": "1.0.3"}
+    assert tool["flutter"]["pubspec"]["dependency_overrides"] == pinned
     own = head + '[tool.flet.flutter.pubspec.dependency_overrides]\njni_flutter = "1.0.2"\nshimmer = "3.0.0"\n'
     tool = tomllib.loads(flet.build_pyproject(make({}), tomllib.loads(own), []))["tool"]["flet"]
-    assert tool["flutter"]["pubspec"]["dependency_overrides"] == {"jni_flutter": "1.0.2", "shimmer": "3.0.0"}
+    assert tool["flutter"]["pubspec"]["dependency_overrides"] == {**pinned, "jni_flutter": "1.0.2", "shimmer": "3.0.0"}
     with pytest.raises(PytError, match="dependency_overrides must be a table"):
         flet.build_pyproject(make({}), tomllib.loads(head + "[tool.flet.flutter]\npubspec = 1\n"), [])
 

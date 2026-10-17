@@ -38,9 +38,10 @@ STAGE_APP = "src"  # build() stages the app in <work>/src: [tool.flet.app] path 
 DESKTOP_CLIENT = "flet-desktop"  # the client `flet run` and `flet pack` start: no flet build app does
 # Dart packages the build's Flutter project must get at these versions ([tool.flet.flutter.pubspec]
 # dependency_overrides, unless the project sets its own): Flet 1.0.1's build template overrides
-# jni to 1.0.0 but not jni_flutter, whose 1.0.4 (October 1, 2026) declares jni ^1.0.0 and needs
-# 1.1.0, so every Android build failed in Dart's compile (CLAUDE.md 15.1)
-FLUTTER_OVERRIDES = {"jni_flutter": "1.0.3"}
+# jni to 1.0.0, and a release of a package whose bindings need jni 1.1 (jni_flutter 1.0.4 on
+# October 1, 2026, shared_preferences_android 2.5.0 on October 17) stopped every Android build in
+# Dart's compile: each is held at its last release that needs no more (CLAUDE.md 15.1)
+FLUTTER_OVERRIDES = {"jni_flutter": "1.0.3", "shared_preferences_android": "2.4.28"}
 # Where flet build (flet_cli 1.0.1, its package step) keeps the hash of the package step's
 # arguments, the build project's requirement lines among them, relative to the folder it builds:
 # when they did not change it passes --skip-site-packages to serious_python, which keeps the

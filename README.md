@@ -820,13 +820,16 @@ simplify, vectorise or even delete the loop. `mypy-extensions` is already a runt
 every project (`pyproject.toml`): `from mypy_extensions import i64`. Interpreted code (the cpython
 and pypy backends) sees `i64` as a plain `int`.
 
-100 million iterations of `x += 1` (Linux x86_64, gcc 13, CPython 3.14, mypyc 2.3.1, Nuitka
-4.2.2; MSVC on Windows not measured):
+100 million iterations of `x += 1` (Linux x86_64, gcc 13, CPython 3.14 and 3.15.0, PyPy 3.11.15,
+mypyc 2.3.1, Nuitka 4.2.2 and 4.3.0; MSVC on Windows not measured):
 
 | How it runs | Time | The loop |
 |---|---|---|
 | CPython 3.14, interpreted | ~1.8 s | runs |
-| Nuitka (default, `--lto=yes` or PGO) | ~1.3-1.9 s | runs (Python objects and libpython calls) |
+| CPython 3.15, interpreted (uv's builds start with the JIT off) | ~1.7 s | runs |
+| CPython 3.15, its JIT turned on | ~1.5 s | runs |
+| PyPy 3.11 (the pypy backend) | ~0.06 s | runs, in machine code after its first ~1000 iterations (the JIT's warm-up is in the time) |
+| Nuitka (default, `--lto=yes` or PGO) | ~0.9-1.9 s | runs (Python objects and libpython calls) |
 | mypyc, `int`, `compile.opt_level` "1"-"3" | ~0.13-0.18 s | runs |
 | mypyc, `int`, `compile.opt_level = "0"` | ~3.4 s | runs (slower than CPython: debug only) |
 | mypyc, `i64`, `compile.opt_level` "2"/"3" | ~0 s | removed: the function became `return n` |
@@ -844,6 +847,9 @@ When to use it:
   with `n: i64`, or `range(i64(n))`. With `n: int` the index is a tagged int and the loop stays
   (158 ms for 1e8 in the same test, even with `x: i64`). Constant bounds (`range(1, 100_000_001)`)
   are also cheap.
+- Name the index, even when the body never reads it: mypyc 2.3.1 types `_` as `object`, so
+  `for _ in range(n)` boxes every index into a Python int (0.81 s for the `i64` loop above, 0.97 s
+  for `int`, against ~0 s and 0.17 s with `for i in range(n)`).
 
 What changes when compiled (checked with mypyc 2.3.1; interpreted code keeps Python's
 unlimited ints, so the cpython/pypy backends never show these):
