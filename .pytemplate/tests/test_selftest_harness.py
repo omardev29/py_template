@@ -53,19 +53,32 @@ class FakeUvRun:
 
 
 @pytest.mark.parametrize(
-    ("pytest_code", "mypy_code", "expected"),
-    [(0, 0, 0), (1, 0, 1), (0, 1, 1), (1, 1, 1), (5, 0, 5), (2, 1, 2)],  # pytest's own code first (5: nothing collected)
+    ("pytest_code", "mypy_codes", "expected"),
+    # pytest's own code first (5: nothing collected), then the first mypy that failed
+    [(0, (0, 0), 0), (1, (0, 0), 1), (0, (1, 0), 1), (0, (0, 1), 1), (1, (1, 1), 1), (5, (0, 0), 5), (2, (1, 0), 2)],
 )
-def test_plain_selftest_fails_when_pytest_or_mypy_fails(monkeypatch: pytest.MonkeyPatch, pytest_code: int, mypy_code: int, expected: int) -> None:
-    fake = FakeUvRun(pytest_code, mypy_code)
+def test_plain_selftest_fails_when_pytest_or_mypy_fails(monkeypatch: pytest.MonkeyPatch, pytest_code: int, mypy_codes: tuple[int, int], expected: int) -> None:
+    fake = FakeUvRun(pytest_code, *mypy_codes)
     monkeypatch.setattr(envs, "uv_run", fake)
     assert cli.cmd_selftest(make(), ["-k", "x"]) == expected
-    (pt_env, pt_argv, pt_check), (my_env, my_argv, my_check) = fake.calls  # mypy runs even after a pytest failure
-    assert pt_env == my_env == envs.tool_env(make()).key and not pt_check and not my_check
+    (pt_env, pt_argv, pt_check), *mypys = fake.calls  # mypy runs even after a pytest failure, and after a mypy one
+    assert pt_env == envs.tool_env(make()).key and not pt_check
     assert pt_argv[:5] == ["python", "-m", "pytest", "-q", "-p"] and pt_argv[-3:] == [str(Path(".pytemplate", "tests")), "-k", "x"]
-    assert my_argv[:3] == ["mypy", "--strict", "--no-incremental"] and "--python-version" in my_argv
-    assert my_argv[my_argv.index("--python-version") + 1] == "3.11"  # the runner's floor
-    assert my_argv[-2:] == [str(TEMPLATE / "runner"), str(TEMPLATE / "pyt.py")]
+    for my_env, my_argv, my_check in mypys:
+        assert my_env == pt_env and not my_check
+        assert my_argv[:3] == ["mypy", "--strict", "--no-incremental"] and "--python-version" in my_argv
+        assert my_argv[-2:] == [str(TEMPLATE / "runner"), str(TEMPLATE / "pyt.py")]
+    # The runner's floor, and python.cpython, which runs every project command: 3.15's ast made a
+    # node 3.11 never does (PEP 798), and rename ended in an internal runner error on a 3.15 project
+    assert [argv[argv.index("--python-version") + 1] for _, argv, _ in mypys] == ["3.11", make().python.cpython]
+
+
+def test_plain_selftest_type_checks_a_project_on_python_3_11_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeUvRun(0, 0)
+    monkeypatch.setattr(envs, "uv_run", fake)
+    cfg: Config = config._build(Config, {"python": {"cpython": "3.11"}}, "")
+    assert cli.cmd_selftest(cfg, []) == 0
+    assert [argv[argv.index("--python-version") + 1] for _, argv, _ in fake.calls[1:]] == ["3.11"]
 
 
 @pytest.mark.parametrize("folder", ["project", "Projects [2026]"])

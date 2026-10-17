@@ -12,6 +12,7 @@ from __future__ import annotations
 import errno
 import importlib
 import os
+import platform
 import re
 import signal
 import sys
@@ -55,7 +56,7 @@ COMMANDS: dict[str, Command] = {
     "mode": Command("cmd_mode", "cmd_mode", "Show or change the mode (backend, supported, typing, editor)", "[BACKEND] [--supports +B|-B|B,B...] [--typing auto|off|warn|strict|mypyc] [--editor pylance|basedpyright]", group="Mode"),
     "render": Command("cmd_mode", "cmd_render", "Regenerate the files derived from pytemplate.toml (.python-version, .mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua, editor.json, ci.yml)", "[--check] [--diff] [--force]", render=False, group="Mode"),
     "rename": Command("rename", "cmd_rename", "Rename the app: src/<pkg>, imports, pytemplate.toml, pyproject.toml, uv.lock", "NEW_NAME [--force]", render=False, group="Mode"),
-    "new": Command("cmd_mode", "cmd_new", "Create a new project from this template", "DIR [--preset P] [--name NAME]", render=False, group="Mode"),
+    "new": Command("cmd_mode", "cmd_new", "Create a new project from this template (--clean: without the example code)", "DIR [--preset P] [--name NAME] [-c|--clean]", render=False, group="Mode"),
     "install": Command("cmd_install", "cmd_install", "Install the `pyt` command for use in any folder (run it in a clone of the template)", render=False, group="Mode"),
     "uninstall": Command("cmd_install", "cmd_uninstall", "Remove the `pyt` command and the copy of the template that install made", render=False, group="Mode"),
     # development
@@ -83,7 +84,7 @@ INTERNAL: dict[str, Command] = {
     # root with it (./pyt __init script --name myapp --force). Users pick a preset with `new`.
     # render=False: it renders with --force at its end, and rendering the copied configuration
     # first only warned about the source project's hand-edited files inside the output of `new`.
-    "__init": Command("cmd_mode", "cmd_init", "Replace src/, tests/, typings/ and pytemplate.toml with a preset's skeleton", "PRESET [--name NAME] [--force]", render=False),
+    "__init": Command("cmd_mode", "cmd_init", "Replace src/, tests/, typings/ and pytemplate.toml with a preset's skeleton", "PRESET [--name NAME] [--force] [-c|--clean]", render=False),
 }
 
 EXAMPLES = """\
@@ -338,12 +339,18 @@ def cmd_selftest(cfg: object, args: list[str]) -> int:
     code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", *suite, *args], cwd=ROOT, check=False, extra_env=no_app_settings).returncode
     if any(a in SELFTEST_INFO_FLAGS for a in args):
         return code  # pytest printed its help or version: no mypy of the whole runner after it
-    typed = envs.uv_run(
-        tool,
-        ["mypy", "--strict", "--no-incremental", "--python-version", "3.11", "--config-file", TEMPLATE / "tests" / "mypy-runner.ini", TEMPLATE / "runner", TEMPLATE / "pyt.py"],
-        check=False,
-    ).returncode
-    return code or typed
+    # The runner as Python 3.11 reads it (its floor), and as python.cpython does, which runs every
+    # project command (_restart): 3.15's ast gave rename a node 3.11 never makes (PEP 798), and only
+    # a mypy at 3.15 saw it
+    typed = [
+        envs.uv_run(
+            tool,
+            ["mypy", "--strict", "--no-incremental", "--python-version", version, "--config-file", TEMPLATE / "tests" / "mypy-runner.ini", TEMPLATE / "runner", TEMPLATE / "pyt.py"],
+            check=False,
+        ).returncode
+        for version in dict.fromkeys(("3.11", cfg.python.cpython))
+    ]
+    return code or next((c for c in typed if c), 0)
 
 
 def _parse_globals(argv: list[str]) -> list[str]:
@@ -569,6 +576,11 @@ def _runs_on_python_cpython(version: str) -> bool:
         return False
 
 
+def _running_prerelease() -> str:
+    """The version of the Python this runner runs on when it is a pre-release ("3.15.0rc2"), else ""."""
+    return "" if sys.version_info.releaselevel == "final" else platform.python_version()
+
+
 def _restart(argv: list[str], rest: list[str]) -> int | None:
     """Run the command on python.cpython when the launchers started this runner on another
     Python (_runs_on_python_cpython; project.launcher_python: the project has no environment yet,
@@ -580,9 +592,15 @@ def _restart(argv: list[str], rest: list[str]) -> int | None:
     if not _started_by_uv():
         return None
     version = _python_needed(rest)
-    if version is None or _runs_on_python_cpython(version):
+    if version is None:
         return None
     from . import envs
+
+    if _runs_on_python_cpython(version):
+        release = _running_prerelease()
+        if release:  # the launchers followed .python-version to a pre-release uv had (envs.prerelease_problem)
+            raise PytError(envs.prerelease_problem(version, release, installed=True), 3)
+        return None
 
     python = envs.ensure_python(version)
     flags = ["-s", *(["-B"] if sys.dont_write_bytecode else [])]  # no user site: none in uv's environment either

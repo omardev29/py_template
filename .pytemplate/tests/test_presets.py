@@ -99,8 +99,8 @@ def _config(data: dict[str, Any]) -> Config:
     return cfg
 
 
-def _skeleton_config(preset: str, name: str) -> Config:
-    return _config(tomllib.loads(presets.skeleton(preset, name)["pytemplate.toml"].decode("utf-8")))
+def _skeleton_config(preset: str, name: str, *, clean: bool = False) -> Config:
+    return _config(tomllib.loads(presets.skeleton(preset, name, clean=clean)["pytemplate.toml"].decode("utf-8")))
 
 
 def _child_env(tmp: Path) -> dict[str, str]:
@@ -179,11 +179,12 @@ def test_every_preset_ships_the_same_conftest() -> None:
         assert (ROOT / "tests" / "conftest.py").read_bytes().replace(b"\r\n", b"\n") == copies["script"]
 
 
+@pytest.mark.parametrize("clean", [False, True], ids=["example", "clean"])
 @pytest.mark.parametrize("preset", PRESETS)
 @pytest.mark.parametrize("name", NAMES)
-def test_skeleton_renders_every_token(preset: str, name: str) -> None:
+def test_skeleton_renders_every_token(preset: str, name: str, clean: bool) -> None:
     pkg = name.replace("-", "_").lower()
-    files = presets.skeleton(preset, name)
+    files = presets.skeleton(preset, name, clean=clean)
     assert {"pytemplate.toml", "src/main.py", f"src/{pkg}/__init__.py", "tests/conftest.py"} <= set(files)
     for rel, data in files.items():
         assert not TOKEN.search(rel), rel
@@ -192,17 +193,20 @@ def test_skeleton_renders_every_token(preset: str, name: str) -> None:
         assert "\r\n" not in text, rel
 
 
+@pytest.mark.parametrize("clean", [False, True], ids=["example", "clean"])
 @pytest.mark.parametrize("preset", PRESETS)
 @pytest.mark.parametrize("name", NAMES)
-def test_skeleton_config_is_valid_and_names_the_app(preset: str, name: str) -> None:
-    cfg = _skeleton_config(preset, name)
+def test_skeleton_config_is_valid_and_names_the_app(preset: str, name: str, clean: bool) -> None:
+    cfg = _skeleton_config(preset, name, clean=clean)  # validated with the builtins: buttons and deps name what exists
     pkg = name.replace("-", "_").lower()
     assert (cfg.app.name, cfg.app.preset, cfg.pkg) == (name, preset, pkg)
-    files = presets.skeleton(preset, name)
+    files = presets.skeleton(preset, name, clean=clean)
     assert f"{pkg}.core" in cfg.compile.modules
     for module in cfg.compile.modules:
         path = "src/" + module.replace(".", "/")
         assert f"{path}/__init__.py" in files or f"{path}.py" in files, module
+        # mypyc compiles a module of each entry (an __init__.py alone: "holds no module", every mypyc command fails)
+        assert any(k.startswith(f"{path}/") and k.endswith(".py") and not k.endswith("__init__.py") for k in files) or f"{path}.py" in files, module
     # [preset.<p>] of the skeleton repeats the preset.toml defaults: both are documentation
     assert cfg.preset_options(preset) == presets.load(preset).get("options", {})
 
@@ -216,6 +220,9 @@ def test_preset_toml_is_complete(preset: str) -> None:
     values: list[str] = [*data.get("dependencies", []), *data.get("dev_dependencies", [])]
     for value in data.get("uv", {}).values():
         values += value if isinstance(value, list) else [value]
+    clean = data.get("clean", {})
+    assert set(clean) <= set(presets.CLEAN_KEYS), set(clean)
+    values += [*clean.get("dependencies", []), *clean.get("dev_dependencies", [])]
     for value in values:
         str(value).format_map(opts)  # KeyError: an {option} without a default in [options]
     extra = presets.extra_tables(preset, "My-App")
@@ -234,6 +241,9 @@ def test_preset_toml_is_complete(preset: str) -> None:
         (b"description = 1\n", "'description' must be a string"),
         (b'options = "x"\n', "'options' must be a table"),
         (b"[pyproject]\n", "'pyproject' must be a string"),
+        (b"[clean]\nfiles = []\n", "unknown key 'clean.files'"),
+        (b'[clean]\ndrop = "src/x.py"\n', "'clean.drop' must be a list of strings"),
+        (b"[clean]\ndescription = []\n", "'clean.description' must be a string"),
     ],
 )
 def test_a_broken_preset_toml_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: bytes, message: str) -> None:
@@ -272,15 +282,16 @@ YEAR = re.compile(r"(?<![\d.])(?:19|20)\d\d(?![\d.])")
 COPYRIGHT = re.compile(r"(?i)copyright|\(c\)|\N{COPYRIGHT SIGN}")
 
 
+@pytest.mark.parametrize("clean", [False, True], ids=["example", "clean"])
 @pytest.mark.parametrize("preset", PRESETS)
-def test_no_preset_hard_codes_a_year(preset: str) -> None:
+def test_no_preset_hard_codes_a_year(preset: str, clean: bool) -> None:
     """A year baked into a preset (the flet copyright that `flet build` embeds) goes stale in
     every project created in a later year."""
     raw = (presets.PRESETS / preset / "preset.toml").read_text(encoding="utf-8")
     assert not YEAR.search(raw), f"{preset}/preset.toml: {YEAR.search(raw)}"
     bad = [
         f"{rel}: {line.strip()}"
-        for rel, data in presets.skeleton(preset, "myapp").items()
+        for rel, data in presets.skeleton(preset, "myapp", clean=clean).items()
         for line in data.decode("utf-8").splitlines()
         if COPYRIGHT.search(line) and YEAR.search(line)
     ]
@@ -294,14 +305,15 @@ def test_flet_copyright_names_the_app() -> None:
 
 
 @pytest.mark.skipif(importlib.util.find_spec("ruff") is None, reason="ruff is not installed here")
+@pytest.mark.parametrize("clean", [False, True], ids=["example", "clean"])
 @pytest.mark.parametrize("preset", PRESETS)
-def test_rendered_skeleton_passes_the_precommit_ruff_checks(preset: str, tmp_path: Path) -> None:
+def test_rendered_skeleton_passes_the_precommit_ruff_checks(preset: str, tmp_path: Path, clean: bool) -> None:
     """The pre-commit hook runs `ruff format --check` and ruff with the active profile on the
     staged files: a fresh project must be able to make its first commit (and pass `check`)."""
     failures: list[str] = []
     for i, name in enumerate(NAMES):
         root = tmp_path / str(i)  # not the name: LONG_NAME twice made a path past Windows' MAX_PATH
-        _write(root, presets.skeleton(preset, name))
+        _write(root, presets.skeleton(preset, name, clean=clean))
         data = tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8"))
         variants = {"shipped": data}
         for label, supported in (("py311", ["cpython", "pypy", "mypyc"]), ("py314", ["cpython", "mypyc"])):
@@ -330,8 +342,9 @@ def _name_of_length(n: int) -> str:
 
 
 @pytest.mark.skipif(importlib.util.find_spec("ruff") is None, reason="ruff is not installed here")
+@pytest.mark.parametrize("clean", [False, True], ids=["example", "clean"])
 @pytest.mark.parametrize("preset", PRESETS)
-def test_the_rendered_skeleton_is_formatted_whatever_the_length_of_the_name(preset: str, tmp_path: Path) -> None:
+def test_the_rendered_skeleton_is_formatted_whatever_the_length_of_the_name(preset: str, tmp_path: Path, clean: bool) -> None:
     """An app name has no length limit, and ruff (100 columns) re-wraps a line that holds a long
     one: from 59 characters on, the first commit of a new project was refused by the hook (ruff
     format --check, and I001 for the imports), until `./pyt fmt`. Every length up to past a whole
@@ -340,7 +353,7 @@ def test_the_rendered_skeleton_is_formatted_whatever_the_length_of_the_name(pres
         name = _name_of_length(n)
         assert len(name) == n and config.APP_NAME.fullmatch(name), name
         root = tmp_path / str(n)
-        _write(root, presets.skeleton(preset, name))
+        _write(root, presets.skeleton(preset, name, clean=clean))
         cfg = _config(tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8")))
         (root / "ruff.toml").write_text(render.to_toml(render.ruff_config(cfg, "strict")), encoding="utf-8")
     code_dirs = [f"{n}/{d}" for n in range(1, 105) for d in ("src", "tests")]
@@ -351,6 +364,80 @@ def test_the_rendered_skeleton_is_formatted_whatever_the_length_of_the_name(pres
             lengths = sorted({int(m) for m in re.findall(r"(?<![\w.-])(\d+)[/\\](?:src|tests)[/\\]", r.stdout + r.stderr)})
             failures.append(f"ruff {args[0]} fails for the names of {lengths} characters:\n{(r.stdout + r.stderr)[-4000:]}")
     assert not failures, "\n\n".join(failures)
+
+
+@pytest.mark.parametrize("preset", PRESETS)
+def test_a_clean_skeleton_leaves_the_example_out(preset: str) -> None:
+    """./pyt new --clean: none of the example's files, and the example's pytemplate.toml but for
+    the [tasks] tables and the buttons its [clean] table names (the rest is the preset's)."""
+    spec = presets.load(preset).get("clean", {})
+    full, clean = presets.skeleton(preset, "My-Game"), presets.skeleton(preset, "My-Game", clean=True)
+    assert spec.get("drop"), f"{preset}: [clean] drop lists no file of the example"
+    for entry in spec["drop"]:
+        rel = entry.replace("__pkg__", "my_game")
+        assert rel in full and rel not in clean, rel
+    old, new = (tomllib.loads(files["pytemplate.toml"].decode("utf-8")) for files in (full, clean))
+    for task in spec.get("tasks", []):
+        assert task in old["tasks"] and task not in new["tasks"], task
+        del old["tasks"][task]
+    old["vscode"]["buttons"] = spec.get("buttons", old["vscode"]["buttons"])
+    assert new == old
+    assert full["tests/conftest.py"] == clean["tests/conftest.py"]  # the same in every preset
+    # Nothing of the clean skeleton names what it left out: its imports are of its own files
+    for rel, data in clean.items():
+        if rel.endswith(".py"):
+            for module in _local_imports(rel, data.decode("utf-8"), "my_game"):
+                parts = module.split(".")
+                assert f"src/{'/'.join(parts)}.py" in clean or f"src/{'/'.join(parts)}/__init__.py" in clean, f"{rel} imports {module}"
+
+
+def _local_imports(rel: str, text: str, pkg: str) -> list[str]:
+    """The modules of the app package that the file at `rel` imports (relative imports resolved)."""
+    package = rel.removeprefix("src/").removesuffix(".py").split("/")[:-1]
+    out: list[str] = []
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.Import):
+            out += [a.name for a in node.names if a.name.split(".")[0] == pkg]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                base = ".".join([*package[: len(package) - node.level + 1], *([base] if base else [])])
+            if base.split(".")[0] == pkg:
+                out.append(base)
+    return out
+
+
+@pytest.mark.parametrize(
+    ("toml", "message"),
+    [
+        ('[clean]\ndrop = ["src/__pkg__/nope.py"]\n', "drop names src/__pkg__/nope.py, which files/ does not hold"),
+        ('[clean]\ntasks = ["nope"]\n', "tasks names nope, which files/pytemplate.toml has no [tasks.nope] table for"),
+        ("[clean]\n", "--clean needs its clean/ folder, which is missing (in git?"),
+    ],
+)
+def test_a_clean_table_that_names_nothing_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, toml: str, message: str) -> None:
+    """The [clean] table of a preset is the template's own: one that names a file or a task the
+    skeleton lacks is refused naming it (the tests of every shipped preset run skeleton(clean=True)),
+    and so is a missing clean/ folder: `new` copies the files git tracks, and a clean/ never added
+    gave a project with the example's app.py and tests but no module of the example ("ok")."""
+    (tmp_path / "p" / "files" / "src" / "__pkg__").mkdir(parents=True)
+    if "clean/" not in message:
+        (tmp_path / "p" / "clean").mkdir()
+    (tmp_path / "p" / "files" / "pytemplate.toml").write_text('[tasks.ci]\ndeps = ["test"]\n', encoding="utf-8")
+    (tmp_path / "p" / "preset.toml").write_text('description = "x"\n' + toml, encoding="utf-8")
+    monkeypatch.setattr(presets, "PRESETS", tmp_path)
+    with pytest.raises(PytError, match=re.escape(message)):
+        presets.skeleton("p", "demo", clean=True)
+
+
+def test_the_clean_pytemplate_toml_keeps_every_comment_and_line_ending_style() -> None:
+    """--clean edits the skeleton's pytemplate.toml in place: the comments of the buttons line
+    and of the tables it keeps stay where they were."""
+    for preset in PRESETS:
+        full = presets.skeleton(preset, "demo")["pytemplate.toml"].decode("utf-8").splitlines()
+        clean = presets.skeleton(preset, "demo", clean=True)["pytemplate.toml"].decode("utf-8").splitlines()
+        comments = [line for line in full if line.lstrip().startswith("#")]
+        assert comments == [line for line in clean if line.lstrip().startswith("#")], preset
 
 
 # --- names ------------------------------------------------------------------------------------
@@ -1178,6 +1265,9 @@ def test_new_names_a_repository_git_refuses_and_how_to_let_it(tmp_path: Path, mo
         ("CLAUDE.md", False),
         ("README.md", True),  # the template's page and license: a new project is another program
         ("LICENSE", True),
+        ("install.sh", True),  # the template's one-line installers
+        ("install.ps1", True),
+        ("tools/install.sh", False),
         ("docs/README.md", False),
         (".pytemplate/README.md", False),  # a project's copy of the manual travels on
         (".pytemplate/LICENSE", False),
@@ -1570,7 +1660,7 @@ def _fake_copy(dest: Path) -> None:
     (dest / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
 
 
-def _new_with_a_fake_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset: str) -> Path:
+def _new_with_a_fake_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset: str, *, clean: bool = False) -> Path:
     """`presets.new` with the real copy of this template and `__init` faked (no uv, no network)."""
     calls: list[list[str]] = []
 
@@ -1582,20 +1672,24 @@ def _new_with_a_fake_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prese
     monkeypatch.setattr(proc, "find_uv", lambda: "uv")
     monkeypatch.setattr(presets, "_git_init", lambda dest: None)
     dest = tmp_path / "demo"
-    presets.new(dest, preset, "demo")
-    assert [c[c.index("__init") :][:2] for c in calls if "__init" in c] == [["__init", preset]]
+    presets.new(dest, preset, "demo", clean=clean)
+    inits = [c[c.index("__init") :] for c in calls if "__init" in c]
+    assert [c[:2] for c in inits] == [["__init", preset]]
+    assert ("--clean" in inits[0]) == clean  # the copy's __init writes the skeleton without the example
     return dest
 
 
 @needs_git
 @template_repo
+@pytest.mark.parametrize("clean", [False, True], ids=["example", "clean"])
 @pytest.mark.parametrize("preset", PRESETS)
-def test_new_gives_the_project_its_own_readme_and_description(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_env: None, preset: str) -> None:
+def test_new_gives_the_project_its_own_readme_and_description(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_env: None, preset: str, clean: bool) -> None:
     # The copy used to start with the template's README ("# myapp: multi-backend uv template") and
     # pyproject description, as if the new project were the template
-    dest = _new_with_a_fake_init(tmp_path, monkeypatch, preset)
+    dest = _new_with_a_fake_init(tmp_path, monkeypatch, preset, clean=clean)
     readme = (dest / "README.md").read_text(encoding="utf-8")
-    description = str(presets.load(preset)["description"])
+    description = presets.described(preset, clean=clean)  # --clean: without the example's words (script)
+    assert description == str(presets.load(preset).get("clean" if clean else "", {}).get("description", presets.load(preset)["description"]))
     assert readme.startswith(f"# demo\n\n{description.rstrip('.')}. Made from [py_template](")
     assert "`.pytemplate/README.md`" in readme and "myapp" not in readme and readme.isascii()
     assert tomllib.loads((dest / "pyproject.toml").read_text(encoding="utf-8"))["project"]["description"] == description
@@ -2158,7 +2252,7 @@ def test_new_runs_the_copys_init_on_the_python_cpython_uv_gave(tmp_path: Path, m
     the start (its first `./pyt setup` needs no restart)."""
     calls: list[list[str]] = []
     monkeypatch.setattr(presets, "copy_template", lambda dest: dest.mkdir(parents=True))
-    monkeypatch.setattr(presets, "_make_own", lambda dest, preset, name: None)
+    monkeypatch.setattr(presets, "_make_own", lambda dest, preset, name, **_: None)
     monkeypatch.setattr(presets, "_git_init", lambda dest: None)
     monkeypatch.setattr(proc, "find_uv", lambda: "uv")
     monkeypatch.setattr(proc, "run", lambda argv, **kw: calls.append([str(a) for a in argv]) or subprocess.CompletedProcess(argv, 0, "", ""))
@@ -2456,10 +2550,11 @@ def _left_aside(root: Path) -> list[str]:
     return [p.name for p in root.iterdir() if p.name.startswith(".pytemplate-init-")]
 
 
+@pytest.mark.parametrize("clean", [False, True], ids=["example", "clean"])
 @pytest.mark.parametrize("preset", PRESETS)
-def test_init_converts_the_project(fake: Fake, preset: str) -> None:
-    presets.init(fake.cfg, preset, "Other-Name", force=False)
-    expected = presets.skeleton(preset, "Other-Name")
+def test_init_converts_the_project(fake: Fake, preset: str, clean: bool) -> None:
+    presets.init(fake.cfg, preset, "Other-Name", force=False, clean=clean)
+    expected = presets.skeleton(preset, "Other-Name", clean=clean)
     owned = {p.relative_to(fake.root).as_posix() for d in presets.OWNED_DIRS for p in (fake.root / d).rglob("*") if p.is_file()}
     assert owned == {k for k in expected if k.split("/")[0] in presets.OWNED_DIRS}  # the old skeleton is gone
     for rel, data in expected.items():
@@ -2478,9 +2573,16 @@ def test_init_converts_the_project(fake: Fake, preset: str) -> None:
     assert uv[-1] == ["lock"]
     assert all("--frozen" in c for c in uv if c[0] == "remove")
     assert all("--no-sync" in c for c in uv if c[0] == "add")
+    # --clean: the requirements only the example needs leave the project (script: rich)
+    added = [r for c in uv if c[0] == "add" for r in c[1:] if not r.startswith("-") and not r.endswith(".txt")]
+    removed = [r for c in uv if c[0] == "remove" for r in c[1:] if not r.startswith("-")]
+    deps, dev = presets.dependencies(plan, preset, clean=clean)
+    assert sorted(added) == sorted([*deps, *dev])
+    if clean and preset == "script":
+        assert (deps, dev, removed) == ([], [], ["rich"])
     # the pins of the packages uv.lock does not have yet (the ones it has keep their versions)
     pins = {n: v for n, v in presets.constraints(preset).items() if n not in presets.locked_names(lock=presets.LOCK)}
-    if pins:
+    if pins and added:
         adds = [c for c in uv if c[0] == "add"]
         assert adds and all("--constraints" in c for c in adds)
         pinned = fake.root / adds[0][adds[0].index("--constraints") + 1]  # relative to the root

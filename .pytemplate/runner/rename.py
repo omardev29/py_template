@@ -362,7 +362,7 @@ def _scopes(tree: ast.Module) -> dict[ast.AST, ast.AST]:
             stack.append((first.iter, scope))
             stack += [(first.target, node), *((c, node) for c in first.ifs), *((g, node) for g in rest)]
             parts = (node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,)
-            stack += [(p, node) for p in parts]
+            stack += [(p, node) for p in parts if p is not None]  # 3.15 (PEP 798): {**d for d in ds} has no value
         else:
             stack += [(child, scope) for child in ast.iter_child_nodes(node)]
     return out

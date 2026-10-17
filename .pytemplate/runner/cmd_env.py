@@ -536,6 +536,10 @@ def _python_cpython(cfg: Config, check: Check) -> tuple[bool, Path | None]:
     try:
         found = envs.find_cpython(version)
         if found is not None:
+            release = envs.prerelease_of(found)
+            if release:  # an old uv knows only the release candidate of a new minor (3.15.0rc2)
+                check(False, f"{label}: {found} is CPython {release}, a pre-release", envs.prerelease_problem(version, release, installed=True).split("\n", 1)[1].strip())
+                return True, found
             check(True, f"{label}: {found}")
             return True, found
         if envs.cpython_downloads(version) is False:
@@ -616,7 +620,11 @@ def _environments(cfg: Config, check: Check, env_info: Callable[[envs.PyEnv], di
         if (info := env_info(cp)) is not None:
             platform = str(info.get("platform", ""))
             cc = str(info.get("cc") or "")
-            check(True, f"CPython {info['version']} in {rel(cp.dir)}")
+            release = str(info.get("release") or info["version"])
+            if info.get("final", True):
+                check(True, f"CPython {release} in {rel(cp.dir)}")
+            else:  # interpreter_info's X.Y.Z called 3.15.0rc2 "3.15.0"
+                check(False, f"CPython {release} in {rel(cp.dir)}: a pre-release", f"uv python upgrade {cfg.python.cpython} (update uv first), then ./pyt setup")
     else:
         check(False, f"environment {rel(cp.dir)} is missing", "./pyt setup")
     if cfg.pypy_enabled:

@@ -4,6 +4,7 @@ pyz/portable layouts and bootstraps. No network, no packager: the packager calls
 from __future__ import annotations
 
 import ast
+import dataclasses
 import errno
 import hashlib
 import importlib.machinery
@@ -30,7 +31,7 @@ from runner import cmd_build, config, envs, mypyc, presets, proc, upx  # noqa: E
 from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import common, exe, nuitka  # noqa: E402
-from runner.project import ROOT, SRC, TOOLS  # noqa: E402
+from runner.project import PRESETS, ROOT, SRC, TOOLS  # noqa: E402
 from runner.ui import PytError  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
@@ -73,6 +74,17 @@ def real(data: dict[str, Any]) -> Config:
     template's default, 3.14, is not the interpreter of a project on another minor)."""
     own = config.load(set()).python.cpython
     return make({**data, "python": {"cpython": own, **data.get("python", {})}})
+
+
+def own_python(cfg: Config) -> Config:
+    """`cfg` with this project's python.cpython, as real() gives it: for a Config made elsewhere."""
+    return dataclasses.replace(cfg, python=dataclasses.replace(cfg.python, cpython=config.load(set()).python.cpython))
+
+
+def own_key(os_arch: str) -> str:
+    """A target key of this project's python.cpython ("cp315-windows-x86_64" in a 3.15 project):
+    uv.lock serves no other minor, and a test that reaches cmd_build's check_lock runs the real uv."""
+    return "cp%s-%s" % (config.load(set()).python.cpython.replace(".", ""), os_arch)
 
 
 def fake_app(root: Path, pkg: str = "myapp", *, assets: bool = True) -> Path:
@@ -446,13 +458,13 @@ def test_exe_refuses_a_project_folder_glob_reads_as_a_pattern(no_build: None, mo
         monkeypatch.setattr(common, "ROOT", root)
         monkeypatch.setattr(common, "BUILD", root / ".build")
         with pytest.raises(PytError) as e:
-            cmd_build.cmd_build(make({}), ["cpython", "--method", "exe"])
+            cmd_build.cmd_build(real({}), ["cpython", "--method", "exe"])
         assert e.value.code == 2 and repr(char) in str(e.value) and str(root) in str(e.value)
         assert "PyInstaller would find none of its hooks" in str(e.value) and "--method portable, pyz or wheel" in str(e.value)
     for folder in ("games 2026", "app$v2", "x]y"):  # nothing glob reads as a pattern: the build goes on
         monkeypatch.setattr(common, "BUILD", tmp_path / folder / "proj" / ".build")
         with pytest.raises(AssertionError, match="went past"):
-            cmd_build.cmd_build(make({}), ["cpython", "--method", "exe"])
+            cmd_build.cmd_build(real({}), ["cpython", "--method", "exe"])
 
 
 @pytest.mark.parametrize("preset", ["script", "flet"])
@@ -657,12 +669,15 @@ def test_nuitka_names_a_missing_icon_before_it_runs(sandbox: Path, monkeypatch: 
 
 # Runs in an environment with the pinned Nuitka, in the stage (Nuitka's cwd): its own option
 # parsing of the data options nuitka.build passes, then its own collection of the data files. The
-# launching process's helper that nuitka/__main__.py installs is given its "no parent" answer.
+# launching process's helper that nuitka/__main__.py installs is given its "no parent" answer, and
+# the plugin hooks are set up first, as __main__.py does (4.3's parseArgs redacts through them).
 _NUITKA_DATA_FILES = r"""
 import json, sys
 import nuitka
 nuitka.getLaunchingNuitkaProcessEnvironmentValue = lambda name: None
 sys.argv = ["nuitka", "--mode=standalone", *sys.argv[1:], "main.py"]
+from nuitka.plugins.Plugins import setupHooks
+setupHooks()
 from nuitka.options import Options
 Options.parseArgs()
 from nuitka.freezer import IncludedDataFiles
@@ -789,30 +804,41 @@ def test_nuitka_pin_supports_the_default_python() -> None:
     assert nuitka.NUITKA_PYTHON.count(".") == 1
 
 
-@pytest.mark.parametrize("extra", [[], ["--experimental=python3.15"], ["--experimental", "python3.15"]])
+NEWER_THAN_NUITKA = "3.%d" % (nuitka._minor(nuitka.NUITKA_PYTHON)[1] + 1)  # 3.16 for nuitka==4.3
+
+
+@pytest.mark.parametrize("extra", [[], [f"--experimental=python{NEWER_THAN_NUITKA}"], ["--experimental", f"python{NEWER_THAN_NUITKA}"]])
 def test_nuitka_python_newer_than_the_pin_is_refused_before_any_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra: list[str]) -> None:
-    # nuitka==4.2.2 stops with FATAL on CPython 3.15 after the checks and the mypyc compile
+    # nuitka==4.2.2 stopped with FATAL on CPython 3.15 after the checks and the mypyc compile, and 4.3 on 3.16
     def must_not_run(*_a: Any, **_k: Any) -> Any:
         raise AssertionError("the build went ahead")
 
     monkeypatch.setattr(cmd_build, "run_checks", must_not_run)
     monkeypatch.setattr(cmd_build, "payload", must_not_run)
-    monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)  # uv would download a CPython 3.15
+    monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)  # uv would download that CPython
     # nuitka.check_options refuses a project folder SCons would expand (app$v2), or one glob reads
     # as a pattern (games [2026]): not this test's
     monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")
     monkeypatch.setattr(common, "BUILD", tmp_path / ".build")
-    cfg = make({"python": {"cpython": "3.15"}})
+    cfg = make({"python": {"cpython": NEWER_THAN_NUITKA}})
     if not extra:
         with pytest.raises(PytError) as e:
             cmd_build.cmd_build(cfg, ["cpython", "--method", "nuitka"])
         assert e.value.code == 3
-        assert nuitka.NUITKA in str(e.value) and "nuitka.py" in str(e.value) and "3.15" in str(e.value)
+        assert nuitka.NUITKA in str(e.value) and "nuitka.py" in str(e.value) and NEWER_THAN_NUITKA in str(e.value)
         return
     # Nuitka's own opt-in skips the check (then the checks run: the stand-in stops there)
     with pytest.raises(AssertionError, match="went ahead"):
         cmd_build.cmd_build(cfg, ["cpython", "--method", "nuitka", *extra])
-    nuitka.check_python(make({"python": {"cpython": "3.15"}}), extra)
+    nuitka.check_python(make({"python": {"cpython": NEWER_THAN_NUITKA}}), extra)
+
+
+def test_nuitka_pin_supports_every_python_new_projects_get() -> None:
+    # A preset whose new projects get a CPython the pinned Nuitka refuses (3.15 with 4.2.2) has no
+    # --method nuitka: every preset's python.cpython must be one NUITKA_PYTHON covers
+    for preset in sorted(p.name for p in PRESETS.iterdir() if (p / "preset.toml").is_file()):
+        version = presets.preset_python(preset)
+        assert nuitka._minor(version) <= nuitka._minor(nuitka.NUITKA_PYTHON), (preset, version)
 
 
 def test_nuitka_failure_names_the_pin(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -913,7 +939,7 @@ def test_nuitka_options_config_accepts_what_pgo_needs() -> None:
 def test_nuitka_pgo_refuses_mypyc_and_macos_before_any_work(no_build: None, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
     monkeypatch.setattr(proc, "DRY_RUN", dry_run)
     monkeypatch.setattr(nuitka, "IS_MACOS", False)
-    cfg = make({**CONSOLE_APP, "deploy": {"nuitka": {"pgo": True}}})
+    cfg = real({**CONSOLE_APP, "deploy": {"nuitka": {"pgo": True}}})
     with pytest.raises(PytError) as e:
         cmd_build.cmd_build(cfg, ["mypyc", "--method", "nuitka"])
     assert e.value.code == 2 and "mypyc backend" in str(e.value) and "ImportError" in str(e.value) and "reports success" in str(e.value)
@@ -923,7 +949,7 @@ def test_nuitka_pgo_refuses_mypyc_and_macos_before_any_work(no_build: None, monk
     assert e.value.code == 2 and "macOS" in str(e.value) and "profdata" in str(e.value)
     # Without pgo neither rule applies (the stand-in stops at the checks)
     with pytest.raises(AssertionError, match="went past"):
-        cmd_build.cmd_build(make(CONSOLE_APP), ["mypyc", "--method", "nuitka"])
+        cmd_build.cmd_build(real(CONSOLE_APP), ["mypyc", "--method", "nuitka"])
 
 
 def test_nuitka_build_itself_refuses_pgo_with_mypyc(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -949,12 +975,12 @@ def test_nuitka_refuses_a_project_folder_scons_would_expand(no_build: None, monk
         monkeypatch.setattr(nuitka, "ROOT", root)
         monkeypatch.setattr(nuitka, "BUILD", root / ".build")
         with pytest.raises(PytError) as e:
-            cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+            cmd_build.cmd_build(real({}), ["cpython", "--method", "nuitka"])
         assert e.value.code == 2 and repr(token) in str(e.value) and "--method exe, portable or pyz" in str(e.value)
     for folder in ("price$1", "cash$"):  # a '$' SCons leaves as it is: the build goes on
         monkeypatch.setattr(nuitka, "BUILD", tmp_path / folder / "proj" / ".build")
         with pytest.raises(AssertionError, match="went past"):
-            cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+            cmd_build.cmd_build(real({}), ["cpython", "--method", "nuitka"])
 
 
 # Run with the pinned Nuitka: what the glob of DataFilesPlugin (a data-files pattern of Nuitka's
@@ -1005,12 +1031,12 @@ def test_nuitka_refuses_a_project_folder_glob_reads_as_a_pattern(no_build: None,
         monkeypatch.setattr(common, "ROOT", root)
         monkeypatch.setattr(common, "BUILD", root / ".build")
         with pytest.raises(PytError) as e:
-            cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+            cmd_build.cmd_build(real({}), ["cpython", "--method", "nuitka"])
         assert e.value.code == 2 and repr(char) in str(e.value) and str(root) in str(e.value)
         assert "package data its configuration names" in str(e.value) and "--method portable, pyz or wheel" in str(e.value)
     monkeypatch.setattr(common, "BUILD", tmp_path / "x 1" / "proj" / ".build")  # nothing glob reads as a pattern
     with pytest.raises(AssertionError, match="went past"):
-        cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+        cmd_build.cmd_build(real({}), ["cpython", "--method", "nuitka"])
 
 
 def test_nuitka_build_itself_refuses_a_project_folder_glob_reads_as_a_pattern(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1027,11 +1053,11 @@ def test_nuitka_build_itself_refuses_a_project_folder_glob_reads_as_a_pattern(sa
 def test_nuitka_dry_run_shows_the_flags(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(proc, "DRY_RUN", True)
     monkeypatch.setattr(nuitka, "IS_MACOS", False)
-    assert cmd_build.cmd_build(make({}), ["--method", "nuitka", "--no-check", "--report=r.xml"]) == 0
+    assert cmd_build.cmd_build(real({}), ["--method", "nuitka", "--no-check", "--report=r.xml"]) == 0
     err = capsys.readouterr().err
     assert "would output dist/myapp-cpython-nuitka*" in err and "  Nuitka options: --lto=auto --report=r.xml" in err
     assert "experimental" not in err
-    cfg = make({**CONSOLE_APP, "deploy": {"nuitka": {"lto": "yes", "pgo": True, "pgo_args": ["--frames", "10", "a b"]}}})
+    cfg = real({**CONSOLE_APP, "deploy": {"nuitka": {"lto": "yes", "pgo": True, "pgo_args": ["--frames", "10", "a b"]}}})
     assert cmd_build.cmd_build(cfg, ["--method", "nuitka", "--no-check"]) == 0
     err = capsys.readouterr().err
     assert "  Nuitka options: --lto=yes --pgo-c '--pgo-args=--frames 10 '\"'\"'a b'\"'\"''" in err
@@ -3646,11 +3672,13 @@ def test_build_rejects_arguments_the_method_would_ignore(no_build: None, monkeyp
 
 def test_build_rejects_a_bad_configured_target_key(no_build: None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc, "DRY_RUN", True)
-    with pytest.raises(PytError, match="only resolves CPython 3.14") as e:
-        cmd_build.cmd_build(make({"deploy": {"pyz": {"targets": ["host", "cp315-linux-x86_64"]}}}), ["--method", "pyz"])
+    own = real({}).python.cpython
+    other = "cp3%d-linux-x86_64" % (int(own.split(".")[1]) + 1)  # the next minor: uv.lock serves only the project's
+    with pytest.raises(PytError, match=f"only resolves CPython {re.escape(own)}") as e:
+        cmd_build.cmd_build(real({"deploy": {"pyz": {"targets": ["host", other]}}}), ["--method", "pyz"])
     assert e.value.code == 2
     # Other methods ignore [deploy.pyz] targets
-    assert cmd_build.cmd_build(make({"deploy": {"pyz": {"targets": ["cp315-linux-x86_64"]}}}), ["--method", "portable", "--no-check"]) == 0
+    assert cmd_build.cmd_build(real({"deploy": {"pyz": {"targets": [other]}}}), ["--method", "portable", "--no-check"]) == 0
 
 
 def test_the_wheel_never_compiles_the_mypyc_stage_it_does_not_use(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -3691,7 +3719,8 @@ def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")  # nuitka.check_options: never the project's folder
     monkeypatch.setattr(common, "BUILD", tmp_path / ".build")  # ...nor exe's and nuitka's glob rule
     monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeMethod)
-    cfg = make(ALL_BACKENDS)
+    cfg = real(ALL_BACKENDS)
+    win = own_key("windows-x86_64")  # a key of the project's own CPython: uv.lock serves no other
     assert cmd_build.cmd_build(cfg, ["cpython", "--method", "exe", "--no-check", "--onedir", "--add-data", "a:b", "--icon", "x.ico"]) == 0
     assert seen[-1].extra == ["--add-data", "a:b", "--icon", "x.ico"] and seen[-1].onefile is False
     assert cmd_build.cmd_build(cfg, ["mypyc", "--method", "nuitka", "--no-check", "--onefile", "--lto=no"]) == 0
@@ -3700,14 +3729,14 @@ def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch,
     assert seen[-1].extra == ["--onedri"] and seen[-1].onefile is None
     monkeypatch.setattr(common, "host_os", lambda: "linux")
     monkeypatch.setattr(common, "host_arch", lambda: "x86_64")
-    assert cmd_build.cmd_build(cfg, ["cpython", "--method", "pyz", "--no-check", "--target", WIN]) == 0
-    assert seen[-1].targets == [WIN] and seen[-1].extra == []
-    assert cmd_build.cmd_build(cfg, ["pypy", "--method", "pyz", "--no-check", "--target", "pp311-linux-x86_64", "--target", WIN]) == 0
-    assert seen[-1].targets == ["pp311-linux-x86_64", WIN]
+    assert cmd_build.cmd_build(cfg, ["cpython", "--method", "pyz", "--no-check", "--target", win]) == 0
+    assert seen[-1].targets == [win] and seen[-1].extra == []
+    assert cmd_build.cmd_build(cfg, ["pypy", "--method", "pyz", "--no-check", "--target", "pp311-linux-x86_64", "--target", win]) == 0
+    assert seen[-1].targets == ["pp311-linux-x86_64", win]
     from runner.methods import flet
 
     monkeypatch.setattr(flet, "IS_WINDOWS", False)  # no Developer Mode check on a Windows runner
-    flet_cfg = make({"app": {"preset": "flet"}})
+    flet_cfg = real({"app": {"preset": "flet"}})
     assert cmd_build.cmd_build(flet_cfg, ["--method", "flet", "--no-check", "--build-number", "3"]) == 0
     assert seen[-1].extra == ["--build-number", "3"]
 
@@ -3749,7 +3778,7 @@ def test_build_check_failure_is_exit_code_1(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(cmd_build, "run_checks", lambda cfg, backend: False)
     monkeypatch.setattr(cmd_build, "payload", lambda *a: pytest.fail("no payload after a failed check"))
     with pytest.raises(PytError, match="check failed") as e:
-        cmd_build.cmd_build(make({}), ["--method", "pyz"])
+        cmd_build.cmd_build(real({}), ["--method", "pyz"])
     assert e.value.code == 1
 
 
@@ -3769,7 +3798,7 @@ def test_build_without_output_never_reports_done(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(common, "BUILD", tmp_path / ".build")  # exe.check_options: never the project's folder
     monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeMethod)
     with pytest.raises(PytError, match="no output") as e:
-        cmd_build.cmd_build(make({}), ["--method", "exe", "--no-check", *extra])
+        cmd_build.cmd_build(real({}), ["--method", "exe", "--no-check", *extra])
     assert ("before the command" in str(e.value)) is bool(extra)
     assert "done:" not in capsys.readouterr().err
 
@@ -3783,18 +3812,18 @@ def test_flet_method_refuses_before_any_work(no_build: None, monkeypatch: pytest
     monkeypatch.setattr(proc, "DRY_RUN", dry_run)
     monkeypatch.setattr(flet, "IS_WINDOWS", False)
     with pytest.raises(PytError, match="for the flet preset") as e:
-        cmd_build.cmd_build(make({}), ["cpython", "--method", "flet"])
+        cmd_build.cmd_build(real({}), ["cpython", "--method", "flet"])
     assert e.value.code == 2
     monkeypatch.setattr(flet, "IS_WINDOWS", True)
     monkeypatch.setattr(flet, "host_os", lambda: "windows")
     monkeypatch.setattr(flet, "_developer_mode", lambda: False)
-    for cfg in (_flet_cfg(), _flet_cfg(deploy={"flet": {"target": "web"}})):  # a web build too
+    for cfg in (own_python(_flet_cfg()), own_python(_flet_cfg(deploy={"flet": {"target": "web"}}))):  # a web build too
         with pytest.raises(PytError, match="Developer Mode") as e:
             cmd_build.cmd_build(cfg, ["cpython", "--method", "flet"])
         assert e.value.code == 3
     # A machine that has it on goes on, whatever the target
     monkeypatch.setattr(flet, "_developer_mode", lambda: True)
-    for cfg in (_flet_cfg(deploy={"flet": {"target": "web"}}), _flet_cfg()):
+    for cfg in (own_python(_flet_cfg(deploy={"flet": {"target": "web"}})), own_python(_flet_cfg())):
         if dry_run:
             assert cmd_build.cmd_build(cfg, ["cpython", "--method", "flet", "--no-check"]) == 0
         else:
@@ -3832,7 +3861,7 @@ def test_upx_is_resolved_before_any_work(
     monkeypatch.setattr(upx, "IS_WINDOWS", windows)
     monkeypatch.setattr(flet, "IS_WINDOWS", False)
     deploy = {**UPX_MISSING["deploy"], **cfg_data.get("deploy", {})}
-    cfg = make({**cfg_data, "deploy": deploy})
+    cfg = real({**cfg_data, "deploy": deploy})
     if packs:
         with pytest.raises(PytError, match="deploy.upx.path = 'tools/upx-missing' does not exist") as e:
             cmd_build.cmd_build(cfg, ["cpython", "--method", method])
@@ -3929,7 +3958,7 @@ def test_a_system_runtime_portable_downloads_upx_only_for_a_binary_to_pack(
 
 def test_build_dry_run_stops_after_the_argument_checks(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(proc, "DRY_RUN", True)
-    assert cmd_build.cmd_build(make({}), ["--method", "pyz", "--no-check", "--target", WIN]) == 0
+    assert cmd_build.cmd_build(real({}), ["--method", "pyz", "--no-check", "--target", own_key("windows-x86_64")]) == 0
     assert "(--dry-run) build cpython -> pyz: would output dist/myapp-cpython-pyz*" in capsys.readouterr().err
 
 
@@ -3942,12 +3971,12 @@ def test_build_refuses_methods_without_pypy(no_build: None, method: str, reason:
 
 def test_build_default_method_per_backend(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(proc, "DRY_RUN", True)
-    cfg = make(ALL_BACKENDS)
+    cfg = real(ALL_BACKENDS)
     for backend, method in (("cpython", "exe"), ("mypyc", "exe"), ("pypy", "portable")):
         assert cmd_build.cmd_build(cfg, [backend, "--no-check"]) == 0
         assert f"build {backend} -> {method}: would output" in capsys.readouterr().err
     with pytest.raises(PytError, match="not in backend.supported"):
-        cmd_build.cmd_build(make({}), ["pypy", "--no-check"])
+        cmd_build.cmd_build(real({}), ["pypy", "--no-check"])
 
 
 # --- portable: the .sh launcher -------------------------------------------------------------------

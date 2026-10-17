@@ -111,6 +111,8 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
 
 ```
 pyt, pyt.cmd, pyt.ps1             launchers (section 4); all logic is in .pytemplate/
+install.sh, install.ps1           [template repo] the one-line installers of pyt (section 5.9);
+                                  not copied by `new` (`presets.SKIP_AT_ROOT`)
 README.md, LICENSE                [template repo] the template's page and MIT license; a
                                   project gets its own README.md and keeps these two as
                                   .pytemplate/README.md and .pytemplate/LICENSE (section 11)
@@ -133,7 +135,8 @@ typings/                          project stubs (raylib preset: the corrected ra
                                   lock mutation_cr.py.lock next to it; an environment of its own)
 .pytemplate/templates/            typing/*.toml, vscode/settings.json, nvim/lazy.lua, ci.yml,
                                   portable/boot.py, pyz/__main__.py + pyz/_pyz_bootstrap.py
-.pytemplate/presets/<p>/          preset.toml + files/ skeleton (+ constraints.txt: tested pins;
+.pytemplate/presets/<p>/          preset.toml + files/ skeleton + clean/ (what `new --clean` puts
+                                  in place of the example) (+ constraints.txt: tested pins;
                                   + raylib/tools/raylib_stubs.py)
 .pytemplate/nvim/                 local Neovim plugin pytemplate.nvim (lua/, tests/smoke.lua,
                                   tests/lazy-lock.json: the plugin commits selftest --nvim pins,
@@ -841,7 +844,8 @@ header rules (with detector tests proving each rule fires).
    (`cli._started_by_uv`: `VIRTUAL_ENV` is this runner's own environment), the runner asks
    `envs.ensure_python` for it (`uv python find --system`, else `uv python install --no-bin
    --no-registry`, else PytError 3: `envs.no_download_problem` for a platform or version uv has
-   no build of, the network or `UV_PYTHON_DOWNLOADS=never` for a failed install) and runs
+   no build of, the network or `UV_PYTHON_DOWNLOADS=never` for a failed install; never a
+   pre-release, found or offered: `envs.prerelease_problem`, 15.1) and runs
    `<python.cpython> -s [-B] .pytemplate/pyt.py ARGS` (the whole command line, global options
    included) through `proc.run` (`echo=False`: it runs under `--dry-run` too, which the second
    runner then does; `-v` shows it), in the caller's folder, with `proc.runner_env()` (the
@@ -1152,6 +1156,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTEMPLATE_CALLER_CWD` | launchers, Neovim plugin (`init.caller_cwd`: Neovim's cwd when inside the project, else the root) | Caller's cwd; read only through `project.caller_cwd` |
 | `PYTEMPLATE_LAUNCHER` | launchers, Neovim plugin (`nvim`) | Which launcher/shell ran (section 4.1) |
 | `PYTEMPLATE_LAUNCHER_FILE` | `pyt.cmd` (`%~f0`) | The batch file cmd runs, and reads again once uv returns: `cmd_install.run_by_cmd` (section 4.4) |
+| `PYTEMPLATE_INSTALL_SOURCE` | `install.sh`, `install.ps1` (for the clone's `pyt install` only) | What `installed.json` records as `source` (`cmd_install.INSTALL_SOURCE`): the repository and branch, since the temporary clone is deleted |
 | `PYTEMPLATE_GLOBAL=1` | launchers that find no project (they run the installed template); removed for a project's runner (the Neovim plugin empties it: `init.pyt_env`) | Global mode (`project.GLOBAL`, read at import, and `pyt.py`; section 5.2); `__probe` reports it; `proc.base_env`, `shells.child_env`, `e2e.scrub_env` and `nvimtest.runner_env` drop it, so no child inherits it |
 | `XDG_DATA_HOME`, `HOME`, `LOCALAPPDATA`, `USERPROFILE` | user, OS | Where `./pyt install` puts the installed template and the launchers look for it (`cmd_install.snapshot_dir`, section 4.1) |
 | `UV_TOOL_BIN_DIR`, `XDG_BIN_HOME` | user | Through `uv tool dir --bin`: where `./pyt install` writes the launchers (`cmd_install.bin_dir`) |
@@ -1846,6 +1851,23 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 
 ### 5.9 Installing `pyt` (`cmd_install.py`)
 
+- **[template repo]** The one-line installers (owner request, October 2026): `curl -LsSf
+  .../install.sh | sh` and `irm .../install.ps1 | iex`, served from the repository's `main`
+  (raw.githubusercontent.com). Each clones the template (`git clone --depth 1 --branch
+  $PYT_REF $PYT_REPO`, default this repository's `main`) into a temporary folder, runs that
+  clone's `pyt install` (`install.ps1` its `pyt.cmd` on Windows: a blocking execution policy
+  stops a `.ps1` file, never text run by `iex`) with `PYTEMPLATE_INSTALL_SOURCE` = `<repo>
+  (<ref>)`, which `make_plan` records as `source` (the clone is gone after), then deletes the
+  clone: the installed template is the copy pyt uses, and running the line again updates it.
+  `install.sh`: POSIX sh, shellcheck-clean, all in one function called at the end (curl | sh
+  hands it over a pipe, so nothing runs before the whole script is read), the children's stdin
+  closed. `install.ps1`: everything in one function, which it removes, no `exit` (iex runs in
+  the caller's session: it would close the window), `PYTEMPLATE_INSTALL_SOURCE` restored. Both
+  pure ASCII, with a `pytemplate-installer:` line; git missing is exit 3 and uv missing the
+  launcher's 127 with its hints. `test_install.test_the_one_line_installer_installs_from_a_clone_it_deletes`
+  and `test_the_powershell_one_line_installer_installs_from_a_clone_it_deletes` (pwsh and
+  powershell where found) run them for real against a local repository (`PYT_REPO` a file://
+  URL).
 - `./pyt install` runs only in a clone of the template (the `template-repo` marker) and never
   in the installed template (`installed_here`: its record, or the folder `snapshot_dir` names):
   exit 2, naming `./pyt install in a clone of the template` (`FROM_A_CLONE`); typed outside any
@@ -2439,9 +2461,11 @@ Formats:
   `cmd_dev.BASEDPYRIGHT_NODE = "nodejs-wheel-binaries==24.19.0"` (basedpyright's only
   dependency, `>=20.13.1`: unpinned, every new Node LTS on PyPI changed `check` and its
   glibc/macOS floor; bump both together) (`check` with `typing.editor = "basedpyright"`) and
-  `methods.nuitka.NUITKA = "nuitka==4.2.2"` (no dependencies outside extras). Bump them
+  `methods.nuitka.NUITKA = "nuitka==4.3.0"` (no dependencies outside extras). Bump them
   deliberately; `NUITKA` together with `methods.nuitka.NUITKA_PYTHON` (the newest CPython minor
-  it supports, `3.14`): raising `python.cpython` past it needs a newer Nuitka pin.
+  it supports, `3.15`: Nuitka 4.3 builds it "experimentally", with a warning, and stops on 3.16):
+  raising `python.cpython` past it needs a newer Nuitka pin
+  (`test_build_methods.test_nuitka_pin_supports_every_python_new_projects_get`).
 - `mode --supports -pypy` never deletes the old env: it prints a note that
   `./pyt clean --envs` removes the `.venv*` environments (all of them; `setup` recreates
   the ones in use). `apply` prints the same note for every unused `.venv*` of this side
@@ -3280,7 +3304,7 @@ Per method:
   plugin for a onefile build with UPX on (a standalone folder is packed afterwards, `upx.pack_tree`:
   "Size and UPX" below), then `nuitka.optimization_args` BEFORE `deploy.nuitka.extra_args` and the
   command line (Nuitka takes the last value, so an `--lto` there still wins): always
-  `--lto=<deploy.nuitka.lto>`, default `auto`, which Nuitka 4.2.2 resolves to yes for uv's
+  `--lto=<deploy.nuitka.lto>`, default `auto`, which Nuitka 4.2.2 and 4.3 resolve to yes for uv's
   python-build-standalone on Linux, Windows (MSVC) and macOS, BUT off when more than 250 modules
   are compiled (the stdlib goes in as bytecode and does not count; the app and the third-party
   code Nuitka follows or `--include-package`s do): script and raylib stay far below (a raylib
@@ -3300,7 +3324,7 @@ Per method:
   of its package configuration with a glob of the package's folder in `.venv`, and under `x [1]`
   the binary lacked certifi's `cacert.pem`, 15.1), PGO with the mypyc backend (the
   profiling run starts before `main.dist` holds the extension modules: ImportError, yet Nuitka
-  reports success) and on macOS (Nuitka 4.2.2 has no clang profdata step); `--dry-run` prints
+  reports success) and on macOS (Nuitka 4.3 has no clang profdata step); `--dry-run` prints
   `Nuitka options: ...` (the lto/pgo flags, then the extras). Standalone on Linux/macOS names the
   binary `<name>.bin` when `app.name.lower() == pkg` (the default): it sits in `main.dist/` next
   to the package folder `<pkg>/`, and a file with that name made Nuitka fail with
@@ -3451,8 +3475,8 @@ Per method:
 - `preset.toml`: `description`, `dependencies` / `dev_dependencies` (with `{option}`: those
   entries follow `[preset.<p>]` through `./pyt apply` (`presets.option_dependencies`); the
   plain ones belong to the project after `new`), `[options]` (defaults of `[preset.<p>]`), optional `[uv]` (extra managed `[tool.uv]` keys),
-  optional `pyproject` string (extra tables, with `{{name}}`/`{{pkg}}`: `extra_tables`).
-  Optional `constraints.txt` next to it: the tested pins (below). `presets.load` reads it as
+  optional `pyproject` string (extra tables, with `{{name}}`/`{{pkg}}`: `extra_tables`),
+  optional `[clean]` (below). Optional `constraints.txt` next to it: the tested pins (below). `presets.load` reads it as
   `utf-8-sig` and refuses (`PytError` naming the file) invalid TOML or UTF-8, an unknown key
   and a wrong type (`PRESET_KEYS`): `render.managed_block` reads it on every run.
 - `files/`: complete skeleton, including a full `pytemplate.toml` (`__init` overwrites the root
@@ -3471,6 +3495,21 @@ Per method:
   `InitWindow` and `ArgumentParser`) or, with no call at hand, carries `# fmt: skip` (flet's
   `page.title`); docstrings and comments are never re-wrapped. No calendar year anywhere in a
   preset (it goes stale in later projects).
+- `./pyt new DIR --preset P -c|--clean` (owner request, October 2026): the skeleton without the
+  example code (`presets.skeleton(..., clean=True)`, passed on as `__init --clean`). The
+  preset's `[clean]` table (`presets.CLEAN_KEYS`, checked by `load`) says what changes: `drop`
+  (files of `files/` left out), `tasks` (the example's `[tasks]` tables, cut from the skeleton's
+  pytemplate.toml by `presets._clean_config`, which checks the result reads as the old data with
+  only those changes), `buttons`, `description` (README.md and `[project] description`:
+  `presets.described`) and `dependencies`/`dev_dependencies` (the script preset's `[]`: rich is
+  the example's; `presets.dependencies(..., clean=True)`, so `init` removes it). Then the files of
+  `clean/` replace or join the others: a `main()` or window that says hello, an empty
+  `core/logic.py` (`compile.modules` must hold a module: `mypyc.compiled_sources` refuses an
+  entry with only `__init__.py`) and `tests/test_core.py` (pytest exits 5 without a test). A
+  `[clean]` that names a file or task the skeleton lacks, or a missing `clean/` folder (`new`
+  copies the files git tracks: an untracked one gave the example's app.py without its modules,
+  and "ok"), is a PytError naming it. Every skeleton test, the ruff checks for any name and
+  length and the rename invariant run on both variants; `pristine` accepts either.
 - Four templating syntaxes coexist: `__pkg__` in paths and `{{name}}`/`{{pkg}}` in text (plain
   `.replace`; `title=f"{{name}}: ..."` in `script/app.py` renders to the app name on purpose);
   `{option}` in `preset.toml` deps and `[uv]` (`str.format_map`); `__HEADER__`-style in
@@ -3479,7 +3518,7 @@ Per method:
   `presets.TEXT_SUFFIXES` or it has none, it holds no NUL byte and it decodes as UTF-8;
   anything else is copied byte for byte, and `pristine` never rewrites CRLF inside binaries.
 - `pristine(cfg)`: `src/`, `tests/`, `typings/` equal the current preset skeleton rendered
-  with the current name (CRLF-normalised). `init` (the internal step of `new`, below) refuses
+  with the current name (CRLF-normalised), with or without the example (`--clean`). `init` (the internal step of `new`, below) refuses
   otherwise (use `--force`). `presets.plan_init` makes every check in memory first: name,
   `check_name_free`, pristine, the skeleton's `pytemplate.toml` validated,
   `render.check_pyproject` for the new configuration, and the new `pyproject.toml`
@@ -4179,7 +4218,9 @@ short temp tree and unset `NVIM_APPNAME`.
   no:cacheprovider -c .pytemplate/tests/pytest.ini --rootdir=. .pytemplate/tests [args...]` in
   `.venv`, in the project folder, then `mypy --strict
   --no-incremental --python-version 3.11 --config-file .pytemplate/tests/mypy-runner.ini
-  .pytemplate/runner .pytemplate/pyt.py`. Both must pass. Needs `.venv` (`./pyt setup`).
+  .pytemplate/runner .pytemplate/pyt.py`, and the same with `--python-version` the project's
+  `python.cpython` when that is another minor (the runner runs there too: 3.15's typeshed and
+  ast changed, PEP 798's DictComp without a value). All must pass. Needs `.venv` (`./pyt setup`).
   The suite has pytest settings of its own (`-c`, `addopts = -ra`), as mypy has: pytest looked
   for them itself and read the project's, which are its app's tests' (pyproject.toml
   `[tool.pytest.ini_options]`, pytest.ini, tox.ini or setup.cfg, and the root conftest.py): a
@@ -4856,7 +4897,14 @@ short temp tree and unset `NVIM_APPNAME`.
   setup-uv with `resolution-strategy: lowest` takes the oldest uv the `required-version`
   accepts, checked against `envs.MIN_UV`, then setup and the suite, minus
   `test_init_round_trip_through_every_preset_is_byte_identical` (uv 0.10.12 writes redundant
-  markers into uv.lock after a preset round trip: the same lock, other bytes). Its Linux jobs run
+  markers into uv.lock after a preset round trip: the same lock, other bytes). Job
+  `newest-python` (a bare Linux runner, the newest uv): `./pyt new --preset script --clean`,
+  python.cpython moved to `NEWEST` (3.15: the newest minor with a release, which the presets do
+  not name yet), `./pyt apply`, a check that `.venv` runs that release (never a candidate), then
+  the project's `./pyt selftest`: the runner and its suite on the newest CPython. Not in the CI
+  image: its pinned uv (0.12.19) knows only 3.15.0rc2, which pyt refuses (15.1). Bump `NEWEST`
+  with each new minor (`test_workflows.test_a_new_project_on_the_newest_python_runs_its_selftest`
+  wants it newer than the presets'). Its other Linux jobs run
   in the CI image (`template-ci-image.yml`, stage 2): the suite (dash, zsh, ksh, mksh, yash,
   busybox, fish, xonsh, Neovim, actionlint, taplo and the basedpyright pins are in the image),
   `python-floor` (the runner starts on 3.11, `uv run --python 3.11 --script`, and the suite runs
@@ -5069,7 +5117,7 @@ it was written.
 
 - Lines = non-blank lines that are not only a comment or a docstring, of the product code:
   `.pytemplate/runner/**/*.py`, `.pytemplate/pyt.py`, `.pytemplate/tools/*.py`, `pyt`,
-  `pyt.cmd`, `pyt.ps1`, `.pytemplate/nvim/**/*.lua` (not its `tests/`),
+  `pyt.cmd`, `pyt.ps1`, `install.sh`, `install.ps1`, `.pytemplate/nvim/**/*.lua` (not its `tests/`),
   `.pytemplate/templates/**`, the preset skeletons and tools (`.py`, `.pyi`, `.toml`; not
   `typings/`), `.github/workflows/template-*.yml`, the CI image's `Dockerfile`, `pins.py`,
   `system`, `warm` and `build` (`.github/workflows/template-ci-image/`) and the flet builds'
@@ -5260,7 +5308,8 @@ Adding a build method:
 
 Adding a preset:
 1. `presets/<p>/preset.toml` and `files/` (section 11), including `[vscode] buttons` and
-   `[tasks]` (`background = true` for dev servers) in its `pytemplate.toml`.
+   `[tasks]` (`background = true` for dev servers) in its `pytemplate.toml`; its `[clean]` table
+   and `clean/` files for `new --clean` (no example code).
 2. Copy `tests/conftest.py` verbatim. Check the hard-coded preset branches (section 11).
 3. Generate its `constraints.txt` (section 11: the name check and `new` from other projects need
    its whole tested tree) and `git add` everything (`new` only copies tracked files).
@@ -5303,9 +5352,10 @@ LIMITATION only when an issue discusses it; "cf." = related, not the same), `Fix
 workaround by symbol and the section that explains it, `Test:` what covers it, `Goes:` when it
 can be removed. Versions as observed in September 2026 unless an entry says otherwise: uv
 0.12.19 (floor `envs.MIN_UV`), CPython 3.14.7 (the runner: 3.11+), PyPy 3.11.15, mypy/mypyc
-2.3.1, setuptools 84.0.0, PyInstaller 6.22.3, Nuitka 4.2.2, Flet 1.0.1, raylib 6.0.1.0, cffi
-2.1.1, ruff 0.16.9, UPX 5.2.1, Neovim 0.12.5 with the pinned LazyVim (`nvimtest.LOCK`),
-PowerShell 7.6 and 5.1, niubash 1.1.4. A new workaround gets its entry in the same commit; when
+2.3.1, setuptools 84.0.0, PyInstaller 6.22.3, Nuitka 4.2.2 (the pin is 4.3.0 since October 2026:
+its defects below are still in it, read in its sources), Flet 1.0.1, raylib 6.0.1.0, cffi 2.1.1,
+ruff 0.16.9, UPX 5.2.1, Neovim 0.12.5 with the pinned LazyVim (`nvimtest.LOCK`), PowerShell 7.6
+and 5.1, niubash 1.1.4. A new workaround gets its entry in the same commit; when
 an entry's `Goes:` comes true, the workaround and the entry go together.
 
 uv:
@@ -5451,6 +5501,22 @@ uv:
   `test_envs_core.py::test_min_uv_matches_the_pinned_interpreters`,
   `test_an_old_uv_is_refused_before_it_creates_an_environment`, `test_doctor_flags_an_old_uv`.
   Goes: never (raise it with the pins).
+- **A uv older than a CPython minor's release knows only its pre-releases** (LIMITATION: uv
+  ships its download list with each release; uv 0.12.x offers 3.15.0rc2 for "3.15", 0.13.0 has
+  3.15.0): with `python.cpython = "3.15"` it installed the release candidate without a word, the
+  launchers followed `.python-version` to it, the project locked, built and ran there, and doctor
+  called it 3.15.0 (interpreter_info's X.Y.Z). Fix: `envs.ensure_python` refuses one it finds or
+  that uv only offers (`cpython_releases`, `uv python list --only-downloads --output-format json`;
+  `prerelease_of`, `PRERELEASE`), `cli._restart` a runner the launchers started on one
+  (`_running_prerelease`), both with `envs.prerelease_problem` (exit 3: update uv, then `uv python
+  upgrade X.Y`, which moves the environments made on the candidate to the release by themselves:
+  they name uv's minor-version folder, measured with 0.12.19 and 0.13.1), and doctor says it for
+  python.cpython and for `.venv` (`cmd_env._python_cpython`, `_environments`; 5.2). Test:
+  `test_envs_core.py::test_ensure_python_never_takes_a_prerelease`,
+  `test_ensure_python_installs_a_release_next_to_pre_releases`,
+  `test_doctor_says_when_python_cpython_is_a_pre_release`,
+  `test_cli_core.py::test_a_command_never_runs_on_a_prerelease_of_python_cpython`. Goes: never
+  (a new minor comes after some uv every year).
 - **The lock resolves for every future Python** (LIMITATION): uv resolved for 3.15+, where
   raylib has no wheels. Fix: `environments` bounded to the CPython and PyPy minors in
   `render.managed_block` (7). Test: `test_runner.py::test_managed_block_bounds_cpython_minor`,
@@ -5727,6 +5793,12 @@ CPython and its standard library:
   and many tokens from 3.12 (t-strings from 3.14). Fix: `rename` handles both (5.7). Test:
   `test_rename.py::test_fstring_fields_as_one_token`, `test_tokenizer_canary`. Goes: the 3.11
   form once the runner needs 3.12.
+- **3.15's ast reads `{**d for d in ds}` (PEP 798) as a DictComp whose `value` is None**
+  (LIMITATION, documented): rename's scope pass walked every child of a DictComp and stopped with
+  an internal error on a file that unpacks in a comprehension (a project on 3.15). Fix:
+  `rename._scopes` skips the missing value (5.7). Test:
+  `test_rename.py::test_a_dict_comprehension_that_unpacks_is_renamed_like_any_other` (with 3.15's
+  shape faked on older Pythons). Goes: never.
 - **No processes on WebAssembly, Android and iOS** (LIMITATION, documented: `multiprocessing` and
   the process pools are "not Emscripten, not WASI, not Android, not iOS"): in a `flet build`
   web or mobile app the flet skeleton's Draw handler died on `ProcessPoolExecutor` and left the
@@ -6072,8 +6144,9 @@ Nuitka:
   through `upx.pack_tree` once it is in `dist/`; onefile keeps the plugin, which packs only the
   binary, unless `upx.excluded` names it (`nuitka.build`, 10). Test:
   `test_build_methods.py::test_nuitka_upx_honours_the_excludes`. Goes: never.
-- **Python support lags** (LIMITATION): 4.2.2 stops with FATAL on 3.15 and only warns on later
-  minors, then fails obscurely in the C compile. Fix: `nuitka.NUITKA_PYTHON`,
+- **Python support lags** (LIMITATION): 4.2.2 stopped with FATAL on 3.15; 4.3.0 builds 3.15 as
+  "experimentally supported" (a warning) and stops on 3.16, and a release that only warns on a
+  minor then fails obscurely in the C compile. Fix: `nuitka.NUITKA_PYTHON`,
   `nuitka.check_python` (10). Test:
   `test_build_methods.py::test_nuitka_python_newer_than_the_pin_is_refused_before_any_work`,
   `test_nuitka_failure_names_the_pin`. Goes: never (bump with the pin).

@@ -61,6 +61,7 @@ NAMES = ("pyt", "pyt.cmd", "pyt.ps1")
 # Bash and MSYS2 run (npm's cmd-shim lays out its commands the same way).
 LAUNCHERS = NAMES if IS_WINDOWS else ("pyt",)
 RECORD = project.INSTALL_RECORD
+INSTALL_SOURCE = "PYTEMPLATE_INSTALL_SOURCE"  # set by install.sh and install.ps1 for `pyt install`
 SCHEMA = 1
 # What an unfinished install leaves: folders next to the installed template, and staged
 # launchers in the bin folder (_stage)
@@ -649,7 +650,9 @@ def make_plan() -> Plan:
         "schema": SCHEMA,
         "commit": commit,
         "dirty": dirty,
-        "source": str(ROOT),
+        # install.sh and install.ps1 (the one-line install) name the repository they cloned: the
+        # temporary clone that installs is deleted once it ends
+        "source": os.environ.get(INSTALL_SOURCE, "").strip() or str(ROOT),
         "bin": str(folder),
         "launchers": list(LAUNCHERS),
         "installed": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

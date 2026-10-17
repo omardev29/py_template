@@ -280,10 +280,11 @@ def test_verify_checks_what_new_made(tmp_path: Path) -> None:
     (p / ".venv").mkdir()
     (p / ".build" / "cfg").mkdir()  # not made by __init: copied from the template
     (p / "LICENSE").write_text("MIT\n", encoding="utf-8")
+    (p / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")  # the template's one-line installer
     status, detail = e2e.do_verify(ctx, step, log)
     assert status == FAIL
     assert "git mode of pyt.ps1 is 100644, not 100755" in detail and "LICENSE in the project root" in detail
-    assert "copied .venv/" in detail and "copied .build/" in detail
+    assert "copied .venv/" in detail and "copied .build/" in detail and "copied install.sh" in detail
     e2e.rmtree(p / ".git")  # git objects are read-only on Windows
     assert "no git repository (new runs git init)" in e2e.do_verify(ctx, step, log)[1]
     ctx.results["new"] = SKIP

@@ -168,7 +168,7 @@ def test_help_of_a_command_outside_a_project_says_whether_it_needs_one(capsys: p
     assert out.startswith("pyt run [BACKEND] [app args...]\n") and f"Needs a project: {NEEDS.split(': ', 1)[1]}" in out
     assert cli.main(["help", "new"]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("pyt new DIR [--preset P] [--name NAME]\n") and "Needs a project" not in out
+    assert out.startswith("pyt new DIR [--preset P] [--name NAME] [-c|--clean]\n") and "Needs a project" not in out
     assert cli.main(["help", "doctor"]) == 0
     assert cli.GLOBAL_SUMMARIES["doctor"] in capsys.readouterr().out
     # -h after a command is its help here too, also after run, test, lock and selftest (no app,
