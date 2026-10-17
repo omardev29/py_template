@@ -1397,7 +1397,11 @@ def test_dry_run_new_says_what_git_will_do(git_sandbox: Path, monkeypatch: pytes
     monkeypatch.setattr(proc, "DRY_RUN", True)
     assert cmd_mode.cmd_new(cfg, [str(git_sandbox / "alone" / "p"), "--name", "alone"]) == 0
     err = capsys.readouterr().err
-    assert "and `git init -b main`" in err and "ci.yml" not in err
+    assert "and `git init -b main`" in err and "ci.yml" not in err and "--clean" not in err
+    # --clean says so, and runs __init with it in the copy
+    assert cmd_mode.cmd_new(cfg, [str(git_sandbox / "alone" / "q"), "--name", "alone", "--clean"]) == 0
+    err = capsys.readouterr().err
+    assert " (--clean: without the example code)\n" in err and "--name alone --force --clean` in it" in err, err
     outer = git_sandbox / "repo"
     subprocess.run(["git", "init", "-q", str(outer)], check=True, capture_output=True)
     assert cmd_mode.cmd_new(cfg, [str(outer / "apps" / "sub"), "--name", "subapp"]) == 0

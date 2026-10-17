@@ -430,6 +430,39 @@ def test_a_clean_table_that_names_nothing_is_a_clear_error(tmp_path: Path, monke
         presets.skeleton("p", "demo", clean=True)
 
 
+@pytest.mark.parametrize("preset", PRESETS)
+def test_a_project_made_with_clean_is_pristine_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset: str) -> None:
+    """init (and every check that asks whether src/, tests/ and typings/ are untouched) takes a
+    project made with new --clean for the skeleton it is, and an edit of it for an edit."""
+    files = presets.skeleton(preset, "demo", clean=True)
+    cfg: Config = config._build(Config, tomllib.loads(files["pytemplate.toml"].decode("utf-8")), "")
+    owned = {rel: data for rel, data in files.items() if rel.split("/")[0] in presets.OWNED_DIRS}
+    for rel, data in owned.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_bytes(data)
+    monkeypatch.setattr(presets, "ROOT", tmp_path)
+    assert presets.pristine(cfg)
+    test = next(rel for rel in owned if rel.startswith("tests/test_"))
+    (tmp_path / test).write_bytes(owned[test] + b"# edited\n")
+    assert not presets.pristine(cfg)
+
+
+def test_every_caller_but_new_clean_gets_the_example() -> None:
+    """clean is False unless asked for: the description, the README of a project and the plan of
+    init are the example's (script: its clean description drops the example's words)."""
+    assert presets.described("script") == presets.described("script", clean=False) != presets.described("script", clean=True)
+    readme = presets.project_readme("demo", "script", manual=False)
+    assert readme == presets.project_readme("demo", "script", manual=False, clean=False)
+    assert readme != presets.project_readme("demo", "script", manual=False, clean=True)
+
+
+def test_the_clean_config_cuts_an_empty_task_table_alone() -> None:
+    """A [tasks.X] table with no key of its own, right before the next table, goes alone: the
+    next table is never taken with it."""
+    text = '[tasks.demo]\n[tasks.ci]\ndeps = ["test"]  # kept\n'
+    assert presets._clean_config(text, {"tasks": ["demo"]}, "where") == '[tasks.ci]\ndeps = ["test"]  # kept\n'
+
+
 def test_the_clean_pytemplate_toml_keeps_every_comment_and_line_ending_style() -> None:
     """--clean edits the skeleton's pytemplate.toml in place: the comments of the buttons line
     and of the tables it keeps stay where they were."""
@@ -3088,6 +3121,7 @@ def test_new_from_another_project_gets_the_tested_versions(fake: Fake) -> None:
     the newest release of the day: the pins must reach every package the source lock lacks."""
     cfg = _as_raylib_project(fake)
     plan = presets.plan_init(cfg, "script", "demo", force=True)
+    assert plan.files == presets.skeleton("script", "demo")  # the example, unless --clean asks
     tested = presets.constraints("script")
     assert {"rich", "markdown-it-py", "mdurl"} <= set(plan.pins)
     assert plan.pins == {n: v for n, v in tested.items() if n not in presets.locked_names()}

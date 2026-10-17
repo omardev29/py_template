@@ -475,6 +475,49 @@ def test_prerelease_of_a_python_that_does_not_start_is_none(monkeypatch: pytest.
     assert envs.prerelease_of(sys.executable) == ("" if sys.version_info.releaselevel == "final" else __import__("platform").python_version())
 
 
+def test_prerelease_of_a_python_the_system_refuses_to_start_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An OSError of the start (a file of another architecture) is no pre-release either: the
+    commands that need that Python say what is wrong with it, never this check."""
+
+    def refuse(argv: Sequence[Any], **kw: Any) -> str:
+        raise OSError(errno.ENOEXEC, "Exec format error", str(argv[0]))
+
+    monkeypatch.setattr(envs.proc, "output", refuse)
+    assert envs.prerelease_of("python") == ""
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="the fake uv is a shell script")
+@pytest.mark.parametrize(
+    ("out", "code", "releases"),
+    [
+        (json.dumps([{"version": "3.15.0"}, {"key": "x"}, "3.14.0", {"version": "3.15.0rc2"}]), 0, ["3.15.0", "3.15.0rc2"]),
+        ("[]", 0, []),
+        ("", 0, []),
+        (json.dumps({"version": "3.15.0"}), 0, None),
+        ("not json", 0, None),
+        (json.dumps([{"version": "3.15.0"}]), 2, None),
+    ],
+    ids=["entries", "none", "empty", "not-a-list", "not-json", "uv-failed"],
+)
+def test_cpython_releases_reads_what_uv_prints_also_in_a_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], out: str, code: int, releases: list[str] | None
+) -> None:
+    """The release lookup is a query the runner reads, through the real proc.run: captured, run
+    under --dry-run too (an echoed command is skipped there, so the dry run of new or doctor
+    would never see that uv offers only a pre-release), a uv that fails is no answer (never an
+    error), and only the entries that carry a version count."""
+    fake = tmp_path / "uv"
+    fake.write_text('#!/bin/sh\n[ "$1 $2 $3 $4" = "python list 3.15 --only-downloads" ] || exit 9\nprintf \'%s\' "$PT_UV_OUT"\nexit "$PT_UV_CODE"\n', encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setattr(proc, "find_uv", lambda: str(fake))
+    monkeypatch.setattr(envs, "_uv_ok", {str(fake)})  # no `uv --version` before it
+    monkeypatch.setenv("PT_UV_OUT", out)
+    monkeypatch.setenv("PT_UV_CODE", str(code))
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert envs.cpython_releases("3.15") == releases
+    assert str(fake) not in capsys.readouterr().err  # a query: no command line echoed
+
+
 @pytest.mark.parametrize(
     ("here", "anywhere", "any_cpython", "says"),
     [
