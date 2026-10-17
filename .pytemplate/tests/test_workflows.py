@@ -150,10 +150,12 @@ def test_selftest_workflow_covers_every_os_and_both_floors() -> None:
 
 def test_linux_jobs_run_in_the_ci_image() -> None:
     """Stage 2 of the CI image (CLAUDE.md 13.2): outside template-ci-image.yml a Linux job is only
-    a gate, uv-floor (the oldest uv), the nvim canary (the newest of everything), an e2e row or
+    a gate, uv-floor (the oldest uv), newest-python (the newest uv and CPython: the image's pinned
+    uv knows only a release candidate of the newest minor), the nvim canary (the newest of
+    everything), an e2e row or
     one of template-flet.yml's builds (the runner image's Android SDK and JDK, Flet's own
     Flutter); the other Linux jobs run in the image, which holds their tools at pinned versions."""
-    allowed = {("template-selftest.yml", "uv-floor"), ("template-nvim.yml", "canary")}
+    allowed = {("template-selftest.yml", "uv-floor"), ("template-selftest.yml", "newest-python"), ("template-nvim.yml", "canary")}
     allowed |= {("template-flet.yml", "web"), ("template-flet.yml", "android")}
     linux = re.compile(r"(?m)^\s+(?:runs-on: ubuntu|os: \[[^\]]*ubuntu|- \{os: ubuntu)")
     for name in ("template-selftest.yml", "template-launchers.yml", "template-nvim.yml", "template-flet.yml"):
@@ -164,6 +166,19 @@ def test_linux_jobs_run_in_the_ci_image() -> None:
     for job in ("selftest", "python-floor", "new-project", "launchers", "nvim"):
         assert "image: ${{ needs.image.outputs.ref }}" in image[job], job
     assert "shellcheck -s sh pyt" in image["launchers"]
+
+
+def test_a_new_project_on_the_newest_python_runs_its_selftest() -> None:
+    """newest-python: a project made with `new --clean`, moved to the newest CPython minor (which
+    the presets' python.cpython does not name yet) with the newest uv, applied, checked to run on
+    that release (never a candidate), then its selftest: the runner and its suite on that Python."""
+    job = jobs(_text("template-selftest.yml"))["newest-python"]
+    newest = re.search(r'NEWEST: "(3\.\d+)"', job)
+    assert newest, job
+    assert tuple(map(int, newest.group(1).split("."))) > tuple(map(int, presets.preset_python("script").split(".")))
+    assert "astral-sh/setup-uv@" in job and not re.search(r"setup-uv@\S+\n\s+with:", job)  # no version: the newest uv
+    for step in ("./pyt new \"$RUNNER_TEMP/p\" --preset script --clean", "./pyt apply", "releaselevel == 'final'", "./pyt selftest -rs"):
+        assert step in job, step
 
 
 def test_readme_tells_when_the_selftest_workflow_runs() -> None:

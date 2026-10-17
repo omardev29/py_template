@@ -1056,13 +1056,16 @@ def test_real_pytest_on_cpython_lands_in_src(defects: Path) -> None:
 
 # --- the regexps in JavaScript (VS Code runs `new RegExp(regexp).exec(line)`) ---------------------
 
+# The answer goes to a file, never a pipe, and node's stdin is closed: on a GitHub Windows runner
+# node once ran past 120 s with both inherited (October 12, 2026; the rerun passed in seconds)
 JS_EXEC = """
-const data = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+const fs = require('fs');
+const data = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
 const out = data.regexps.map((rx) => data.lines.map((line) => {
   const m = new RegExp(rx).exec(line);
   return m === null ? null : Array.from(m, (g) => (g === undefined ? null : g));
 }));
-process.stdout.write(JSON.stringify(out));
+fs.writeFileSync(process.argv[2], JSON.stringify(out), 'utf8');
 """
 
 
@@ -1074,9 +1077,13 @@ def test_matchers_agree_in_javascript(tmp_path: Path) -> None:
     lines = [s[0] for s in SAMPLES] + list(STAGE_LINES)
     data = tmp_path / "data.json"
     data.write_text(json.dumps({"regexps": regexps, "lines": lines}), encoding="utf-8")
-    r = subprocess.run([node, "-e", JS_EXEC, str(data)], capture_output=True, text=True, encoding="utf-8", timeout=120, check=False)
+    answer = tmp_path / "answer.json"
+    r = subprocess.run(
+        [node, "-e", JS_EXEC, str(data), str(answer)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", timeout=120, check=False,
+    )  # fmt: skip
     assert r.returncode == 0, r.stderr
-    for rx, results in zip(regexps, json.loads(r.stdout), strict=True):
+    for rx, results in zip(regexps, json.loads(answer.read_text(encoding="utf-8")), strict=True):
         for line, got in zip(lines, results, strict=True):
             m = re.search(rx, line)
             assert got == (None if m is None else [m.group(0), *m.groups()]), (rx, line)
