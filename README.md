@@ -102,6 +102,28 @@ installed CPython (or PyPy, when the project supports it) at or above the projec
 Python: `python.cpython` (3.14 by default), or 3.11 when PyPy is supported; a pyz with native
 dependencies needs the exact Python minor it was built for ([pyz](#pyz)).
 
+### Python versions
+
+`python.cpython` may name any CPython minor from 3.11 on that uv can install: the runner
+(standard library only, 3.11 code) runs on each of them, and `./pyt selftest` type-checks it as
+3.11 and as the project's `python.cpython`. A new minor (3.15, October 2026) needs no new pyt,
+but:
+
+- uv must know its release. A uv older than it (uv 0.12 for 3.15) knows only its release
+  candidates, which pyt never installs, locks with or runs on (exit 3, with the way out: update
+  uv, then `uv python upgrade 3.15`).
+- Every dependency needs wheels for it, or an sdist that builds: `./pyt apply` re-locks and uv
+  names the one that has none. In October 2026 raylib published no CPython 3.15 wheel: a raylib
+  project stays on 3.14 for now (the preset never builds raylib from source). `flet build`
+  embeds a Python of Flet's own list, 3.12 to 3.14 for Flet 1.0.1: on 3.15 the flet method
+  stops with Flet's error (the flet app and its other build methods work).
+- mypyc compiles for the Python it runs on: the extensions of a 3.15 project load on 3.15 only
+  (as a pyz with native dependencies). PyPy stays 3.11, and a project that supports it is still
+  checked as 3.11 code. The nuitka method's pinned Nuitka builds up to 3.15 ([nuitka](#nuitka)).
+
+To move a project, set `python.cpython = "3.15"` in `pytemplate.toml` and run `./pyt apply`: uv
+installs that CPython, re-locks and makes the environments again. Then `./pyt test all`.
+
 ## Getting started
 
 ```sh
@@ -125,8 +147,12 @@ in a plain clone.
 
 ### New projects
 
-`./pyt new DIR [--preset P] [--name NAME]` creates a project in `DIR`, a new or empty folder
-outside the template:
+`./pyt new DIR [--preset P] [--name NAME] [-c|--clean]` creates a project in `DIR`, a new or
+empty folder outside the template. `-c`/`--clean` leaves the preset's example out (the script
+preset's benchmark and its `rich`, raylib's bunnymark, flet's fractal): the project gets a window
+or a `main()` that says hello, an empty compiled module (`src/<pkg>/core/logic.py`, so that the
+mypyc backend has something to compile) and one test, with the preset's configuration, rules and
+build settings unchanged:
 
 1. It copies the files git tracks (and lists the untracked ones it leaves out; without git, or
    when nothing was ever committed, it copies every file). It never copies the git history, the
@@ -179,6 +205,23 @@ it and move the code over.
 
 ### Install `pyt`
 
+Without a clone, in one line (it needs git and [uv](https://docs.astral.sh/uv/)):
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/omardev29/py_template/main/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/omardev29/py_template/main/install.ps1 | iex
+```
+
+The script clones the template (its newest commit only) into a temporary folder, runs
+`./pyt install` there, as below, and deletes the clone: the installed template is the copy pyt
+uses, and its `installed.json` names the repository it came from. Run the same line again to
+update; `pyt uninstall` removes it. `PYT_REPO` and `PYT_REF` pick another repository or branch
+(a fork, a tag). `install.ps1` runs the clone's `pyt.cmd`, so an execution policy that blocks
+scripts does not stop it (`pyt.ps1` still needs one that runs it, below).
+
 `./pyt install`, typed in a clone of the template, installs a `pyt` command for every folder:
 
 - Inside a project, `pyt` runs that project's own runner, from any subfolder: `pyt test`,
@@ -196,7 +239,8 @@ It writes two things, and never edits PATH, a shell's startup file or the regist
   (uncommitted changes are copied, and noted), without the template's own CI. It goes into the
   user data folder: `$XDG_DATA_HOME/pytemplate/template` (an absolute `XDG_DATA_HOME`), else
   `~/.local/share/pytemplate/template`; on Windows `%LOCALAPPDATA%\pytemplate\template`. Its
-  `.pytemplate/installed.json` records the commit, the clone it came from and the bin folder.
+  `.pytemplate/installed.json` records the commit, the clone (or, from the one-line installer,
+  the repository) it came from and the bin folder.
 - The launchers, into uv's tool bin folder (`uv tool dir --bin`: `UV_TOOL_BIN_DIR`,
   `XDG_BIN_HOME`, `XDG_DATA_HOME/../bin` or `~/.local/bin`), where `uv tool install` puts its
   commands: `pyt`, and on Windows also `pyt.cmd` and `pyt.ps1`. cmd runs `pyt.cmd`, PowerShell
@@ -219,7 +263,7 @@ folder of yours, or another data folder). On Windows it also stops for another t
 one run is named in one message.
 
 To update the installed template, run `./pyt install` again in the clone (after a `git pull`,
-say): the new copy is written next to the old one and swapped in whole, and a failure, Ctrl+C,
+say), or the one-line installer again: the new copy is written next to the old one and swapped in whole, and a failure, Ctrl+C,
 SIGTERM or SIGHUP at any step puts the old copy and the old launchers back. One `install` or
 `uninstall` runs at a time: a second one, started while the first runs, is refused before it
 changes anything. When uv's tool bin
@@ -263,7 +307,7 @@ outside any project exits 2 with how to install pyt.
 | `mode [BACKEND] [--supports +B\|-B\|B,B...] [--typing auto\|off\|warn\|strict\|mypyc] [--editor pylance\|basedpyright]` | Shows the mode without arguments; otherwise edits `pytemplate.toml` and applies it (re-lock, generated files, a new PyPy environment) |
 | `render [--check] [--diff] [--force]` | Regenerates the generated files; `--check` exits 1 when one is outdated or hand-edited (or `pyproject.toml` does not match), `--diff` shows hand edits, `--force` overwrites them |
 | `rename NEW_NAME [--force]` | Renames the app ([details](#renaming-the-app)) |
-| `new DIR [--preset P] [--name NAME]` | Creates a project from this template ([details](#new-projects)) |
+| `new DIR [--preset P] [--name NAME] [-c\|--clean]` | Creates a project from this template; `--clean`: without the preset's example code ([details](#new-projects)) |
 | `install` | Installs the `pyt` command for every folder: the template into the user data folder, the launchers into uv's tool bin folder; only in a clone of the template ([details](#install-pyt)) |
 | `uninstall` | Removes the launchers and the installed template that `install` wrote, and names what it leaves ([details](#install-pyt)) |
 | `run [BACKEND] [app args...]` | Runs `src/main.py` (mypyc: compiles first); the arguments go to the app |
@@ -317,7 +361,7 @@ runs the installed copy of the template. There only `new`, `doctor`, `help`, `in
 `uninstall` run, with the same global options (`install` only says how to install or update
 pyt: it runs in a clone of the template):
 
-- `pyt new DIR [--preset P] [--name NAME]` creates a project in `DIR`, relative to the folder it
+- `pyt new DIR [--preset P] [--name NAME] [-c|--clean]` creates a project in `DIR`, relative to the folder it
   was typed in ([New projects](#new-projects)).
 - `pyt doctor` checks what every project needs of the computer: uv, the Python the runner runs
   on, git, the C compiler mypyc would use and Neovim, and how pyt is installed. Only an old uv
@@ -605,7 +649,7 @@ commands regenerate them first and say which changed; `./pyt render` does only t
 
 Three tools run outside `uv.lock`, at versions pinned in the runner: `check` with
 `typing.editor = "basedpyright"` runs `basedpyright==1.40.1` with the Node.js runtime
-`nodejs-wheel-binaries==24.19.0`, the nuitka method runs `nuitka==4.2.2`, and UPX 5.2.1 is
+`nodejs-wheel-binaries==24.19.0`, the nuitka method runs `nuitka==4.3.0`, and UPX 5.2.1 is
 downloaded for `[deploy.upx]` ([Maintaining the template](#maintaining-the-template) says how to
 move them).
 
@@ -623,7 +667,7 @@ file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads
 | `app.assets` | `""` (raylib, flet: `"assets"`) | `"assets"` bundles `src/assets/` with the app, `""` bundles nothing (no other name) |
 | `backend.active` | `"cpython"` (raylib: `"pypy"`) | the backend of `run`, `test`, `check` and `build` when none is given |
 | `backend.supported` | `["cpython", "mypyc"]` (raylib: all three) | the environments, `uv.lock` and the CI matrix |
-| `python.cpython` | `"3.14"` | the CPython minor version (uv picks the patch), 3.11 or newer; the project's commands run on it ([Where pyt runs](#where-pyt-runs)) |
+| `python.cpython` | `"3.14"` | the CPython minor version (uv picks the patch), 3.11 or newer, never a pre-release of it; the project's commands run on it ([Where pyt runs](#where-pyt-runs)). Moving to a new minor (3.15): [Python versions](#python-versions) |
 | `python.pypy` | `"pypy@3.11.15"` | the exact PyPy version ([PyPy](#pypy)) |
 | `typing.profile` | `"auto"` | `auto` (`mypyc` on the mypyc backend, else `typing.relaxed`), `mypyc`, `strict`, `warn` or `off` |
 | `typing.relaxed` | `"off"` | what `auto` means on cpython and pypy: `off`, `warn` or `strict` |
@@ -776,13 +820,16 @@ simplify, vectorise or even delete the loop. `mypy-extensions` is already a runt
 every project (`pyproject.toml`): `from mypy_extensions import i64`. Interpreted code (the cpython
 and pypy backends) sees `i64` as a plain `int`.
 
-100 million iterations of `x += 1` (Linux x86_64, gcc 13, CPython 3.14, mypyc 2.3.1, Nuitka
-4.2.2; MSVC on Windows not measured):
+100 million iterations of `x += 1` (Linux x86_64, gcc 13, CPython 3.14 and 3.15.0, PyPy 3.11.15,
+mypyc 2.3.1, Nuitka 4.2.2 and 4.3.0; MSVC on Windows not measured):
 
 | How it runs | Time | The loop |
 |---|---|---|
 | CPython 3.14, interpreted | ~1.8 s | runs |
-| Nuitka (default, `--lto=yes` or PGO) | ~1.3-1.9 s | runs (Python objects and libpython calls) |
+| CPython 3.15, interpreted (uv's builds start with the JIT off) | ~1.7 s | runs |
+| CPython 3.15, its JIT turned on | ~1.5 s | runs |
+| PyPy 3.11 (the pypy backend) | ~0.06 s | runs, in machine code after its first ~1000 iterations (the JIT's warm-up is in the time) |
+| Nuitka (default, `--lto=yes` or PGO) | ~0.9-1.9 s | runs (Python objects and libpython calls) |
 | mypyc, `int`, `compile.opt_level` "1"-"3" | ~0.13-0.18 s | runs |
 | mypyc, `int`, `compile.opt_level = "0"` | ~3.4 s | runs (slower than CPython: debug only) |
 | mypyc, `i64`, `compile.opt_level` "2"/"3" | ~0 s | removed: the function became `return n` |
@@ -800,6 +847,9 @@ When to use it:
   with `n: i64`, or `range(i64(n))`. With `n: int` the index is a tagged int and the loop stays
   (158 ms for 1e8 in the same test, even with `x: i64`). Constant bounds (`range(1, 100_000_001)`)
   are also cheap.
+- Name the index, even when the body never reads it: mypyc 2.3.1 types `_` as `object`, so
+  `for _ in range(n)` boxes every index into a Python int (0.81 s for the `i64` loop above, 0.97 s
+  for `int`, against ~0 s and 0.17 s with `for i in range(n)`).
 
 What changes when compiled (checked with mypyc 2.3.1; interpreted code keeps Python's
 unlimited ints, so the cpython/pypy backends never show these):
@@ -1100,11 +1150,12 @@ since `uv tool install` otherwise takes the newest CPython it has, whatever the 
 
 ### nuitka
 
-Nuitka `4.2.2` (run with `uv run --with nuitka==4.2.2`, outside `uv.lock`) compiles the app and
+Nuitka `4.3.0` (run with `uv run --with nuitka==4.3.0`, outside `uv.lock`) compiles the app and
 the dependencies it follows to C. It needs a C compiler on every backend and, on Linux,
 `patchelf`; a build takes minutes (4 to 13 measured for the script preset, about 25 for the flet
-preset). This Nuitka supports CPython up to 3.14: a newer `python.cpython` stops with exit 3
-unless Nuitka's own `--experimental=python3.X` is passed. Nuitka compiles through SCons, which
+preset). This Nuitka supports CPython up to 3.15 (3.15 as "experimental": Nuitka warns and
+builds): a newer `python.cpython` stops with exit 3 unless Nuitka's own `--experimental=python3.X`
+is passed. Nuitka compiles through SCons, which
 reads `$NAME`, `${...}` and `$$` in a path as its own variables: in a project folder whose path
 holds one (`app$v2`) the build would write outside the project, so it stops before any work
 (exit 2); move the project, or build with exe, portable or pyz. Nuitka also finds the data files
@@ -1717,6 +1768,12 @@ only deletes files is checked too).
   downloads it once, about 30 MB. Check the network (behind a proxy uv needs `HTTPS_PROXY`), or
   install it by hand with `uv python install 3.14`. With `UV_PYTHON_DOWNLOADS=never`, or
   `python-downloads = "never"` in a `uv.toml`, uv installs no Python at all: set it to `manual`.
+- **`python.cpython = "3.15": uv offers only CPython 3.15.0rc2 for it, a pre-release`**, or
+  **`the CPython 3.15 uv has installed is 3.15.0rc2`**: that uv is older than the release of
+  CPython 3.15, so it knows only its release candidates, which pyt never runs, builds or locks with. Update uv
+  (`uv self update`, or the way you installed it), then `uv python upgrade 3.15`: the
+  environments made on the candidate move to the release by themselves. Or keep `python.cpython`
+  at the minor you had.
 - **"runner needs Python 3.11 or newer, but uv started Python 3.10"**: a `UV_PYTHON`
   set for a `uv run` by hand, or a `.venv` made by hand with an older Python (the launchers start
   the runner on the Python of `.venv`): delete `.venv` (`./pyt setup` makes it again).
@@ -1775,6 +1832,7 @@ pytemplate.toml                  configuration and mode: the single source of tr
 pyproject.toml, uv.lock          dependencies (one lock for CPython and PyPy); managed parts
 README.md                        the project's page (in the template repository: this manual)
 LICENSE                          (template repository) the MIT license
+install.sh, install.ps1          (template repository) the one-line installers of pyt
 CLAUDE.md                        technical notes for coding agents
 src/main.py                      entry point (never compiled)
 src/<pkg>/core/                  what mypyc compiles (compile.modules)
@@ -1789,7 +1847,7 @@ typings/                         the project's stubs (raylib: the corrected rayl
 .pytemplate/README.md, LICENSE   (projects) this manual and the license of the copied runner
 .pytemplate/runner/              the runner (Python standard library only)
 .pytemplate/templates/           sources of the generated files (typing, VS Code, Neovim, CI)
-.pytemplate/presets/             the script, raylib and flet skeletons, deps and tested pins
+.pytemplate/presets/             the script, raylib and flet skeletons (and their --clean ones), deps and tested pins
 .pytemplate/nvim/                the Neovim plugin that .lazy.lua loads
 .pytemplate/tests/               tests of the runner (./pyt selftest) and their pytest.ini
 .pytemplate/state.json           hashes of the generated files, and the record of the last apply
@@ -1905,9 +1963,10 @@ regenerate the root (CLAUDE.md, section 11).
 **(template repository)** The template's own CI, in `.github/workflows/template-*.yml` (not
 copied into projects):
 
-- `template-selftest.yml` runs `./pyt selftest` on macOS and Windows and the suite with the
-  oldest uv that `required-version` accepts; on pushes to `main`, pull requests, weekly and by
-  hand. Its Linux jobs run in the CI image (`template-ci-image.yml`, below).
+- `template-selftest.yml` runs `./pyt selftest` on macOS and Windows, the suite with the
+  oldest uv that `required-version` accepts, and the suite in a project made with `new --clean`
+  and moved to the newest CPython (3.15) with the newest uv; on pushes to `main`, pull requests,
+  weekly and by hand. Its other Linux jobs run in the CI image (`template-ci-image.yml`, below).
 - `template-launchers.yml` runs `selftest --shells` on macOS and Windows (weekly with the newest
   xonsh too).
 - `template-nvim.yml` runs `selftest --nvim` on Windows with Neovim 0.12.5 and pinned plugins,

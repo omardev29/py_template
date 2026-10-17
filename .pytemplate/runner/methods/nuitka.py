@@ -33,11 +33,12 @@ from . import common
 from .common import copy_tree, refuse_a_globbed_folder, remove_output
 
 # Nuitka is not in uv.lock (`uv run --with`), so it is pinned here to keep builds reproducible:
-# the latest release on PyPI in September 2026. Bump it deliberately, together with NUITKA_PYTHON.
-NUITKA = "nuitka==4.2.2"
-# The newest CPython minor NUITKA supports: 4.2.2 stops with FATAL on 3.15 ("not supported by
-# Nuitka '4.2.2'") and only warns on later minors, then fails obscurely in the C compile.
-NUITKA_PYTHON = "3.14"
+# the latest release on PyPI in October 2026. Bump it deliberately, together with NUITKA_PYTHON.
+NUITKA = "nuitka==4.3.0"
+# The newest CPython minor NUITKA supports: 4.3 builds 3.15 with a warning that it is "only
+# experimentally supported" (nuitka.PythonVersions.getPartiallySupportedPythonVersions) and stops
+# with FATAL on 3.16 ("not supported by Nuitka '4.3'"); 4.2.2 stopped on 3.15.
+NUITKA_PYTHON = "3.15"
 
 
 def _minor(version: str) -> tuple[int, int]:
@@ -92,7 +93,7 @@ def optimization_args(cfg: Config) -> list[str]:
 
 
 # What SCons (Nuitka compiles through it) substitutes in a path Nuitka hands it: $NAME, ${...},
-# $$, $( and $) (SCons.Subst._dollar_exps_str, the same in the SCons 3 and 4 Nuitka 4.2.2 ships).
+# $$, $( and $) (SCons.Subst._dollar_exps_str, the same in the SCons 3 and 4 Nuitka 4.2.2 and 4.3 ship).
 # Nuitka passes the absolute paths of --output-dir unescaped: under app$v2 SCons made
 # app/<...>/.build/nuitka/<b>/main.build OUTSIDE the project (another project's folder, maybe),
 # and the build failed where that path could not be made.
@@ -133,7 +134,7 @@ def check_options(cfg: Config, backend: str) -> None:
         )
     if IS_MACOS:
         raise PytError(
-            "deploy.nuitka.pgo is not available on macOS: Nuitka 4.2.2 has no clang profdata step there. "
+            "deploy.nuitka.pgo is not available on macOS: Nuitka 4.3 has no clang profdata step there. "
             "Set pgo = false, or build on Linux or Windows",
             2,
         )
@@ -392,7 +393,7 @@ def build(req: BuildRequest) -> Path:
     # the Flet client out with only a warning (and '=' or '[' stopped the build).
     # --include-raw-dir, never --include-data-dir: that one copies only "non-code files" and
     # left out, without a word, every asset named like code (level1.bin, model.bin, tool.exe,
-    # plugin.dll, libfmod.so, a level script .py: Nuitka 4.2.2's default_ignored_suffixes),
+    # plugin.dll, libfmod.so, a level script .py: Nuitka 4.3's default_ignored_suffixes),
     # py.typed and .DS_Store, while the other methods ship the whole folder
     assets = cfg.app.assets
     if assets and (stage / assets).is_dir():

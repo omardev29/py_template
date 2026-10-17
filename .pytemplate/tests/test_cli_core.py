@@ -12,6 +12,7 @@ import importlib
 import io
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -2968,6 +2969,33 @@ def test_a_python_of_the_right_minor_is_not_python_cpython_unless_uv_manages_it(
     assert cli._restart(["run"], ["run"]) == 7 and box.calls[-1][0][0] == str(box.python)
     found(None)  # uv has none of that minor (Termux): ensure_python installs it or says why
     assert cli._restart(["run"], ["run"]) == 7 and len(box.calls) == 2
+
+
+def test_a_command_never_runs_on_a_prerelease_of_python_cpython(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """uv 0.12.x knows only CPython 3.15.0rc2 for python.cpython = "3.15" (3.15.0 came out after
+    it): it installed the release candidate, the launchers followed .python-version to it and every
+    command ran there without a word. A command that needs python.cpython stops with exit 3 and
+    the way out (a newer uv, uv python upgrade); help and doctor still run there (doctor says it)."""
+    box = Restart(monkeypatch, tmp_path)
+    this = "%d.%d" % sys.version_info[:2]
+    monkeypatch.setattr(project, "launcher_python", lambda root: ("", "only-managed"))  # the project has .venv
+    monkeypatch.setattr(cli, "_python_needed", lambda rest: this)
+    monkeypatch.setattr(cli, "_running_prerelease", lambda: f"{this}.0rc2")
+    monkeypatch.setattr(cli, "dispatch", fail)
+    assert cli.main(["run"], entry=True) == 3
+    err = capsys.readouterr().err
+    assert f'python.cpython = "{this}": the CPython {this} uv has installed is {this}.0rc2, a pre-release' in err
+    assert f"uv python upgrade {this}" in err and "Update uv" in err
+    monkeypatch.setattr(cli, "_python_needed", lambda rest: None)  # help, doctor...: any Python
+    assert cli._restart(["doctor"], ["doctor"]) is None
+    monkeypatch.setattr(cli, "_python_needed", lambda rest: this)
+    monkeypatch.setattr(cli, "_running_prerelease", lambda: "")  # a release
+    assert cli._restart(["run"], ["run"]) is None and box.calls == []
+
+
+def test_running_prerelease_names_only_a_pre_release() -> None:
+    expected = "" if sys.version_info.releaselevel == "final" else platform.python_version()
+    assert cli._running_prerelease() == expected
 
 
 def test_python_cpython_uv_cannot_install_stops_the_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

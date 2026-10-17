@@ -8,6 +8,7 @@ safety checks and the command itself (dry run and a real run in a throwaway copy
 
 from __future__ import annotations
 
+import ast
 import errno
 import hashlib
 import json
@@ -47,8 +48,8 @@ def _pyproject(preset: str, name: str) -> str:
     return presets._set_extra_tables(presets._set_project_name(base, name), extra)
 
 
-def _write_project(root: Path, preset: str, name: str, *, crlf: bool = False) -> None:
-    for rel, data in presets.skeleton(preset, name).items():
+def _write_project(root: Path, preset: str, name: str, *, crlf: bool = False, clean: bool = False) -> None:
+    for rel, data in presets.skeleton(preset, name, clean=clean).items():
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data.replace(b"\n", b"\r\n") if crlf and rel != "pytemplate.toml" else data)
@@ -83,13 +84,14 @@ PAIRS = [
 ]
 
 
+@pytest.mark.parametrize("clean", [False, True], ids=["example", "clean"])  # ./pyt new --clean
 @pytest.mark.parametrize("preset", ["script", "raylib", "flet"])
 @pytest.mark.parametrize(("old", "new"), PAIRS)
 @pytest.mark.parametrize("crlf", [False, True], ids=["lf", "crlf"])
-def test_rename_reproduces_the_skeleton_of_the_new_name(tmp_path: Path, preset: str, old: str, new: str, crlf: bool) -> None:
-    _write_project(tmp_path, preset, old, crlf=crlf)
+def test_rename_reproduces_the_skeleton_of_the_new_name(tmp_path: Path, preset: str, old: str, new: str, crlf: bool, clean: bool) -> None:
+    _write_project(tmp_path, preset, old, crlf=crlf, clean=clean)
     planned = _rename(tmp_path, old, new)
-    expected = presets.skeleton(preset, new)
+    expected = presets.skeleton(preset, new, clean=clean)
     if crlf:  # every file keeps its own line endings (pytemplate.toml is written with LF)
         expected = {k: v if k == "pytemplate.toml" else v.replace(b"\n", b"\r\n") for k, v in expected.items()}
     assert _tree(tmp_path) == expected
@@ -1101,6 +1103,27 @@ def test_a_local_import_of_the_package_under_a_module_rebinding() -> None:
     src = "import game.core\ngame = None\n\ndef h():\n    import game.gfx\n    return game.gfx.Z\n"
     out = rewrite(src, Names("game", "beta"), python=True)
     assert out.text == "import beta.core\ngame = None\n\ndef h():\n    import beta.gfx\n    return beta.gfx.Z\n"
+
+
+def test_a_dict_comprehension_that_unpacks_is_renamed_like_any_other(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Python 3.15 (PEP 798) parses `{**d for d in ds}` into a DictComp without a value: the scope
+    # pass pushed that None, and `rename` on a 3.15 runner (python.cpython = "3.15") ended in an
+    # internal runner error. An older runner's ast refuses the syntax, and the token rule renames
+    src = "import game.core\nmerged = {**d for d in game.core.parts()}\n"
+    if sys.version_info < (3, 15):  # the tree 3.15 gives: a comprehension whose value is None
+        real_parse = ast.parse
+
+        def parse(text: str, *args: Any, **kwargs: Any) -> Any:
+            tree = real_parse(text.replace("{**d for d", "{d:d for d"), *args, **kwargs)  # same columns
+            for node in ast.walk(tree):
+                if isinstance(node, ast.DictComp):
+                    node.value = None  # type: ignore[assignment]
+            return tree
+
+        monkeypatch.setattr(rename.ast, "parse", parse)
+    assert rename._package_uses(src, "game") == {(2, src.splitlines()[1].index("game"))}
+    out = rewrite(src, Names("game", "beta"), python=True)
+    assert out.text == src.replace("game.", "beta.") and out.kept == []
 
 
 CAPTURED = [
@@ -2785,19 +2808,20 @@ _NAME_WORD = st.text("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345
 _ZQ_NAMES = st.tuples(_NAME_WORD, st.one_of(st.just(""), st.tuples(st.sampled_from("-_"), _NAME_WORD).map("".join)))
 
 
+@pytest.mark.parametrize("clean", [False, True], ids=["example", "clean"])
 @pytest.mark.parametrize("preset", ["script", "raylib", "flet"])
 @settings(max_examples=max(5, settings.default.max_examples // 5), suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(names=st.tuples(_ZQ_NAMES, _ZQ_NAMES).map(lambda ab: tuple("zq" + "".join(n) for n in ab)).filter(lambda ab: ab[0] != ab[1]))
-def test_any_names_reproduce_the_skeleton_and_round_trip(tmp_path: Path, preset: str, names: tuple[str, str]) -> None:
+def test_any_names_reproduce_the_skeleton_and_round_trip(tmp_path: Path, preset: str, clean: bool, names: tuple[str, str]) -> None:
     """Two names at random (the same package too: zqAb and zqab-c differ in case or '-'): the
     skeleton of the first renamed is the skeleton of the second, and renamed back it is the
     first one again, byte for byte."""
     a, b = names
     root = Path(tempfile.mkdtemp(dir=tmp_path))  # one project per example: tmp_path is the test's
-    _write_project(root, preset, a)
+    _write_project(root, preset, a, clean=clean)
     original = _tree(root)
     _rename(root, a, b)
-    assert _tree(root) == presets.skeleton(preset, b)
+    assert _tree(root) == presets.skeleton(preset, b, clean=clean)
     assert (root / "pyproject.toml").read_text(encoding="utf-8") == _pyproject(preset, b)
     _rename(root, b, a)
     assert _tree(root) == original

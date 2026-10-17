@@ -11,6 +11,7 @@ configuration) and this Python for interpreter_info.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import shutil
 import stat
@@ -403,6 +404,118 @@ def test_ensure_python_finds_or_installs_the_version_or_says_why(
     assert installs == ([["python", "install", "--no-bin", "--no-registry", "3.41"]] if downloads == "here" else [])
     if installs:
         assert "uv installs it (once" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("installed", [False, True], ids=["offered", "installed"])
+def test_ensure_python_never_takes_a_prerelease(monkeypatch: pytest.MonkeyPatch, installed: bool) -> None:
+    """uv 0.12.x knows only CPython 3.15.0rc2 for "3.15" (3.15.0 came out after it): it installed
+    the release candidate without a word, the project locked and ran on it, and doctor said
+    3.15.0. A pre-release that uv offers is never installed, and one that is installed never
+    runs a command: exit 3, with the way out (a newer uv, uv python upgrade)."""
+    seen: list[list[str]] = []
+
+    def fake(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        argv = [str(a) for a in args]
+        seen.append(argv)
+        if argv[1] == "find":
+            return done(argv, 0, "/uv/cpython-3.15/bin/python3.15\n") if installed else done(argv, 2, "", "error: No interpreter found\n")
+        if argv[1] == "list":
+            assert argv[2:] == ["3.15", "--only-downloads", "--output-format", "json"]
+            return done(argv, 0, json.dumps([{"key": "cpython-3.15.0rc2-linux-x86_64-gnu", "version": "3.15.0rc2"}]))
+        return pytest.fail(f"uv {argv}")  # never installs it
+
+    monkeypatch.setattr(envs, "uv", fake)
+    # ensure_python hands the interpreter on as a Path: \uv\cpython-3.15\... on Windows
+    python = Path("/uv/cpython-3.15/bin/python3.15")
+    monkeypatch.setattr(envs.proc, "output", lambda argv, **kw: "3.15.0rc2\n" if Path(argv[0]) == python else pytest.fail(str(argv)))
+    with pytest.raises(PytError) as e:
+        envs.ensure_python("3.15")
+    assert e.value.code == 3
+    message = str(e.value)
+    if installed:
+        assert 'the CPython 3.15 uv has installed is 3.15.0rc2, a pre-release, which pyt never uses' in message
+        assert "uv python upgrade 3.15" in message
+    else:
+        assert "uv offers only CPython 3.15.0rc2 for it, a pre-release" in message and "update uv" in message
+    assert "released version" in message
+    assert [a[1] for a in seen] == (["find"] if installed else ["find", "list"])
+
+
+def test_ensure_python_installs_a_release_next_to_pre_releases(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A uv that knows the release lists it next to its candidates: the release is installed."""
+    installed = [False]
+
+    def fake(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        argv = [str(a) for a in args]
+        if argv[1] == "find":
+            return done(argv, 0, "/uv/cpython-3.15/bin/python3.15\n") if installed[0] else done(argv, 2)
+        if argv[1] == "list":
+            return done(argv, 0, json.dumps([{"version": "3.15.0"}, {"version": "3.15.0rc2"}]))
+        installed[0] = True
+        return done(argv)
+
+    monkeypatch.setattr(envs, "uv", fake)
+    monkeypatch.setattr(envs.proc, "output", lambda argv, **kw: "\n")  # a release prints nothing
+    assert envs.ensure_python("3.15") == Path("/uv/cpython-3.15/bin/python3.15") and installed[0]
+
+
+@pytest.mark.parametrize(
+    ("answer", "release"),
+    [("3.15.0rc2\n", "3.15.0rc2"), ("3.16.0a1", "3.16.0a1"), ("3.15.0b4", "3.15.0b4"), ("\n", ""), ("uv 0.12.19 (x86_64)", ""), ("3.15.0", "")],
+)
+def test_prerelease_of_reads_only_a_version(monkeypatch: pytest.MonkeyPatch, answer: str, release: str) -> None:
+    """What the interpreter printed names a pre-release only when it reads as one: a program that
+    prints something else (a broken python, a wrapper) is no pre-release."""
+    monkeypatch.setattr(envs.proc, "output", lambda argv, **kw: answer)
+    assert envs.prerelease_of("python") == release
+
+
+def test_prerelease_of_a_python_that_does_not_start_is_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    assert envs.prerelease_of(tmp_path / "missing" / "python") == ""
+    assert envs.prerelease_of(sys.executable) == ("" if sys.version_info.releaselevel == "final" else __import__("platform").python_version())
+
+
+def test_prerelease_of_a_python_the_system_refuses_to_start_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An OSError of the start (a file of another architecture) is no pre-release either: the
+    commands that need that Python say what is wrong with it, never this check."""
+
+    def refuse(argv: Sequence[Any], **kw: Any) -> str:
+        raise OSError(errno.ENOEXEC, "Exec format error", str(argv[0]))
+
+    monkeypatch.setattr(envs.proc, "output", refuse)
+    assert envs.prerelease_of("python") == ""
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="the fake uv is a shell script")
+@pytest.mark.parametrize(
+    ("out", "code", "releases"),
+    [
+        (json.dumps([{"version": "3.15.0"}, {"key": "x"}, "3.14.0", {"version": "3.15.0rc2"}]), 0, ["3.15.0", "3.15.0rc2"]),
+        ("[]", 0, []),
+        ("", 0, []),
+        (json.dumps({"version": "3.15.0"}), 0, None),
+        ("not json", 0, None),
+        (json.dumps([{"version": "3.15.0"}]), 2, None),
+    ],
+    ids=["entries", "none", "empty", "not-a-list", "not-json", "uv-failed"],
+)
+def test_cpython_releases_reads_what_uv_prints_also_in_a_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], out: str, code: int, releases: list[str] | None
+) -> None:
+    """The release lookup is a query the runner reads, through the real proc.run: captured, run
+    under --dry-run too (an echoed command is skipped there, so the dry run of new or doctor
+    would never see that uv offers only a pre-release), a uv that fails is no answer (never an
+    error), and only the entries that carry a version count."""
+    fake = tmp_path / "uv"
+    fake.write_text('#!/bin/sh\n[ "$1 $2 $3 $4" = "python list 3.15 --only-downloads" ] || exit 9\nprintf \'%s\' "$PT_UV_OUT"\nexit "$PT_UV_CODE"\n', encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setattr(proc, "find_uv", lambda: str(fake))
+    monkeypatch.setattr(envs, "_uv_ok", {str(fake)})  # no `uv --version` before it
+    monkeypatch.setenv("PT_UV_OUT", out)
+    monkeypatch.setenv("PT_UV_CODE", str(code))
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert envs.cpython_releases("3.15") == releases
+    assert str(fake) not in capsys.readouterr().err  # a query: no command line echoed
 
 
 @pytest.mark.parametrize(
@@ -1624,6 +1737,19 @@ def test_doctor_all_good(doctor: Doctor, capsys: pytest.CaptureFixture[str]) -> 
     assert "all good" in capsys.readouterr().err
     assert doctor.line("uv: uv 0.12.19")[0] is True
     assert doctor.compiler_platforms == ["linux-x86_64"]  # the .venv's platform picks the MSVC tools
+
+
+def test_doctor_says_when_python_cpython_is_a_pre_release(doctor: Doctor, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv 0.12.x installed CPython 3.15.0rc2 for "3.15", and doctor called it 3.15.0 (the X.Y.Z of
+    interpreter_info): both the python.cpython line and the .venv one say it is a pre-release."""
+    monkeypatch.setattr(cmd_env.envs, "prerelease_of", lambda python: "3.14.0rc2" if Path(python) == doctor.cpython else "")
+    doctor.info["cpython"] = {**doctor.info["cpython"], "version": "3.14.0", "release": "3.14.0rc2", "final": False}  # type: ignore[dict-item]
+    assert cmd_env.cmd_doctor(make(PYPY), []) == 1
+    problems = doctor.problems()
+    assert (False, f"CPython 3.14 (python.cpython): {doctor.cpython} is CPython 3.14.0rc2, a pre-release", envs.prerelease_problem("3.14", "3.14.0rc2", installed=True).split("\n", 1)[1].strip()) in problems
+    assert (False, "CPython 3.14.0rc2 in .venv: a pre-release", "uv python upgrade 3.14 (update uv first), then ./pyt setup") in [
+        (p, label.replace(str(doctor.cp.dir), ".venv"), hint) for p, label, hint in problems
+    ]
 
 
 def test_doctor_says_where_python_cpython_is(doctor: Doctor) -> None:

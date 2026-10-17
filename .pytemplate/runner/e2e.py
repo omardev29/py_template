@@ -958,6 +958,7 @@ def do_verify(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
     if (p / ".pytemplate" / "template-repo").exists():
         problems.append("copied .pytemplate/template-repo")
     problems += [f"copied .github/workflows/{w.name}" for w in sorted((p / ".github" / "workflows").glob("template-*"))]
+    problems += [f"copied {name}" for name in ("install.sh", "install.ps1") if os.path.lexists(p / name)]  # the template's installers
     for name in sorted(os.listdir(p)):
         if name in NEVER_COPIED or name.startswith(".venv"):
             made = MADE_BY_INIT.get(name)

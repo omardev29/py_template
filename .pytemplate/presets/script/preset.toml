@@ -3,3 +3,10 @@ description = "Script or console app (example: sieve and Collatz benchmark with 
 # Preset-specific dependencies (the shared ones, such as mypy-extensions, are in pyproject.toml)
 dependencies = ["rich>=15.0.0"]
 dev_dependencies = []
+
+# ./pyt new --clean: the skeleton without the example. The files of clean/ replace those of
+# files/, and these keys say what else changes
+[clean]
+description = "Script or console app"   # the example's words left out of README.md and [project]
+drop = ["src/__pkg__/core/bench.py"]    # files of files/ left out
+dependencies = []                       # rich draws the example's table

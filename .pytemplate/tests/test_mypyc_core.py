@@ -3078,7 +3078,7 @@ def test_real_report_with_separate_covers_every_module_every_time(src_tree: Path
         },
     )
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
-    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "separate": True}})
+    cfg = real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "separate": True}})
     html = tmp_path / "report.html"
     for edit in ("", "\n# edited\n"):  # the later runs find mypy's cache of the earlier ones
         with (src_tree / "pkg" / "core" / "n.py").open("a", encoding="utf-8") as f:

@@ -471,11 +471,11 @@ def _owned_now() -> dict[str, bytes]:
     return out
 
 
-def _plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
+def _plan_init(cfg: Config, preset: str, name: str | None, *, force: bool, clean: bool = False) -> None:
     """--dry-run: print what `init` would do (presets.plan_init: the same checks, no writes)."""
-    plan = presets.plan_init(cfg, preset, name, force=force)
+    plan = presets.plan_init(cfg, preset, name, force=force, clean=clean)
     owned = _owned_now()
-    ui.step(f"init {preset} ({plan.description}) as '{plan.name}' {_DRY}")
+    ui.step(f"init {preset}{' --clean' if clean else ''} ({plan.description}) as '{plan.name}' {_DRY}")
     marks: list[str] = []
     same = 0
     for path in sorted({*plan.files, *owned}):
@@ -501,16 +501,18 @@ def _plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> No
 
 
 def cmd_init(cfg: Config, args: list[str]) -> int:
-    """__init PRESET [--name NAME] [--force]: convert this project to the preset (internal: ./pyt new)."""
+    """__init PRESET [--name NAME] [--force] [-c|--clean]: convert this project to the preset
+    (internal: ./pyt new); --clean: its skeleton without the example code."""
     parser = argparse.ArgumentParser(prog="./pyt __init")
     parser.add_argument("preset", choices=presets.available())
     parser.add_argument("--name")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("-c", "--clean", action="store_true")
     ns = _parse(parser, args)
     if proc.DRY_RUN:
-        _plan_init(cfg, ns.preset, ns.name, force=ns.force)
+        _plan_init(cfg, ns.preset, ns.name, force=ns.force, clean=ns.clean)
         return 0
-    presets.init(cfg, ns.preset, ns.name, force=ns.force)
+    presets.init(cfg, ns.preset, ns.name, force=ns.force, clean=ns.clean)
     return 0
 
 
@@ -562,13 +564,15 @@ def _inside_the_template(resolved: Path) -> bool:
 
 
 def cmd_new(cfg: Config, args: list[str]) -> int:
-    """new DIR [--preset P] [--name NAME]: copy the template to a new project."""
+    """new DIR [--preset P] [--name NAME] [-c|--clean]: copy the template to a new project
+    (--clean: the preset's skeleton without the example code)."""
     from .cli import _prog  # `pyt` outside a project (global mode), where `new` runs too
 
     parser = argparse.ArgumentParser(prog=f"{_prog()} new")
     parser.add_argument("dest")
     parser.add_argument("--preset", default="script", choices=presets.available())
     parser.add_argument("--name")
+    parser.add_argument("-c", "--clean", action="store_true")
     ns = _parse(parser, args)
     dest = user_path(ns.dest)
     # realpath, never Path.resolve: on Python 3.11 and 3.12 (new runs on any 3.11+) resolve raises
@@ -604,7 +608,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         if found is None and envs.cpython_downloads(version) is False:
             raise PytError(envs.no_download_problem(version), 3)
         ui.step(f"new project in {dest} {_DRY}")
-        ui.info(f"  preset  {ns.preset}")
+        ui.info(f"  preset  {ns.preset}{' (--clean: without the example code)' if ns.clean else ''}")
         ui.info(f"  name    {name}  (package src/{name.replace('-', '_').lower()}/)")
         ui.info(f"  python  CPython {version}: {found if found is not None else f'not installed, uv would install it (uv python install {version})'}")
         # what __init pins in the copy: the packages its uv.lock (this one) does not have yet
@@ -620,12 +624,12 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
             git = "and `git init -b main`"
         ui.info(
             f"  would copy {presets.source_name()} there ({presets.copy_scope()}; no .git, environments, builds or "
-            f"caches), run `./pyt __init {ns.preset} --name {name} --force` in it {git}"
+            f"caches), run `./pyt __init {ns.preset} --name {name} --force{' --clean' if ns.clean else ''}` in it {git}"
         )
         if top is not None:
             _monorepo_note(dest, top)
         return 0
-    presets.new(dest, ns.preset, name, python=envs.ensure_python(version))
+    presets.new(dest, ns.preset, name, python=envs.ensure_python(version), clean=ns.clean)
     if top is not None:
         _monorepo_note(dest, top)
     return 0

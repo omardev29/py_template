@@ -381,6 +381,54 @@ def cpython_downloads(request: str, *, everywhere: bool = False) -> bool | None:
     return bool((r.stdout or "").strip())
 
 
+def cpython_releases(request: str) -> list[str] | None:
+    """The versions of the CPython downloads uv has for `request` (python.cpython) on this
+    platform, newest first ("3.15.0", or "3.15.0rc2" from a uv older than 3.15.0), or None when
+    uv cannot say. uv knows its downloads without the network."""
+    args = ["python", "list", request, "--only-downloads", "--output-format", "json"]
+    r = uv(_python_env(request), args, check=False, capture=True, echo=False)
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout or "[]")
+    except ValueError:  # json.JSONDecodeError
+        return None
+    if not isinstance(data, list):
+        return None
+    return [str(d["version"]) for d in data if isinstance(d, dict) and "version" in d]
+
+
+# A CPython pre-release, as uv and platform.python_version() spell it: 3.15.0a1, 3.15.0b4, 3.15.0rc2
+PRERELEASE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+")
+
+
+def prerelease_of(python: str | Path) -> str:
+    """The version of the CPython `python` when it is a pre-release ("3.15.0rc2"), else "" (a
+    release, or an interpreter that does not start: the commands that need it say so)."""
+    code = "import platform,sys;print('' if sys.version_info.releaselevel=='final' else platform.python_version())"
+    try:
+        answer = proc.output([str(python), "-I", "-c", code]).strip()
+    except (PytError, OSError):
+        return ""
+    return answer if PRERELEASE.fullmatch(answer) else ""  # a version, never what a broken program printed
+
+
+def prerelease_problem(version: str, release: str, *, installed: bool) -> str:
+    """Why a CPython pre-release never stands in for python.cpython `version`: a uv older than that
+    minor's release knows only its pre-releases (uv 0.12.x offers 3.15.0rc2 for "3.15"), which it
+    installed, locked and ran without a word, and doctor called it 3.15.0."""
+    if installed:
+        head = f'python.cpython = "{version}": the CPython {version} uv has installed is {release}, a pre-release, which pyt never uses.'
+        fix = f"  Update uv (uv self update, or the way you installed it), then replace it: uv python upgrade {version}"
+    else:
+        head = f'python.cpython = "{version}": uv offers only CPython {release} for it, a pre-release, which pyt never uses.'
+        fix = (
+            f"  A uv older than the release of CPython {version} knows only its pre-releases: update uv (uv self\n"
+            "  update, or the way you installed it) and run the command again"
+        )
+    return head + "\n" + fix + "\n  Or keep python.cpython at a released version (uv python list --only-downloads lists them)"
+
+
 def this_platform() -> str:
     """This machine as the messages name it: `Android (linux aarch64)` in Termux."""
     machine = f"{sys.platform} {platform.machine() or 'unknown'}"
@@ -426,9 +474,13 @@ def ensure_python(version: str) -> Path:
     turned off). The install is not an echoed command, so a --dry-run gets the Python it needs."""
     found = find_cpython(version)
     if found is not None:
+        _refuse_a_prerelease(version, found)
         return found
-    if cpython_downloads(version) is False:
+    releases = cpython_releases(version)
+    if releases == [] or (releases is None and cpython_downloads(version) is False):
         raise PytError(no_download_problem(version), 3)
+    if releases and all(PRERELEASE.fullmatch(v) for v in releases):
+        raise PytError(prerelease_problem(version, releases[0], installed=False), 3)
     ui.info(f"CPython {version} (python.cpython) is not installed: uv installs it (once, about 30 MB)")
     # --no-bin --no-registry: nothing outside uv's own folder (no python3.X in ~/.local/bin, no Windows
     # registry entry), as when uv downloads an interpreter itself
@@ -442,16 +494,26 @@ def ensure_python(version: str) -> Path:
             '  (or python-downloads = "never" in a uv.toml) uv installs no Python at all: allow "manual"',
             3,
         )
+    _refuse_a_prerelease(version, found)
     return found
+
+
+def _refuse_a_prerelease(version: str, python: Path) -> None:
+    release = prerelease_of(python)
+    if release:
+        raise PytError(prerelease_problem(version, release, installed=True), 3)
 
 
 def interpreter_info(python: str | Path) -> dict[str, object]:
     """Return interpreter data (impl, version, platform, prefix) without importing anything from
-    the project. `platform` is sysconfig.get_platform(): setuptools picks the MSVC tools by it;
+    the project. `version` is X.Y.Z, `release` its whole spelling (3.15.0rc2 for a pre-release;
+    PyPy's language version on PyPy) and `final` whether it is a release. `platform` is sysconfig.get_platform(): setuptools picks the MSVC tools by it;
     `cc` the C compiler command it runs without $CC (None on Windows)."""
     code = (
         "import json,sys,sysconfig;"
+        "import platform;"
         "print(json.dumps({'impl':sys.implementation.name,'version':'%d.%d.%d'%sys.version_info[:3],"
+        "'release':platform.python_version(),'final':sys.version_info.releaselevel=='final',"
         "'platform':sysconfig.get_platform(),'cc':sysconfig.get_config_var('CC'),"
         "'executable':sys.executable,'base_prefix':sys.base_prefix,"
         "'gil_disabled':bool(sysconfig.get_config_var('Py_GIL_DISABLED'))}))"

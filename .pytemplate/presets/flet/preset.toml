@@ -21,3 +21,8 @@ module = "main"
 # Default values of [preset.flet] in pytemplate.toml
 [options]
 version = "1.0.1"
+
+# ./pyt new --clean: the skeleton without the example (the fractal). The files of clean/ replace
+# those of files/, and these keys say what else changes
+[clean]
+drop = ["src/__pkg__/core/fractal.py", "tests/test_fractal.py"]   # files of files/ left out

@@ -1983,3 +1983,112 @@ def test_doctor_notes_the_launchers_left_in_the_recorded_bin_folder(tmp_path: Pa
     (d.snapshot / cmd_install.RECORD).write_text(json.dumps({"commit": "0123456789", "bin": str(d.bin)}), encoding="utf-8")
     d.run()
     assert not any(str(recorded) in n for n in d.notes()), d.lines
+
+
+# --- the one-line installers: install.sh (curl | sh) and install.ps1 (irm | iex) ---------------------
+
+INSTALLERS = ROOT / "install.sh", ROOT / "install.ps1"
+template_installers = pytest.mark.skipif(not INSTALLERS[0].is_file(), reason="the template repository's installers (a project has none)")
+
+
+def _folders_left(box: Box) -> list[Path]:
+    """The folders left in the box's temporary folder (uv keeps a lock file there of its own)."""
+    return [p for p in (box.root / "tmp").iterdir() if p.is_dir()]
+
+
+def _one_line_env(template: Path, box: Box, **extra: str) -> dict[str, str]:
+    """The installer's environment: the template fixture's repository as PYT_REPO (a file:// URL:
+    git ignores --depth for a plain path), its branch, and a temporary folder of the box."""
+    (box.root / "tmp").mkdir(exist_ok=True)
+    tmp = str(box.root / "tmp")
+    one_line = {"PYT_REPO": template.as_uri(), "PYT_REF": git(template, "rev-parse", "--abbrev-ref", "HEAD").strip(), "TMPDIR": tmp, "TEMP": tmp, "TMP": tmp}
+    return box.env(**{**_uv_dirs(), **one_line, **extra})
+
+
+@template_installers
+@posix_only
+@needs_git
+@needs_uv
+def test_the_one_line_installer_installs_from_a_clone_it_deletes(template: Path, box: Box) -> None:
+    """curl ... | sh: a shallow clone of the repository in a temporary folder, its ./pyt install,
+    then the clone goes (the installed template is the copy pyt uses); the record names the
+    repository, since the folder it was installed from is gone."""
+    env = _one_line_env(template, box)
+    script = INSTALLERS[0].read_text(encoding="utf-8")  # over stdin, as curl hands it to sh
+    r = subprocess.run(["/bin/sh"], input=script, cwd=box.away, env=env, capture_output=True, text=True, timeout=600, check=False)
+    assert r.returncode == 0, r.stderr
+    assert "pyt is installed" in r.stderr
+    record = _record(box.snapshot)
+    assert record["source"] == f"{env['PYT_REPO']} ({env['PYT_REF']})" and record["commit"] == git(template, "rev-parse", "HEAD").strip()
+    assert box.launchers() == {name: (template / name).read_bytes() for name in cmd_install.LAUNCHERS}
+    assert _folders_left(box) == []  # the clone is gone
+    assert f"from {record['source']}" in cmd_install.describe(record)
+    # Run again: the update replaces the installed template whole
+    again = subprocess.run(["/bin/sh"], input=script, cwd=box.away, env=env, capture_output=True, text=True, timeout=600, check=False)
+    assert again.returncode == 0, again.stderr
+    assert _leftovers(box) == [] and _folders_left(box) == []
+
+
+@template_installers
+@posix_only
+def test_the_one_line_installer_says_what_it_needs(template: Path, box: Box, tmp_path: Path) -> None:
+    """Without git: exit 3 and how to get it, before anything is made. A branch the repository
+    lacks: git's own error, exit 1, the temporary folder gone."""
+    script = INSTALLERS[0].read_text(encoding="utf-8")
+    empty = tmp_path / "no-programs"
+    empty.mkdir()
+    r = subprocess.run(["/bin/sh"], input=script, cwd=box.away, env={**box.env(), "PATH": str(empty)}, capture_output=True, text=True, timeout=60, check=False)
+    assert r.returncode == 3 and "pyt installer: git is needed" in r.stderr, r.stderr
+    if shutil.which("git") is None:
+        return
+    env = _one_line_env(template, box, PYT_REF="no-such-branch")
+    r = subprocess.run(["/bin/sh"], input=script, cwd=box.away, env=env, capture_output=True, text=True, timeout=120, check=False)
+    assert r.returncode == 1 and "git could not clone" in r.stderr, r.stderr
+    assert _folders_left(box) == [] and not box.bin.exists()
+
+
+@template_installers
+@needs_git
+@needs_uv
+def test_the_powershell_one_line_installer_installs_from_a_clone_it_deletes(template: Path, box: Box) -> None:
+    """irm ... | iex in Windows PowerShell 5.1 and PowerShell 7 (on Linux and macOS too): the
+    same install, run inside the caller's session, which keeps no variable or function of it."""
+    shells = [exe for exe in (shutil.which("powershell"), shutil.which("pwsh")) if exe]
+    if not shells:
+        pytest.skip("no PowerShell")
+    env = _one_line_env(template, box)
+    check = (
+        "Get-Content -Raw -LiteralPath $env:PT_INSTALLER | Invoke-Expression; $code = $LASTEXITCODE; "
+        "if (Get-Command Install-PytFromGitHub -ErrorAction SilentlyContinue) { 'LEFT function' }; "
+        "if (Test-Path Env:PYTEMPLATE_INSTALL_SOURCE) { 'LEFT variable' }; exit $code"
+    )
+    for exe in shells:
+        r = subprocess.run(
+            [exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", check],
+            cwd=box.away, env={**env, "PT_INSTALLER": str(INSTALLERS[1])}, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, check=False,
+        )  # fmt: skip
+        assert r.returncode == 0 and "LEFT" not in r.stdout, (exe, r.stdout, r.stderr)
+        record = _record(box.snapshot)
+        assert record["source"] == f"{env['PYT_REPO']} ({env['PYT_REF']})", exe
+        assert set(box.launchers()) == set(cmd_install.LAUNCHERS) and _folders_left(box) == [], exe
+
+
+@needs_git
+@needs_uv
+def test_install_records_the_source_the_one_line_installer_names(clone: Path, box: Box) -> None:
+    r = pyt(clone, box, "install", **{cmd_install.INSTALL_SOURCE: "https://example.invalid/t.git (main)"})
+    assert r.returncode == 0, r.stderr
+    assert _record(box.snapshot)["source"] == "https://example.invalid/t.git (main)"
+    r = pyt(clone, box, "install")  # by hand in a clone: the clone's folder
+    assert r.returncode == 0 and os.path.samefile(_record(box.snapshot)["source"], clone)
+
+
+@template_installers
+def test_the_installers_are_ascii_and_carry_the_marker() -> None:
+    for path in INSTALLERS:
+        data = path.read_bytes()
+        assert data.isascii() and b"pytemplate-installer:" in data, path
+        assert b"https://raw.githubusercontent.com/omardev29/py_template/main/" + path.name.encode() in data, path
+    if shutil.which("shellcheck"):
+        r = subprocess.run(["shellcheck", "-s", "sh", str(INSTALLERS[0])], capture_output=True, text=True, timeout=60, check=False)
+        assert r.returncode == 0, r.stdout

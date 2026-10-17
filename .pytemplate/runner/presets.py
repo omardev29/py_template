@@ -101,6 +101,16 @@ PRESET_KEYS: dict[str, str] = {
     "options": "a table",
     "uv": "a table",
     "pyproject": "a string",
+    "clean": "a table",
+}
+# The keys of its [clean] table (./pyt new --clean: the skeleton without the example code)
+CLEAN_KEYS: dict[str, str] = {
+    "description": "a string",  # README.md and [project] description, instead of the preset's
+    "drop": "a list of strings",  # files of files/ left out (clean/ adds and replaces the others)
+    "dependencies": "a list of strings",  # instead of the preset's (dev_dependencies too)
+    "dev_dependencies": "a list of strings",
+    "tasks": "a list of strings",  # [tasks] tables of pytemplate.toml left out
+    "buttons": "a list of strings",  # [vscode] buttons
 }
 
 
@@ -132,7 +142,19 @@ def load(name: str) -> dict[str, Any]:
             raise PytError(f"{where}: unknown key '{key}' (known: {', '.join(PRESET_KEYS)})")
         if not _holds(value, kind):
             raise PytError(f"{where}: '{key}' must be {kind}")
+    for key, value in data.get("clean", {}).items():
+        kind = CLEAN_KEYS.get(key)
+        if kind is None:
+            raise PytError(f"{where}: unknown key 'clean.{key}' (known: {', '.join(CLEAN_KEYS)})")
+        if not _holds(value, kind):
+            raise PytError(f"{where}: 'clean.{key}' must be {kind}")
     return data
+
+
+def described(preset: str, *, clean: bool = False) -> str:
+    """The preset's description: a project's README.md and [project] description say it."""
+    data = load(preset)
+    return str(data.get("clean", {}).get("description", data.get("description", "")) if clean else data.get("description", ""))
 
 
 def _fmt(value: Any, options: dict[str, Any]) -> Any:
@@ -158,14 +180,17 @@ def uv_extras(cfg: Config) -> dict[str, Any]:
     return {k: _fmt(v, opts) for k, v in data.get("uv", {}).items()}
 
 
-def dependencies(cfg: Config, name: str | None = None) -> tuple[list[str], list[str]]:
+def dependencies(cfg: Config, name: str | None = None, *, clean: bool = False) -> tuple[list[str], list[str]]:
+    """The requirements a project of the preset gets (`clean`: of ./pyt new --clean, whose
+    [clean] table may leave out what only the example needs)."""
     preset = name or cfg.app.preset
     data = load(preset)
     opts: dict[str, Any] = dict(data.get("options", {}))
     if preset == cfg.app.preset:
         opts.update(cfg.preset_options(preset))
-    deps = [str(_fmt(d, opts)) for d in data.get("dependencies", [])]
-    dev = [str(_fmt(d, opts)) for d in data.get("dev_dependencies", [])]
+    source = {**data, **data.get("clean", {})} if clean else data
+    deps = [str(_fmt(d, opts)) for d in source.get("dependencies", [])]
+    dev = [str(_fmt(d, opts)) for d in source.get("dev_dependencies", [])]
     return deps, dev
 
 
@@ -184,10 +209,8 @@ def _text_of(path: Path, data: bytes) -> str | None:
         return None
 
 
-def skeleton(preset: str, name: str) -> dict[str, bytes]:
-    """Return the preset files, already customized: relative path -> content."""
-    pkg = name.replace("-", "_").lower()
-    base = PRESETS / preset / "files"
+def _rendered(base: Path, name: str, pkg: str) -> dict[str, bytes]:
+    """The files of `base` with __pkg__, {{name}} and {{pkg}} filled in: relative path -> content."""
     out: dict[str, bytes] = {}
     for path in sorted(base.rglob("*")):
         if not path.is_file() or "__pycache__" in path.parts:
@@ -200,6 +223,51 @@ def skeleton(preset: str, name: str) -> dict[str, bytes]:
             data = text.replace("\r\n", "\n").encode("utf-8")
         out[rel_path] = data
     return out
+
+
+def skeleton(preset: str, name: str, *, clean: bool = False) -> dict[str, bytes]:
+    """Return the preset files, already customized: relative path -> content. `clean` (./pyt new
+    --clean): without the example code, as the preset's [clean] table and clean/ folder say."""
+    pkg = name.replace("-", "_").lower()
+    out = _rendered(PRESETS / preset / "files", name, pkg)
+    if not clean:
+        return out
+    spec: dict[str, Any] = load(preset).get("clean", {})
+    where = f"preset {preset}: [clean]"
+    for entry in spec.get("drop", []):
+        if out.pop(entry.replace("__pkg__", pkg), None) is None:
+            raise PytError(f"{where} drop names {entry}, which files/ does not hold")
+    if not (PRESETS / preset / "clean").is_dir():  # its files replace the example's: never a project without them
+        raise PytError(f"preset {preset}: --clean needs its clean/ folder, which is missing (in git? `new` copies the files git tracks)")
+    out.update(_rendered(PRESETS / preset / "clean", name, pkg))
+    if "pytemplate.toml" in out:
+        out["pytemplate.toml"] = _clean_config(out["pytemplate.toml"].decode("utf-8"), spec, where).encode("utf-8")
+    return out
+
+
+def _clean_config(text: str, spec: dict[str, Any], where: str) -> str:
+    """The skeleton's pytemplate.toml without the example's [tasks] tables (spec["tasks"]) and
+    with spec["buttons"] as [vscode] buttons; the result must read as the old one with just
+    those changes (the skeleton is ours: a layout this cannot edit is a PytError naming it)."""
+    from . import config
+
+    data = tomllib.loads(text)
+    lines = text.splitlines(keepends=True)
+    for task in spec.get("tasks", []):
+        header = re.compile(rf"[ \t]*\[[ \t]*tasks\.{re.escape(task)}[ \t]*\][ \t]*(?:#.*)?\n?")
+        start = next((i for i, line in enumerate(lines) if header.fullmatch(line)), None)
+        if start is None:
+            raise PytError(f"{where} tasks names {task}, which files/pytemplate.toml has no [tasks.{task}] table for")
+        end = next((i for i in range(start + 1, len(lines)) if _TABLE_HEADER.fullmatch(lines[i].rstrip("\n"))), len(lines))
+        del lines[start:end]
+        data.get("tasks", {}).pop(task, None)
+    text = "".join(lines)
+    if "buttons" in spec:
+        text = config.set_value(text, "vscode", "buttons", spec["buttons"])
+        data.setdefault("vscode", {})["buttons"] = spec["buttons"]
+    if tomllib.loads(text) != data:
+        raise PytError(f"{where}: files/pytemplate.toml did not read as expected without the example's tasks")
+    return text
 
 
 def _owned_files() -> dict[str, bytes]:
@@ -218,9 +286,14 @@ def _owned_files() -> dict[str, bytes]:
 
 
 def pristine(cfg: Config) -> bool:
-    """Return whether src/, tests/ and typings/ are exactly the current preset's skeleton (untouched)."""
-    expected = {k: v for k, v in skeleton(cfg.app.preset, cfg.app.name).items() if k.split("/")[0] in OWNED_DIRS}
-    return _owned_files() == expected
+    """Return whether src/, tests/ and typings/ are exactly the current preset's skeleton
+    (untouched), with or without the example code (./pyt new --clean: a preset with clean/)."""
+    owned = _owned_files()
+    variants = (False, True) if (PRESETS / cfg.app.preset / "clean").is_dir() else (False,)
+    return any(
+        owned == {k: v for k, v in skeleton(cfg.app.preset, cfg.app.name, clean=clean).items() if k.split("/")[0] in OWNED_DIRS}
+        for clean in variants
+    )
 
 
 # --- names -------------------------------------------------------------------------------------
@@ -793,19 +866,20 @@ def _dropped(old: list[str], new: list[str], added: list[str], declared: list[st
     )
 
 
-def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> InitPlan:
-    """Every check `init` makes, in memory: nothing is written (the --dry-run of init prints it)."""
+def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool, clean: bool = False) -> InitPlan:
+    """Every check `init` makes, in memory: nothing is written (the --dry-run of init prints it).
+    `clean`: the skeleton without the example code (./pyt new --clean)."""
     from . import config, render
 
     new_name = cfg.app.name if name is None else name  # an empty --name is refused, never the current name
     check_name_free(cfg, preset, new_name)  # the format too
-    target = load(preset)
+    load(preset)
     if not force and not pristine(cfg):
         raise PytError(
             "src/, tests/ or typings/ have changes compared to the skeleton of the current preset "
             f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./pyt __init {preset} --force"
         )
-    files = skeleton(preset, new_name)
+    files = skeleton(preset, new_name, clean=clean)
     where = f"preset {preset}: files/pytemplate.toml"
     if "pytemplate.toml" not in files:
         raise PytError(f"{where} is missing")
@@ -822,12 +896,12 @@ def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> Ini
     render.check_pyproject(new_cfg)
     text = pyproject_after_init(new_cfg, preset, new_name)
     old_deps, old_dev = dependencies(cfg)
-    new_deps, new_dev = dependencies(new_cfg, preset)
+    new_deps, new_dev = dependencies(new_cfg, preset, clean=clean)
     locked = locked_names()
     return InitPlan(
         preset=preset,
         name=new_name,
-        description=str(target.get("description", "")),
+        description=described(preset, clean=clean),
         files=files,
         cfg=new_cfg,
         pyproject=text,
@@ -989,17 +1063,17 @@ def _record(plan: InitPlan, undo: _Undo) -> None:
     cmd_apply.save_record(cmd_apply.record_of(plan.cfg), state)
 
 
-def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
+def init(cfg: Config, preset: str, name: str | None, *, force: bool, clean: bool = False) -> None:
     """Convert the project to `preset`: the internal step of `./pyt new`.
 
     Every check runs first (plan_init). Then pyproject.toml and uv.lock change (uv: the only
     step that needs the network), then src/, tests/, typings/ and pytemplate.toml are swapped,
     and the project's own `applied` record is written (_record). When a step fails, every file
-    is put back as it was and the error is raised.
+    is put back as it was and the error is raised. `clean`: without the example code.
     """
     from . import render
 
-    plan = plan_init(cfg, preset, name, force=force)
+    plan = plan_init(cfg, preset, name, force=force, clean=clean)
     ui.step(f"preset {preset} ({plan.description}) as '{plan.name}'")
     undo = _Undo()
     try:
@@ -1028,9 +1102,9 @@ SKIP_ANYWHERE = frozenset({".git", "__pycache__", ".mypy_cache", ".ruff_cache", 
 # The root's own outputs (./pyt's .build/ and dist/, PyInstaller/Flet's build/: .gitignore names
 # them from the root, since src/<pkg>/build/ or docs/dist/ is source like any other, and skipped
 # at any depth a tracked docs/dist/ never reached the new project, without a word), Claude Code
-# state (settings, agent worktrees), and the page and license of the program this is: a project
-# made with `new` is another program (TEMPLATE_DOCS)
-SKIP_AT_ROOT = frozenset({".build", "dist", "build", ".claude", "README.md", "LICENSE"})
+# state (settings, agent worktrees), and the page, license and one-line installers of the
+# program this is: a project made with `new` is another program (TEMPLATE_DOCS)
+SKIP_AT_ROOT = frozenset({".build", "dist", "build", ".claude", "README.md", "LICENSE", "install.sh", "install.ps1"})
 # Where a project keeps the template repository's README (the manual of ./pyt, of the
 # version it was made from) and LICENSE (the notice the MIT license asks for, for the copied
 # runner). A project copies them on like any tracked file when it runs `new` itself.
@@ -1476,9 +1550,9 @@ def _git_init(dest: Path) -> None:
     proc.run([git, "add", "--chmod=+x", "pyt", "pyt.ps1"], cwd=dest, env=env, check=False)
 
 
-def project_readme(name: str, preset: str, *, manual: bool) -> str:
+def project_readme(name: str, preset: str, *, manual: bool, clean: bool = False) -> str:
     """The README.md of a project made with `new` (the template's own is its .pytemplate/README.md)."""
-    description = str(load(preset).get("description", "")).rstrip(".")
+    description = described(preset, clean=clean).rstrip(".")
     where = (
         "The manual of `./pyt` and `pytemplate.toml` is `.pytemplate/README.md`: the py_template\n"
         "README of the version this project was made from."
@@ -1498,7 +1572,7 @@ def project_readme(name: str, preset: str, *, manual: bool) -> str:
     )
 
 
-def _make_own(dest: Path, preset: str, name: str) -> None:
+def _make_own(dest: Path, preset: str, name: str, *, clean: bool = False) -> None:
     """What makes the copy a project of its own, before `__init` runs in it: its README.md and
     [project] description, and (from the template repository) the template's README and LICENSE
     under .pytemplate/ (TEMPLATE_DOCS)."""
@@ -1508,11 +1582,11 @@ def _make_own(dest: Path, preset: str, name: str) -> None:
                 (dest / target).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / src_name, dest / target)
     manual = (dest / TEMPLATE_DOCS["README.md"]).is_file()
-    (dest / "README.md").write_text(project_readme(name, preset, manual=manual), encoding="utf-8", newline="\n")
+    (dest / "README.md").write_text(project_readme(name, preset, manual=manual, clean=clean), encoding="utf-8", newline="\n")
     pyproject = dest / PYPROJECT.name
     if pyproject.is_file():
         text = _read_text(pyproject, "pyproject.toml of the copy").replace("\r\n", "\n")
-        pyproject.write_text(_set_description(text, str(load(preset).get("description", ""))), encoding="utf-8", newline="\n")
+        pyproject.write_text(_set_description(text, described(preset, clean=clean)), encoding="utf-8", newline="\n")
 
 
 def _set_description(text: str, description: str) -> str:
@@ -1578,10 +1652,10 @@ def check_destination(dest: Path, prefix: str = "") -> None:
         raise PytError(f"{prefix}{dest} already exists and is not empty")
 
 
-def new(dest: Path, preset: str, name: str | None, python: Path | None = None) -> None:
+def new(dest: Path, preset: str, name: str | None, python: Path | None = None, *, clean: bool = False) -> None:
     """`./pyt new`: copy the template to `dest` and run `init` in the copy, on `python` (the
     preset's python.cpython, which the caller made sure uv has: envs.ensure_python), else on the
-    Python the launchers would pick there.
+    Python the launchers would pick there. `clean` (--clean): the skeleton without the example.
 
     When anything fails (a name uv refuses, no network, Ctrl+C...), what this call created is
     removed: the folder and the parents it had to create, or only its content when it existed
@@ -1599,11 +1673,11 @@ def new(dest: Path, preset: str, name: str | None, python: Path | None = None) -
     ui.step(f"new project in {dest}")
     try:
         copy_template(dest)
-        _make_own(dest, preset, app_name)
+        _make_own(dest, preset, app_name, clean=clean)
         loud = ["-q"] if ui.QUIET else ["-v"] if ui.VERBOSE else []  # the copy's runner, as quiet as this one
         # --no-render: init renders every generated file itself (force=True); render.auto first
         # warned about the source's hand-edited ones, which the new project never had
-        init = ["--no-render", "__init", preset, "--name", app_name, "--force"]
+        init = ["--no-render", "__init", preset, "--name", app_name, "--force", *(["--clean"] if clean else [])]
         proc.run(proc.runner_argv(proc.find_uv(), dest, [*loud, *init], python=python), cwd=dest)
     except BaseException as e:
         if top is not None:
