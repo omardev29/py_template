@@ -5381,6 +5381,44 @@ def test_flet_build_pins_the_dart_packages_flets_template_leaves_loose() -> None
         flet.build_pyproject(make({}), tomllib.loads(head + "[tool.flet.flutter]\npubspec = 1\n"), [])
 
 
+@pytest.mark.parametrize(
+    ("pins", "pinned"),
+    [
+        (["flet==1.0.1", "msgpack==1.2.2"], True),
+        (["flet==1.0.3 ; sys_platform != 'emscripten'"], True),
+        (["Flet == 1.0.4"], False),
+        (["flet==1.0.4 ; platform_system != 'Emscripten'", "flet-desktop==1.0.3"], False),
+        (["flet==1.1.0"], False),
+        (["flet==1.0.10"], False),
+        (["flet-desktop==1.0.1", "msgpack==1.2.2"], True),  # no flet pin: the Dart pins, as before
+    ],
+)
+def test_flet_build_pins_the_dart_packages_only_for_a_flet_whose_template_pins_jni(pins: list[str], pinned: bool) -> None:
+    """The build templates of Flet 1.0.0 to 1.0.3 override jni to 1.0.0; 1.0.4's overrides none,
+    and its Android packages may then need jni 1.1. A project that keeps an older [preset.flet]
+    version still gets the Dart pins it needs, one on 1.0.4 or newer none (no table is written
+    for them), and the project's own entries stay either way."""
+    import tomllib
+
+    from runner.methods import flet
+
+    head = '[project]\nname = "a"\nversion = "1"\n\n'
+    own = head + '[tool.flet.flutter.pubspec.dependency_overrides]\nshimmer = "3.0.0"\n'
+    tool = tomllib.loads(flet.build_pyproject(make({}), tomllib.loads(own), pins))["tool"]["flet"]
+    assert tool["flutter"]["pubspec"]["dependency_overrides"] == {**(flet.FLUTTER_OVERRIDES if pinned else {}), "shimmer": "3.0.0"}
+    tool = tomllib.loads(flet.build_pyproject(make({}), tomllib.loads(head), pins))["tool"]["flet"]
+    assert ("flutter" in tool) is pinned
+
+
+def test_the_flet_preset_needs_no_dart_pins() -> None:
+    """The preset's own Flet is one whose build template leaves jni to its packages: a new flet
+    project builds for Android without the pins of FLUTTER_OVERRIDES."""
+    from runner.methods import flet
+
+    version = str(presets.load("flet")["options"]["version"])
+    assert flet.flutter_overrides([f"flet=={version}"]) == {}, version
+
+
 @pytest.mark.parametrize("target", ["host", "windows", "apk", "aab", "web"])
 def test_flet_build_needs_developer_mode_on_windows(sandbox: Path, monkeypatch: pytest.MonkeyPatch, target: str) -> None:
     # Every target: flet build turns Flutter's Windows desktop on there and its template holds a

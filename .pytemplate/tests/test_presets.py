@@ -3201,7 +3201,8 @@ def test_plan_init_writes_nothing_and_the_dry_run_prints_it(fake: Fake, monkeypa
     err = capsys.readouterr().err
     assert "init flet (" in err and "as 'Other'" in err
     assert "_cache" not in err and ".hypothesis" not in err  # caches: no file init replaces
-    assert "remove rich>=15.0.0; add flet==1.0.1, flet-desktop==1.0.1" in err
+    version = presets.load("flet")["options"]["version"]
+    assert f"remove rich>=15.0.0; add flet=={version}, flet-desktop=={version}" in err
     assert "+ src/other/ui/app.py" in err and "- src/myapp/core/bench.py" in err
     if presets.constraints("flet"):
         assert "versions:" in err and "constraints.txt" in err

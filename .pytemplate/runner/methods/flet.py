@@ -37,11 +37,15 @@ MOBILE_WEB = {"apk", "aab", "ipa", "ios-simulator", "web"}
 STAGE_APP = "src"  # build() stages the app in <work>/src: [tool.flet.app] path must point there
 DESKTOP_CLIENT = "flet-desktop"  # the client `flet run` and `flet pack` start: no flet build app does
 # Dart packages the build's Flutter project must get at these versions ([tool.flet.flutter.pubspec]
-# dependency_overrides, unless the project sets its own): Flet 1.0.1's build template overrides
-# jni to 1.0.0, and a release of a package whose bindings need jni 1.1 (jni_flutter 1.0.4 on
-# October 1, 2026, shared_preferences_android 2.5.0 on October 17) stopped every Android build in
-# Dart's compile: each is held at its last release that needs no more (CLAUDE.md 15.1)
+# dependency_overrides, unless the project sets its own) when its Flet is older than
+# JNI_UNPINNED: the build templates of Flet 1.0.0 to 1.0.3 override jni to 1.0.0, and a release
+# of a package whose bindings need jni 1.1 (jni_flutter 1.0.4 on October 1, 2026,
+# shared_preferences_android 2.5.0 on October 17) stopped every Android build in Dart's compile:
+# each is held at its last release that needs no more. Flet 1.0.4's template overrides no jni
+# (CLAUDE.md 15.1)
 FLUTTER_OVERRIDES = {"jni_flutter": "1.0.3", "shared_preferences_android": "2.4.28"}
+JNI_UNPINNED = (1, 0, 4)
+_FLET_PIN = re.compile(r"\s*flet\s*==\s*([0-9]+(?:\.[0-9]+)*)\s*(?:;.*)?", re.IGNORECASE)
 # Where flet build (flet_cli 1.0.1, its package step) keeps the hash of the package step's
 # arguments, the build project's requirement lines among them, relative to the folder it builds:
 # when they did not change it passes --skip-site-packages to serious_python, which keeps the
@@ -145,6 +149,17 @@ def relaxed_message(target: str, relaxed: list[tuple[str, str]]) -> str:
     return f"{target}: flet build takes this target's binary packages from {source}, which may not hold uv.lock's versions: {shown} (pip picks a release that fits every package's bounds{hint})"
 
 
+def flutter_overrides(pins: list[str]) -> dict[str, str]:
+    """The Dart pins of FLUTTER_OVERRIDES when the flet these pins hold is older than
+    JNI_UNPINNED (a project that keeps an older [preset.flet] version still gets them); none from
+    Flet 1.0.4 on, whose template lets jni follow its packages. Without a flet pin: the pins."""
+    for pin in pins:
+        m = _FLET_PIN.fullmatch(pin)
+        if m:
+            return dict(FLUTTER_OVERRIDES) if tuple(int(p) for p in m.group(1).split(".")) < JNI_UNPINNED else {}
+    return dict(FLUTTER_OVERRIDES)
+
+
 def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     """Return the pyproject.toml that `flet build` reads: the exact versions of uv.lock plus the
     project's whole [tool.flet] (parsed, so no other table of pyproject.toml leaks into it).
@@ -155,9 +170,9 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     its newest Python (3.14), which silently ignored the cp313 extensions. [project] description
     is kept (flet puts it in the app's metadata). With [deploy.flet] cleanup = false,
     [tool.flet.cleanup] app and packages default to false: flet cleans the packages unless told
-    not to, and its --cleanup-* flags have no negative form. FLUTTER_OVERRIDES go into
-    [tool.flet.flutter.pubspec] dependency_overrides, which flet merges into the Flutter
-    project's pubspec.yaml, under the project's own entries.
+    not to, and its --cleanup-* flags have no negative form. The Dart pins its Flet needs
+    (flutter_overrides) go into [tool.flet.flutter.pubspec] dependency_overrides, which flet
+    merges into the Flutter project's pubspec.yaml, under the project's own entries.
     """
     project = data["project"]
     tool_flet = copy.deepcopy(data.get("tool", {}).get("flet") or {})
@@ -173,13 +188,15 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
             raise PytError("pyproject.toml: [tool.flet] cleanup must be a table ([tool.flet.cleanup])")
         cleanup.setdefault("app", False)
         cleanup.setdefault("packages", False)
-    flutter = tool_flet.setdefault("flutter", {})
-    pubspec = flutter.setdefault("pubspec", {}) if isinstance(flutter, dict) else None
-    overrides = pubspec.setdefault("dependency_overrides", {}) if isinstance(pubspec, dict) else None
-    if not isinstance(overrides, dict):
-        raise PytError("pyproject.toml: [tool.flet] flutter.pubspec.dependency_overrides must be a table")
-    for name, version in FLUTTER_OVERRIDES.items():
-        overrides.setdefault(name, version)
+    dart = flutter_overrides(pins)
+    if dart:  # Flet 1.0.4 on: none, and the project's [tool.flet] stays as it is
+        flutter = tool_flet.setdefault("flutter", {})
+        pubspec = flutter.setdefault("pubspec", {}) if isinstance(flutter, dict) else None
+        overrides = pubspec.setdefault("dependency_overrides", {}) if isinstance(pubspec, dict) else None
+        if not isinstance(overrides, dict):
+            raise PytError("pyproject.toml: [tool.flet] flutter.pubspec.dependency_overrides must be a table")
+        for name, version in dart.items():
+            overrides.setdefault(name, version)
     description = project.get("description")
     lines = [
         "[project]",
