@@ -3400,9 +3400,11 @@ Per method:
   Flutter) and `requires-python = "==<python.cpython>.*"` (flet bundles the HIGHEST Python of
   its manifest matching it: `>=3.13` gave 3.14 and the cp313 mypyc extensions were silently not
   loaded; a minor its manifest lacks now fails loudly), plus `[project] description` (flet puts
-  it in the app's metadata; `config.toml_value` writes it) and the Dart versions
-  `flet.FLUTTER_OVERRIDES` pins in `[tool.flet.flutter.pubspec]` dependency_overrides (jni_flutter
-  1.0.3 and shared_preferences_android 2.4.28, under the project's own entries: 15.1). Mobile/web targets (`apk aab ipa
+  it in the app's metadata; `config.toml_value` writes it) and, for a Flet older than 1.0.4
+  (`flet.flutter_overrides`, read from the flet pin; the preset's 1.0.4 needs none), the Dart
+  versions `flet.FLUTTER_OVERRIDES` pins in `[tool.flet.flutter.pubspec]` dependency_overrides
+  (jni_flutter 1.0.3 and shared_preferences_android 2.4.28, under the project's own entries:
+  15.1). Mobile/web targets (`apk aab ipa
   ios-simulator web`) cannot load extensions: a mypyc backend ships the `.py`. Desktop embeds
   the `python.cpython` minor, so the mypyc `.pyd`/`.so` files work. `cleanup = true` passes
   `--cleanup-app --cleanup-packages`; `cleanup = false` writes `app = false` and `packages =
@@ -5353,10 +5355,11 @@ workaround by symbol and the section that explains it, `Test:` what covers it, `
 can be removed. Versions as observed in September 2026 unless an entry says otherwise: uv
 0.12.19 (floor `envs.MIN_UV`), CPython 3.14.7 (the runner: 3.11+), PyPy 3.11.15, mypy/mypyc
 2.3.1, setuptools 84.0.0, PyInstaller 6.22.3, Nuitka 4.2.2 (the pin is 4.3.0 since October 2026:
-its defects below are still in it, read in its sources), Flet 1.0.1, raylib 6.0.1.0, cffi 2.1.1,
-ruff 0.16.9, UPX 5.2.1, Neovim 0.12.5 with the pinned LazyVim (`nvimtest.LOCK`), PowerShell 7.6
-and 5.1, niubash 1.1.4. A new workaround gets its entry in the same commit; when
-an entry's `Goes:` comes true, the workaround and the entry go together.
+its defects below are still in it, read in its sources), Flet 1.0.1 (the pin is 1.0.4 since
+October 18, 2026: the entries below read again in its sources and build template), raylib
+6.0.1.0, cffi 2.1.1, ruff 0.16.9, UPX 5.2.1, Neovim 0.12.5 with the pinned LazyVim
+(`nvimtest.LOCK`), PowerShell 7.6 and 5.1, niubash 1.1.4. A new workaround gets its entry in the
+same commit; when an entry's `Goes:` comes true, the workaround and the entry go together.
 
 uv:
 - **`UV_PROJECT_ENVIRONMENT` needs `UV_PYTHON`** (LIMITATION): with only one of them uv silently
@@ -6262,8 +6265,9 @@ Flet (flet, flet-desktop, flet pack, flet build):
   `test_build_methods.py::test_flet_build_leaves_mobile_binaries_to_flets_index`,
   `test_flet_relaxed_message_hints_at_a_lower_bound_only_when_one_is_kept`. Goes: never
   (Flet's index and Pyodide follow their own schedule).
-- **Flet 1.0.1's build template pins jni but not the packages built on it** (DEFECT, flet-cli
-  1.0.1): the template's `pubspec.yaml` overrides jni to 1.0.0, and an override ignores the other
+- **Flet 1.0.0 to 1.0.3's build template pins jni but not the packages built on it** (DEFECT,
+  flet-cli 1.0.0 to 1.0.3): the template's `pubspec.yaml` overrides jni to 1.0.0, and an override
+  ignores the other
   packages' bounds, so a release of an Android package whose generated bindings need jni 1.1
   stopped every `apk` and `aab` build in Dart's compile ("The generated bindings expect
   package:jni ^1.1.0, but 1.0.x was imported"): jni_flutter 1.0.4 (published on October 1,
@@ -6272,12 +6276,15 @@ Flet (flet, flet-desktop, flet pack, flet build):
   overrides jni). Fix: `methods.flet.FLUTTER_OVERRIDES` holds jni_flutter at 1.0.3 and
   shared_preferences_android at 2.4.28, their last releases for jni 1.0, through the build
   project's `[tool.flet.flutter.pubspec]` dependency_overrides, which flet merges into
-  `pubspec.yaml` (`methods.flet.build_pyproject`; the project's own entry wins) (10). Another
-  plugin of flet's tree may do the same any day (path_provider_android already uses jni):
-  template-flet.yml's apk job shows it. Test:
-  `test_build_methods.py::test_flet_build_pins_the_dart_packages_flets_template_leaves_loose`;
-  template-flet.yml's apk job. Goes: when the preset's Flet release no longer overrides jni
-  (1.0.4 does not).
+  `pubspec.yaml` (`methods.flet.build_pyproject`; the project's own entry wins), only for a
+  project whose flet pin is older than `methods.flet.JNI_UNPINNED`, 1.0.4
+  (`methods.flet.flutter_overrides`): the preset's Flet is 1.0.4 since October 18, 2026, whose
+  template lets jni follow its packages, and a project keeps the `[preset.flet] version` its
+  pytemplate.toml names (10). Test:
+  `test_build_methods.py::test_flet_build_pins_the_dart_packages_flets_template_leaves_loose`,
+  `test_flet_build_pins_the_dart_packages_only_for_a_flet_whose_template_pins_jni`,
+  `test_the_flet_preset_needs_no_dart_pins`; template-flet.yml's apk job (1.0.4, no pins). Goes:
+  never while a project may keep a Flet older than 1.0.4 (rule 1.11).
 - **`flet build` looks for `<work>/<path>/main.py`** (LIMITATION): another `[tool.flet.app]
   path` aborted after installing Flutter. Fix: `methods.flet.build_pyproject` forces
   `methods.flet.STAGE_APP` with a warning (10). Test:

@@ -115,7 +115,7 @@ but:
 - Every dependency needs wheels for it, or an sdist that builds: `./pyt apply` re-locks and uv
   names the one that has none. In October 2026 raylib published no CPython 3.15 wheel: a raylib
   project stays on 3.14 for now (the preset never builds raylib from source). `flet build`
-  embeds a Python of Flet's own list, 3.12 to 3.14 for Flet 1.0.1: on 3.15 the flet method
+  embeds a Python of Flet's own list, 3.12 to 3.14 for Flet 1.0.4: on 3.15 the flet method
   stops with Flet's error (the flet app and its other build methods work).
 - mypyc compiles for the Python it runs on: the extensions of a 3.15 project load on 3.15 only
   (as a pyz with native dependencies). PyPy stays 3.11, and a project that supports it is still
@@ -714,7 +714,7 @@ file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads
 | `tasks.<name>` | `ci` | custom tasks ([Custom tasks](#custom-tasks)) |
 | `preset.raylib.package` | (raylib: `"raylib"`) | `raylib` (GLFW), `raylib_sdl` (SDL3) or `raylib_software` (Linux and Windows only) |
 | `preset.raylib.version` | (raylib: `"6.0.1.0"`) | the raylib version |
-| `preset.flet.version` | (flet: `"1.0.1"`) | the version of `flet`, `flet-desktop` and `flet-cli` |
+| `preset.flet.version` | (flet: `"1.0.4"`) | the version of `flet`, `flet-desktop` and `flet-cli` |
 | `vscode.settings` | `{}` | merged into `.vscode/settings.json` (JSON values only) |
 | `vscode.buttons` | `["run", "test", "check", "build"]` | status bar buttons: commands or task names ([VS Code](#vs-code)) |
 | `hooks.pre_commit` | `true` | the git pre-commit hook ([Git pre-commit hook](#git-pre-commit-hook)) |
@@ -1193,7 +1193,7 @@ without them, so the build stops there too (exit 2), as exe's does ([exe](#exe))
 `flet build` (flet preset only) builds desktop apps (`host`, `windows`, `macos`, `linux`),
 Android (`apk`, `aab`), iOS (`ipa`) or `web` apps: `[deploy.flet] target`. On Windows it needs
 Developer Mode (Settings > System > For developers) and the Visual Studio C++ tools. The first
-build downloads the Flutter SDK that Flet pins (3.44.8 for Flet 1.0.1, about 3 GB in `~/flutter`)
+build downloads the Flutter SDK that Flet pins (3.44.8 for Flet 1.0.4, about 3 GB in `~/flutter`)
 and a Python build (`~/.flet`). Measured on Windows 11 in September 2026: the first build took
 about 7 minutes, the next ones about 3.
 
@@ -1813,7 +1813,7 @@ only deletes files is checked too).
   versions. Set `[preset.flet] version` and run `./pyt apply`.
 - **`flet build` on Windows** needs Developer Mode (Settings > System > For developers) and the
   Visual Studio C++ tools; `./pyt build --method flet` says so when Developer Mode is off.
-- **An app that uses `flet.auth`**: run `./pyt add "httpx<1"`. Flet 1.0.1 accepts any httpx
+- **An app that uses `flet.auth`**: run `./pyt add "httpx<1"`. Flet 1.0.4 accepts any httpx
   from 0.28.1 on, and the httpx 1.0 previews drop what `flet.auth` needs.
 - **`./pyt clean` exits 1 on Windows**: a file in `.venv` is in use (the editor's mypy and ruff
   servers run from it). Close VS Code or Neovim and run it again.

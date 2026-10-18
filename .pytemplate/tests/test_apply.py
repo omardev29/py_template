@@ -48,8 +48,9 @@ from runner.ui import PytError  # noqa: E402
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None and not os.environ.get("UV"), reason="uv not found")
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not found")
 
-FLET_DEPS = ["flet==1.0.1", "flet-desktop==1.0.1"]
-FLET_DEV = ["flet-cli==1.0.1"]
+FLET_VERSION = str(presets.load("flet")["options"]["version"])  # the preset's own pin
+FLET_DEPS = [f"flet=={FLET_VERSION}", f"flet-desktop=={FLET_VERSION}"]
+FLET_DEV = [f"flet-cli=={FLET_VERSION}"]
 CHANGING = ("add", "remove", "lock", "sync")
 
 
@@ -757,7 +758,7 @@ def test_raylib_package_switch_removes_the_old_package() -> None:
 @pytest.mark.parametrize(
     ("preset", "deps", "dev"),
     [
-        ("flet", ["Flet == 1.0.1", "flet_desktop==1.0.1; sys_platform != 'emscripten'"], ["flet-cli[extra]==1.0.1"]),
+        ("flet", [f"Flet == {FLET_VERSION}", f"flet_desktop=={FLET_VERSION}; sys_platform != 'emscripten'"], [f"flet-cli[extra]=={FLET_VERSION}"]),
         ("raylib", ["raylib==6.0.1.0"], ["types-cffi>=2.1.0.20260827"]),  # unpinned preset entry: the user's
         ("raylib", ["raylib==6.0.1.0"], []),  # types-cffi removed by the user: not added back
         ("script", ["rich>=16"], []),  # plain preset dependencies belong to the project
@@ -770,8 +771,8 @@ def test_nothing_changes_when_the_pins_match(preset: str, deps: list[str], dev: 
 
 
 def test_a_removed_option_dependency_comes_back() -> None:
-    changes = cmd_apply.dependency_changes(_cfg("flet"), _applied("flet"), _declared(["flet==1.0.1"], []))
-    assert (changes.add, changes.add_dev, changes.remove) == (["flet-desktop==1.0.1"], ["flet-cli==1.0.1"], [])
+    changes = cmd_apply.dependency_changes(_cfg("flet"), _applied("flet"), _declared([FLET_DEPS[0]], []))
+    assert (changes.add, changes.add_dev, changes.remove) == (FLET_DEPS[1:], FLET_DEV, [])
 
 
 def test_the_old_name_is_removed_only_when_the_options_produced_it() -> None:
@@ -864,8 +865,8 @@ def test_apply_keeps_the_marker_of_an_option_driven_requirement(tmp_path: Path, 
     project, uv = _project(tmp_path, monkeypatch, preset)
     if preset == "flet":
         marker = "sys_platform != 'emscripten'"
-        _mark(project, "flet-desktop==1.0.1", marker)
-        _mark(project, "flet-cli==1.0.1", marker)
+        _mark(project, FLET_DEPS[1], marker)
+        _mark(project, FLET_DEV[0], marker)
         project.edit("preset.flet", "version", "1.0.0")
         expected = {"flet-desktop": f"flet-desktop==1.0.0 ; {marker}", "flet-cli": f"flet-cli==1.0.0 ; {marker}", "flet": "flet==1.0.0"}
     else:
@@ -896,7 +897,7 @@ def test_a_failed_lock_restores_pyproject(tmp_path: Path, monkeypatch: pytest.Mo
     assert cmd_apply.load_record() is None  # nothing recorded as applied
     assert ["add", "--frozen", "flet==9.9.9", "flet-desktop==9.9.9"] in uv.calls  # it was tried
     uv.fail.clear()
-    project.edit("preset.flet", "version", "1.0.1")
+    project.edit("preset.flet", "version", FLET_VERSION)
     count = len(uv.calls)
     assert _run(project) == 0
     assert [c for c in uv.changing(count) if c[0] != "sync"] == []

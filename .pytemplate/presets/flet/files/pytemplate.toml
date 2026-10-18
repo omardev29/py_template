@@ -91,7 +91,7 @@ exclude = []     # extra file-name globs never packed (C runtime and python3*.dl
 
 [preset.flet]
 # ./pyt apply pins flet, flet-desktop and flet-cli to this version in pyproject.toml and re-locks
-version = "1.0.1"   # flet, flet-desktop and flet-cli always at the same version
+version = "1.0.4"   # flet, flet-desktop and flet-cli always at the same version
 
 [hooks]
 # true: ./pyt apply (and setup) installs a git pre-commit hook that runs ./pyt hooks run
