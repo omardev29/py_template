@@ -1655,6 +1655,25 @@ def check_lock(cfg: Config) -> Result:
     return Result(True, "pyproject.toml and uv.lock up to date")
 
 
+def check_vendor(cfg: Config, repo: Repo) -> Result:
+    """vendor/<platform>/ holds the files of uv.lock (`./pyt vendor`), and none of them is left out
+    of the commit: committed without them, a new uv.lock sent every other clone to the index for
+    its new packages. Conservative like the generated files: the folders must match the working
+    tree's uv.lock whatever the commit holds."""
+    from . import vendor  # vendor imports envs, which imports nothing of this module
+
+    problems = vendor.check_folders(cfg)
+    if problems:
+        return Result(False, "vendor/ matches uv.lock", "\n".join([*problems, "./pyt vendor, then git add vendor"]))
+    planned = {f"vendor/{p}/{name}" for p, pp in vendor.make_plan(cfg).platforms.items() for name in pp.files}
+    dirty = staging(repo, ["vendor"]).dirty
+    missed = sorted(d for d in dirty if d in planned or not (repo.project / d).exists())
+    if missed:
+        shown = ", ".join(missed) if len(missed) <= 3 else f"{len(missed)} files of vendor/ ({missed[0]}...)"
+        return Result(False, "vendor/ staged", f"unstaged: {shown}\ngit add vendor")
+    return Result(True, "vendor/ matches uv.lock, staged")
+
+
 def check_together(
     group: Sequence[str], touched: set[str], deleted: set[str], dirty: set[str], add: Callable[[Sequence[str]], list[str]] = _plain_add
 ) -> Result:
@@ -1844,6 +1863,8 @@ def checks(
     add = functools.partial(add_command, repo, state.flags)
     yield from check_generated(cfg, generated, dirty, add)
     yield check_lock(cfg)
+    if cfg.vendor.platforms:
+        yield check_vendor(cfg, repo)
     yield check_together(group, staged_set | set(deleted), set(deleted), dirty, add)
     yield check_mypyc(cfg, repo.project, staged_set)
     yield check_launchers(repo, staged_set, content)

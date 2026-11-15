@@ -510,6 +510,7 @@ MINIMAL: dict[str, tuple[list[str], bool]] = {
     "add": (["somepkg"], True),
     "remove": (["somepkg"], True),
     "clean": ([], False),
+    "vendor": (["--check"], False),
     "hooks": (["status"], False),
     "mode": (["cpython"], False),
     "render": ([], False),

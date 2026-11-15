@@ -146,6 +146,21 @@ def test_journey_steps_per_depth() -> None:
         assert option not in names(e2e.plan(info, Options(), HOST))
 
 
+def test_full_runs_an_offline_vendor_round_trip() -> None:
+    """--full ends with `./pyt vendor`, its --check, a setup and test with no network and an empty
+    uv cache, and `vendor --off`, which must give back the project's files."""
+    steps = e2e.plan(SCRIPT, Options(full=True), HOST)
+    rows = names(steps)
+    start = rows.index("vendor: this platform")
+    assert rows[start:] == ["vendor: this platform", "vendor --check", "vendor: clean --envs, setup and test, offline", "vendor --off"]
+    head = by_name(steps)["vendor: this platform"]
+    assert head.args == ("vendor",) and head.snapshot == head.name
+    off = by_name(steps)["vendor --off"]
+    assert off.args == ("vendor", "--off") and off.restores == head.name and off.after == head.name
+    assert by_name(steps)["vendor: clean --envs, setup and test, offline"].kind == "offline"
+    assert "vendor: this platform" not in names(e2e.plan(SCRIPT, Options(), HOST))
+
+
 def test_stubs_only_for_presets_with_the_task() -> None:
     step = by_name(e2e.plan(RAYLIB, Options(quick=True), HOST))["stubs (typings/ unchanged)"]
     assert step.args == ("stubs",) and step.scope == "typings" and step.snapshot == step.restores == "stubs"

@@ -14,3 +14,5 @@ pyt.ps1    text eol=lf
 *.png binary
 *.ico binary
 *.pyz binary
+# ./pyt vendor: the wheels and sdists of uv.lock (README: Vendoring; Git LFS adds its own line)
+vendor/** binary

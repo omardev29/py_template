@@ -34,6 +34,9 @@ NAME_RULE = "letters, digits, '-' and '_', starting with a letter and ending wit
 PROFILES = ("mypyc", "strict", "warn", "off")
 METHODS = ("exe", "portable", "pyz", "wheel", "nuitka", "flet")
 EDITORS = ("pylance", "basedpyright")
+# [vendor] platforms: the folders of vendor/ (an OS and an architecture, as the target keys of
+# the pyz builds name them: methods.common.KEY_RE)
+VENDOR_PLATFORMS = ("linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64", "windows-aarch64")
 # [deploy] default: the build method of each backend; a backend left out of the table keeps its own
 DEFAULT_METHODS = {"cpython": "exe", "mypyc": "exe", "pypy": "portable"}
 # The built-in commands of the first template version under this file's contract (CLAUDE.md rule
@@ -201,6 +204,13 @@ class HooksConfig:
 
 
 @dataclass
+class VendorConfig:
+    # ./pyt vendor: the files uv.lock installs on each of these platforms, kept in
+    # vendor/<platform>/ (VENDOR_PLATFORMS names them); empty: nothing is vendored
+    platforms: list[str] = field(default_factory=list)
+
+
+@dataclass
 class VSCodeConfig:
     settings: dict[str, Any] = field(default_factory=dict)  # merged into .vscode/settings.json
     # Status bar buttons (VS Code extension actboy168.tasks): "<command> [args]" or a [tasks] name
@@ -220,6 +230,7 @@ class Config:
     preset: dict[str, dict[str, Any]] = field(default_factory=dict)
     vscode: VSCodeConfig = field(default_factory=VSCodeConfig)
     hooks: HooksConfig = field(default_factory=HooksConfig)
+    vendor: VendorConfig = field(default_factory=VendorConfig)
 
     # --- derived values ----------------------------------------------------------------
 
@@ -598,6 +609,11 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
             if not _DOTTED.fullmatch(m):
                 raise PytError(f"pytemplate.toml: invalid module in {where}: {m!r}")
     _check_preset_tables(cfg)
+    for platform in cfg.vendor.platforms:
+        _one_of(platform, VENDOR_PLATFORMS, "vendor.platforms")
+    twice = sorted({p for p in cfg.vendor.platforms if cfg.vendor.platforms.count(p) > 1})
+    if twice:
+        raise PytError(f"pytemplate.toml: 'vendor.platforms' lists {', '.join(twice)} more than once")
     for name, task in cfg.tasks.items():
         _validate_task(name, task, builtin_commands)
     if builtin_commands:

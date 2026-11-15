@@ -431,7 +431,7 @@ def jsonc(data: Any) -> str:
 
 # --- CI ------------------------------------------------------------------------------------------
 
-CI_PLACEHOLDERS = ("__HEADER__", "__MATRIX__", "__LINUX_DEPS__", "__NAME__", "__BUILD_BACKEND__")
+CI_PLACEHOLDERS = ("__HEADER__", "__MATRIX__", "__LINUX_DEPS__", "__CHECKOUT_LFS__", "__NAME__", "__BUILD_BACKEND__")
 # The packages a preset offers ([preset.<name>] package) that publish no wheel, and no sdist,
 # for a runner's OS: no backend can sync there, so the generated CI leaves that runner out.
 # raylib_software 6.0.1.0 (and every release before it): Linux and Windows wheels only (15.1)
@@ -475,6 +475,10 @@ def ci_workflow(cfg: Config) -> str:
         )
     # __LINUX_DEPS__ stands alone on its line: the whole line goes when there is nothing to install
     text = re.sub(r"(?m)^[ \t]*__LINUX_DEPS__[ \t]*\n", lambda m: linux + "\n" if linux else "", text)
+    # With [vendor] platforms the checkout brings vendor/'s files themselves, also when Git LFS
+    # keeps them (README: Vendoring): ./pyt sync then installs from there, without the network
+    lfs = "        with:\n          lfs: true" if cfg.vendor.platforms else ""
+    text = re.sub(r"(?m)^[ \t]*__CHECKOUT_LFS__[ \t]*\n", lambda m: lfs + "\n" if lfs else "", text)
     out = (
         text.replace("__HEADER__", HEADER)
         .replace("__MATRIX__", "\n".join(matrix))
@@ -483,7 +487,7 @@ def ci_workflow(cfg: Config) -> str:
     )
     left = [p for p in CI_PLACEHOLDERS if p in out]
     if left:
-        raise PytError(f"{rel(path)}: {', '.join(left)} not replaced (__LINUX_DEPS__ must be alone on its line)")
+        raise PytError(f"{rel(path)}: {', '.join(left)} not replaced (__LINUX_DEPS__ and __CHECKOUT_LFS__ must be alone on their lines)")
     return out
 
 

@@ -3,6 +3,10 @@
 - cpython / mypyc -> .venv       (uv-managed CPython; ALL the tools run here)
 - pypy            -> .venv-pypy  (PyPy pinned exactly)
 
+With [vendor] platforms set (vendor.py), every `uv run` and `uv sync` of an environment first
+installs the files of uv.lock from vendor/<platform>/ (vendor.prepare): uv then finds every
+package installed and downloads nothing.
+
 uv needs UV_PROJECT_ENVIRONMENT and UV_PYTHON *together*: with only one of them it
 silently recreates the environment with the wrong interpreter.
 """
@@ -16,7 +20,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import proc, ui
@@ -113,6 +117,9 @@ class PyEnv:
     dir: Path
     request: str  # value of UV_PYTHON
     preference: str  # value of UV_PYTHON_PREFERENCE
+    # The project's configuration when it vendors uv.lock's files ([vendor] platforms): uv run and
+    # uv sync of this environment install them from vendor/ first (uv, vendor.prepare)
+    vendored: Config | None = field(default=None, compare=False, repr=False)
 
     @property
     def python(self) -> Path:
@@ -120,11 +127,15 @@ class PyEnv:
 
 
 def cpython_env(cfg: Config) -> PyEnv:
-    return PyEnv("cpython", ROOT / f".venv{ENV_SUFFIX}", cfg.python.cpython, "only-managed")
+    return PyEnv("cpython", ROOT / f".venv{ENV_SUFFIX}", cfg.python.cpython, "only-managed", _vendored(cfg))
 
 
 def pypy_env(cfg: Config) -> PyEnv:
-    return PyEnv("pypy", ROOT / f".venv-pypy{ENV_SUFFIX}", cfg.python.pypy, "only-managed")
+    return PyEnv("pypy", ROOT / f".venv-pypy{ENV_SUFFIX}", cfg.python.pypy, "only-managed", _vendored(cfg))
+
+
+def _vendored(cfg: Config) -> Config | None:
+    return cfg if cfg.vendor.platforms else None
 
 
 def tool_env(cfg: Config) -> PyEnv:
@@ -196,6 +207,10 @@ def uv(
     uv_path = proc.find_uv()
     if not env.dir.exists():  # uv is about to create it (and maybe download its interpreter)
         require_min_uv(uv_path)
+    if env.vendored is not None and _installs(args, cwd):
+        from . import vendor  # vendor imports this module
+
+        vendor.prepare(env.vendored, env, sync=args[0] == "sync", frozen="--frozen" in [str(a) for a in args])
     # -q: uv's own progress (Resolved, Installed, Checked...) is progress too, and uv --quiet
     # hides it; it never touches the output of what `uv run` starts. It also hides uv's
     # warnings and change summaries (uv has no level that keeps them): the commands whose
@@ -212,6 +227,18 @@ def uv(
         capture=capture,
         echo=echo,
     )
+
+
+def _installs(args: Sequence[str | Path], cwd: Path | None) -> bool:
+    """Whether a uv call installs this project's packages into its environment: `uv run` (it
+    syncs first, also with --frozen) and `uv sync`, in the project (the root, or --project ROOT:
+    uv_run's), never with --no-sync or --dry-run, nor for a script or no project (--script,
+    --no-project: they sync no environment of the project; a copy of the project, mutation's, has
+    its own)."""
+    words = [str(a) for a in args]
+    if not words or words[0] not in ("run", "sync") or any(w in words for w in ("--no-sync", "--dry-run", "--script", "--no-project")):
+        return False
+    return cwd is None or cwd.resolve() == ROOT.resolve() or str(ROOT) in words
 
 
 def uv_run(

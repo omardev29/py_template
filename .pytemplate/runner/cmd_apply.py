@@ -1093,6 +1093,8 @@ def _print_plan(plan: Plan, command: str, force: bool) -> None:
     else:
         lock = "up to date (uv lock --check)"
     rows.append(("uv.lock", lock))
+    if cfg.vendor.platforms:
+        rows.append(("vendor", "would bring " + ", ".join(f"vendor/{p}" for p in cfg.vendor.platforms) + " in line with uv.lock, and install from there"))
     rows.append(("environments", "would sync " + ", ".join(f"{rel(e.dir)} ({e.request})" for e in cmd_env._envs_for(cfg, "all"))))
     rows.append(("git hook", _hook_plan(cfg)))
     changed, edited = render.apply(cfg)  # --dry-run: compares only
@@ -1216,6 +1218,8 @@ def _finish(cfg: Config, plan: Plan, command: str, summary: list[tuple[str, str]
         summary.append(("pyproject.toml", "managed parts updated"))
     if _read_bytes(ROOT / "uv.lock") != lock_before:
         summary.append(("uv.lock", "re-locked"))
+    if cfg.vendor.platforms:  # ensure_lock brought them in line; the environments install from there
+        summary.append(("vendor", ", ".join(f"vendor/{p}" for p in cfg.vendor.platforms) + " match uv.lock"))
 
     synced: list[str] = []
     for env in cmd_env._envs_for(cfg, "all"):

@@ -1102,9 +1102,10 @@ SKIP_ANYWHERE = frozenset({".git", "__pycache__", ".mypy_cache", ".ruff_cache", 
 # The root's own outputs (./pyt's .build/ and dist/, PyInstaller/Flet's build/: .gitignore names
 # them from the root, since src/<pkg>/build/ or docs/dist/ is source like any other, and skipped
 # at any depth a tracked docs/dist/ never reached the new project, without a word), Claude Code
-# state (settings, agent worktrees), and the page, license and one-line installers of the
-# program this is: a project made with `new` is another program (TEMPLATE_DOCS)
-SKIP_AT_ROOT = frozenset({".build", "dist", "build", ".claude", "README.md", "LICENSE", "install.sh", "install.ps1"})
+# state (settings, agent worktrees), the page, license and one-line installers of the program
+# this is (a project made with `new` is another program: TEMPLATE_DOCS), and vendor/, the files of
+# THIS project's uv.lock (the new project locks its own, and `./pyt vendor` there vendors them)
+SKIP_AT_ROOT = frozenset({".build", "dist", "build", ".claude", "README.md", "LICENSE", "install.sh", "install.ps1", "vendor"})
 # Where a project keeps the template repository's README (the manual of ./pyt, of the
 # version it was made from) and LICENSE (the notice the MIT license asks for, for the copied
 # runner). A project copies them on like any tracked file when it runs `new` itself.

@@ -808,3 +808,23 @@ def test_a_run_started_under_nohup_survives_a_hang_up(tmp_path: Path) -> None:
             runner.kill()
         if child and not gone(child, wait=0):
             os.kill(child, signal.SIGKILL)
+
+
+def test_the_offline_step_leaves_no_network_and_an_empty_uv_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = make_ctx(tmp_path, env={"PATH": "/bin", "NO_PROXY": "*", "no_proxy": "*", "HTTPS_PROXY": "http://proxy:3128"})
+    stale = ctx.work / "uv-cache-offline" / "old"
+    stale.mkdir(parents=True)
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def call(argv: list[str], cwd: Path, env: dict[str, str], log: Path, timeout: float, *rest: object) -> tuple[str, str]:
+        calls.append((argv, env))
+        return PASS, ""
+
+    monkeypatch.setattr(e2e, "call", call)
+    step = e2e.vendor_round_trip(SCRIPT)[2]
+    assert e2e.execute(ctx, step, ctx.logs / "offline.log") == (PASS, "setup and test with no network and an empty uv cache")
+    assert [argv[-2:] if argv[-2] == "clean" else argv[-1:] for argv, _ in calls] == [["clean", "--envs"], ["setup"], ["test"]]
+    env = calls[0][1]
+    assert env["HTTPS_PROXY"] == env["https_proxy"] == env["HTTP_PROXY"] == env["ALL_PROXY"] == e2e.DEAD_PROXY
+    assert "NO_PROXY" not in env and "no_proxy" not in env
+    assert Path(env["UV_CACHE_DIR"]).is_dir() and not any(Path(env["UV_CACHE_DIR"]).iterdir())

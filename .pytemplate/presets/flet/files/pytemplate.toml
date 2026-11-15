@@ -98,6 +98,13 @@ version = "1.0.4"   # flet, flet-desktop and flet-cli always at the same version
 # (ruff, format, generated files, lock); false: ./pyt apply removes pytemplate's hook
 pre_commit = true
 
+[vendor]
+# ./pyt vendor: the files uv.lock installs on each platform listed, in vendor/<platform>/
+# (commit it): the environments and the pyz/portable builds install from there, without the
+# network. ./pyt vendor starts with this machine's platform; --platform P adds another:
+# linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64, windows-x86_64, windows-aarch64
+platforms = []
+
 [vscode]
 # Status bar buttons (VS Code extension actboy168.tasks): ./pyt commands or [tasks] names
 buttons = ["dev", "run", "test", "build"]

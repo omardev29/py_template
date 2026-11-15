@@ -16,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from . import cmd_install, cmd_nvim, envs, hooks, mypyc, proc, project, render, shells, ui
+from . import cmd_install, cmd_nvim, envs, hooks, mypyc, proc, project, render, shells, ui, vendor
 from .cmd_dev import basedpyright_problem, only_flags
 from .config import Config
 from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, PYPROJECT, ROOT, rel, write_whole
@@ -78,6 +78,8 @@ def ensure_lock(cfg: Config) -> None:
                 they = "it was" if len(restored) == 1 else "they were"
                 ui.info(f"{' and '.join(restored)}: put back as {they} (the code is not ready for PyPy yet)")
             raise
+    if cfg.vendor.platforms:  # every vendored platform gets the files of the new lock at once
+        vendor.follow_lock(cfg)
 
 
 def _pypy_precheck(cfg: Config) -> None:
@@ -213,6 +215,12 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
         except BaseException:
             restore("the code is not ready for PyPy yet")
             raise
+    if not read_only and cfg.vendor.platforms:
+        try:  # the new lock's files into every vendored platform, or the old lock back
+            vendor.follow_lock(cfg)
+        except BaseException:
+            restore("vendor/ could not follow it")
+            raise
     render.apply(cfg)
     return 0
 
@@ -255,6 +263,8 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
         # -q keeps uv's warnings about the packages typed; the user's UV_FROZEN or UV_LOCKED
         # reaches it (the sync after it is the runner's own: envs.LOCK_MODE)
         envs.uv(tool, argv, quiet=False, keep_lock_mode=True)
+        if cfg.vendor.platforms:  # the new lock's files into every vendored platform first
+            vendor.follow_lock(cfg)
         envs.sync(tool)
     except BaseException:  # a failed or interrupted sync (uv add/remove revert their own failures)
         restored = _put_back(before)
@@ -678,6 +688,7 @@ def _project_files(cfg: Config, check: Check, python_ok: bool) -> None:
             check(r.returncode == 0, "uv.lock up to date", "\n".join(filter(None, [envs.uv_error(r.stderr or r.stdout), "./pyt lock"])))
         except PytError as e:  # uv too old to create .venv, or it does not start
             check(False, "uv.lock up to date: uv lock --check did not run", str(e))
+        vendor.doctor(cfg, check)  # vendor/<platform>/ against uv.lock
 
     shells.doctor(check)  # launchers and shells
     hooks.doctor(cfg, check)  # git pre-commit hook

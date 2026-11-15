@@ -302,6 +302,7 @@ outside any project exits 2 with how to install pyt.
 | `lock [--upgrade] [--upgrade-package PKG]` | Rewrites the managed parts of `pyproject.toml` and re-locks `uv.lock`; its other arguments go to `uv lock`. When `uv lock` fails or writes nothing (`--check`, `--dry-run`), `pyproject.toml` is put back as it was; `--help` changes nothing. It does not apply `[preset.*]`: `apply` does |
 | `add PKG... [--dev\|--group G] [--cpython-only]` | `uv add`, then `uv sync --locked --all-groups` of `.venv`; `--cpython-only` adds the marker `implementation_name == 'cpython'` (C-API libraries that are slow or missing on PyPy). When the sync fails (a package that locks but cannot be built) or is interrupted, `pyproject.toml` and `uv.lock` are put back as they were |
 | `remove PKG... [--dev\|--group G]` | `uv remove`, then `uv sync --locked --all-groups` of `.venv` (the packages of every group stay installed); a failed sync puts `pyproject.toml` and `uv.lock` back, as for `add` |
+| `vendor [--platform P]... [--remove P]... [--off] [--check]` | Keeps every file `uv.lock` installs in `vendor/<platform>/`, checked against its sha256; the environments and the pyz and portable builds then install from there, without the network ([details](#vendoring-dependencies)) |
 | `clean [--envs]` | Deletes `.build/` and `dist/`; `--envs` also this side's `.venv*` environments (`setup` recreates the ones in use). A folder that is a mount point (a dev container's volume for `.venv`) is emptied and stays |
 | `hooks [install [--force]\|uninstall\|run\|status]` | The git pre-commit hook ([details](#git-pre-commit-hook)); without an argument, `status` |
 | `mode [BACKEND] [--supports +B\|-B\|B,B...] [--typing auto\|off\|warn\|strict\|mypyc] [--editor pylance\|basedpyright]` | Shows the mode without arguments; otherwise edits `pytemplate.toml` and applies it (re-lock, generated files, a new PyPy environment) |
@@ -718,6 +719,98 @@ file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads
 | `vscode.settings` | `{}` | merged into `.vscode/settings.json` (JSON values only) |
 | `vscode.buttons` | `["run", "test", "check", "build"]` | status bar buttons: commands or task names ([VS Code](#vs-code)) |
 | `hooks.pre_commit` | `true` | the git pre-commit hook ([Git pre-commit hook](#git-pre-commit-hook)) |
+| `vendor.platforms` | `[]` | the platforms whose files of `uv.lock` `vendor/` keeps: `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`, `windows-x86_64`, `windows-aarch64` ([Vendoring](#vendoring-dependencies)) |
+
+## Vendoring dependencies
+
+`./pyt vendor` keeps a copy of every file `uv.lock` installs (every dependency of every group,
+for CPython and for PyPy) in `vendor/<platform>/`, committed with the project, each checked
+against the sha256 `uv.lock` names. From then on `setup`, `sync`, `run`, `test`, `check` and the
+pyz and portable builds install from `vendor/`, with no package index and no network: a PyPI
+outage, a release deleted from it or a machine without internet stops none of them, and nothing
+but the very files the lock names gets in.
+
+```sh
+./pyt vendor                            # the platform you work on: vendor/linux-x86_64/...
+./pyt vendor --platform windows-x86_64  # another one, from any machine
+./pyt vendor --check                    # every file against uv.lock (sha256), then uv's own check
+git add pytemplate.toml vendor .github/workflows/ci.yml && git commit -m "Vendor uv.lock's files"
+```
+
+Measured on Linux with the script preset (24 files, 45 MB): after `./pyt clean --envs`,
+`./pyt setup` with no network at all and an empty uv cache made `.venv` from `vendor/` in about
+a second; `test`, `check`, a pyz with a Windows target and a portable build ran the same way.
+
+### How it works
+
+- `uv.lock` does not change: it stays the lock of your package index, for every platform, with
+  its URLs and hashes. `[vendor] platforms` in `pytemplate.toml` lists the folders.
+- Before a `uv run` or `uv sync` of an environment whose platform is vendored, pyt installs the
+  lock's packages from `vendor/<platform>/`, once per `uv.lock`, with
+  `uv pip install --no-index --find-links vendor/<platform> --require-hashes --offline`; uv then
+  finds every package installed and downloads nothing.
+- Why not uv's own `no-index = true` with `find-links = ["vendor/..."]` in `pyproject.toml`: uv
+  then reads `uv.lock` as stale, and locked again it names `vendor/` for every package without a
+  hash, holds only the vendored platform's wheels (the others cannot install), and fails to
+  resolve a package of another platform the folder lacks (colorama for Windows).
+- Which files: for each platform, the wheels its machines may install (a build for glibc 2.17
+  and one for 2.34, the pure fallback while some machine needs it), else the sdist. A package
+  that only another platform installs is not in that platform's folder.
+
+### Adding or upgrading a dependency
+
+`./pyt add`, `remove`, `lock --upgrade` and `apply` resolve against the index as always (the
+network is needed: a new package is only there), `uv.lock` gets its hashes, and the files of the
+new lock go into every vendored platform at once, the old ones out. When a download fails,
+`pyproject.toml` and `uv.lock` are put back. Commit `vendor/` with `uv.lock`: the pre-commit hook
+refuses a commit while `vendor/` does not match `uv.lock` or holds unstaged files, and `doctor`
+says it too. After a `git pull` that brought a new `uv.lock` without its files (a teammate who
+did not commit `vendor/`), the next command that installs downloads the files of your own
+platform, with a warning, and `./pyt vendor` those of the other platforms.
+
+### Other operating systems and architectures
+
+Each platform is a folder (`linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`,
+`windows-x86_64`, `windows-aarch64`). `uv.lock` names the files of every platform, so any machine
+vendors any of them: `./pyt vendor --platform macos-aarch64` from a Linux laptop. A machine whose
+platform is not listed installs from the index as before (`setup` and `sync` say so);
+`--remove P` drops a platform, `--off` stops vendoring and deletes `vendor/`. Linux means glibc
+(manylinux wheels): a musl one (Alpine) is not served.
+
+### What vendor/ does not hold
+
+- Python itself and uv: `setup` installs the project's CPython once (`uv python install`); a
+  machine that never ran it needs the network that time, or uv's own Python mirror
+  (`UV_PYTHON_INSTALL_MIRROR`).
+- The tools outside `uv.lock`: basedpyright (`typing.editor = "basedpyright"`), Nuitka, UPX, the
+  Flet client, and `flet build`'s Flutter and pip: the network, or uv's cache.
+- Git and URL dependencies and local libraries: they install from their source (`./pyt vendor`
+  lists them). A local library or an sdist builds with its build backend, which comes from
+  `vendor/` when `uv.lock` holds it (setuptools is in every project's dev group), else from
+  the network: `./pyt vendor` names it, and `./pyt add --group build hatchling` vendors it too.
+- A private index that needs credentials: `./pyt vendor` downloads without them.
+
+### Size and Git LFS
+
+The script preset takes 35 to 45 MB per platform (mypy, ruff and PyInstaller are most of it).
+Plain git stores a file once whatever folders hold it, but every wheel an upgrade replaces stays
+in the history for good, and GitHub refuses files over 100 MB (a PyTorch wheel). Git LFS keeps
+`vendor/` out of the history: a clone downloads only the files of the commit it checks out.
+
+```sh
+git lfs install                 # once per machine
+git lfs track "vendor/**"       # writes the rule into .gitattributes
+git add .gitattributes vendor && git commit -m "Vendor uv.lock's files with Git LFS"
+```
+
+- A `vendor/` committed before: `git lfs migrate import --include="vendor/**" --everything`
+  moves it out of the whole history, which rewrites every commit (push with `--force`, and every
+  clone must be made again).
+- A clone made with git-lfs installed gets the files; without it they are small pointer files,
+  which pyt names as Git LFS pointers (`git lfs pull` gets the files) and downloads anew.
+- The generated `ci.yml` checks out with `lfs: true` while vendoring is on.
+- The host counts LFS storage and bandwidth against your account's quota: see [About Git Large
+  File Storage](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-git-large-file-storage).
 
 ## Backends
 
@@ -1838,6 +1931,7 @@ src/main.py                      entry point (never compiled)
 src/<pkg>/core/                  what mypyc compiles (compile.modules)
 src/<pkg>/*.py                   the interpreted boundary (UI, I/O, poorly typed libraries)
 src/assets/                      data bundled with the app (app.assets = "assets")
+vendor/<platform>/               the files of uv.lock, when vendored (./pyt vendor; committed)
 tests/                           pytest, Hypothesis too (conftest.py checks that mypyc's binaries were loaded)
 typings/                         the project's stubs (raylib: the corrected raylib stub)
 .python-version, .mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua   generated
