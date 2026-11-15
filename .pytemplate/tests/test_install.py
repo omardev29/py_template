@@ -1992,8 +1992,10 @@ template_installers = pytest.mark.skipif(not INSTALLERS[0].is_file(), reason="th
 
 
 def _folders_left(box: Box) -> list[Path]:
-    """The folders left in the box's temporary folder (uv keeps a lock file there of its own)."""
-    return [p for p in (box.root / "tmp").iterdir() if p.is_dir()]
+    """The folders left in the box's temporary folder (uv keeps a lock file there of its own, and
+    the .NET runtime PowerShell runs on keeps `.dotnet` for its named mutexes: PowerShell 7.6.9 on
+    the macOS runner left it there, and the test took it for a clone the installer kept)."""
+    return [p for p in (box.root / "tmp").iterdir() if p.is_dir() and p.name != ".dotnet"]
 
 
 def _one_line_env(template: Path, box: Box, **extra: str) -> dict[str, str]:
