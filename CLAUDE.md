@@ -123,6 +123,8 @@ src/<pkg>/core/                   compiled by mypyc (compile.modules)
 src/<pkg>/*.py                    interpreted boundary (UI, I/O, poorly typed libraries)
 tests/                            pytest; conftest.py proves the .pyd/.so were loaded
 typings/                          project stubs (raylib preset: the corrected raylib stub)
+vendor/<platform>/                the files of uv.lock, while [vendor] platforms names the platform
+                                  (`./pyt vendor`, section 5.10); not copied by `new`
 .lazy.lua                         generated, static LazyVim local spec (section 12.2)
 .pytemplate/pyt.py             PEP 723 entry (requires-python >=3.11, dependencies = [])
 .pytemplate/runner/               the runner package (section 5)
@@ -816,6 +818,7 @@ header rules (with detector tests proving each rule fires).
 | `hooks.py` | `./pyt hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (apply/setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify` (`runs_checks`), `hook_state`/`own_local` (a copy chained after another project's hook), `hook_script`/`launcher_of`, `install`/`uninstall` (apply removes the hook when `hooks.pre_commit = false`), `chain_hint`/`chain_advice`, `hooks_path_runner`, `checks`. |
 | `cmd_install.py` | `./pyt install` / `uninstall` and doctor's "pyt install" step (section 5.9): where things go (`data_home`, `snapshot_dir`, `bin_dir`), `MARKER`/`is_launcher`/`not_ours`/`not_an_install`, the record (`read_record`, `recorded_bin`, `source_state`, `describe`, `age`), PATH (`on_path`, `path_state`, `path_problem`, `first_pyt`, `shadowing`), Windows (`pathext_shadows`, `policy_notes`), `make_plan` (every refusal before the first write, in one message: `_refuse`), `_Swap` + `install` (all or nothing; `_new_folder`, `_terminations_interrupt`; one run at a time: `_one_run`), `_remove_earlier`, `leftovers`/`remove_leftovers`, `remove_installed` (`_remove_in_place`, `_remove_last`), `cmd_uninstall`, `doctor`. |
 | `rename.py` | `./pyt rename NEW_NAME [--force]` and the rename step of apply: pure `plan` / `apply_plan` (undoes itself when a write fails or it is interrupted: `_undo`, `_moved_to`) / `rewrite` (tokenizer + `ast` scopes + context rules, `MODULE_KEYS`), `references_left`, `check_new_name` (`locked_names`), `git_changes`, `dirty_tree_message`, `validate_config`, `tidy_before`/`tidy_after` (ruff, `Tidy`), `report`, `cmd_rename` (section 5.7). |
+| `vendor.py` | `./pyt vendor` (section 5.10): the PEP 508 reader (`evaluate`, `marker_env`, `Runtime`/`runtimes`), wheel tags (`parse_wheel`, `wheel_rank`, `choose_wheels`, `PLATFORM_FLOORS`), uv.lock and the export (`read_lock`, `LockFile`, `export`, `parse_export`, `pins`), `make_plan`, the folders (`state`, `follow_lock`, `fetch`, `remove_platform`, `build_requires`/`backend_notes`), installing (`prepare`, `install`, `STAMP`; `build_source` for the builds), the checks (`verify`, `check_folders`, `doctor`), `cmd_vendor`. |
 | `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `locate`, `find`, `uses`, `preflight` (from `cmd_build`, before any work), `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
 
 ### 5.2 Call flow
@@ -1425,6 +1428,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - `test_hooks.py` runs git with `GIT_CONFIG_GLOBAL` at a missing file and
   `GIT_CONFIG_NOSYSTEM=1`: a developer's global core.hooksPath, commit.gpgsign,
   init.templateDir or diff.relative must not change the results.
+- With `[vendor] platforms` set, `hooks run` also checks `vendor/` (`hooks.check_vendor`,
+  project-wide like the generated files): every folder matches the working tree's uv.lock by name
+  and size (`vendor.check_folders`, else "./pyt vendor"), and no planned file, nor a tracked one
+  deleted from the disk, is left out of the commit (`staging(repo, ["vendor"])`, else "git add
+  vendor"): a new uv.lock committed without its files sent every other clone to the index.
 
 ### 5.7 Renaming (`rename.py`)
 
@@ -2017,6 +2025,75 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   template's, launchers of this install left in the recorded bin folder when uv's is another one
   now, on Windows a pyt<ext> before pyt.cmd and a blocking execution policy, PATH.
 
+### 5.10 Vendoring (`vendor.py`)
+
+Owner request (November 2026; the owner chose each option below). `./pyt vendor` keeps every file
+uv.lock installs on each platform of `[vendor] platforms` in `vendor/<platform>/` (committed), and
+the environments and the pyz and portable builds install from there, offline.
+
+- uv.lock never changes: it stays the lock of the index (URLs, sha256, every platform). uv's own
+  way, `no-index = true` with `find-links = ["vendor/..."]`, was measured (uv 0.11.32): it makes
+  uv.lock stale; re-locked, every package names the folder without a hash, the lock holds only
+  the vendored platform's wheels, and a universal resolution fails on another platform's package
+  the folder lacks (colorama for win32): 15.1.
+- Which files (`make_plan`): `uv export --locked --format requirements.txt --no-emit-project
+  --all-groups` minus `envs.left_out` (what envs.sync installs) names each package and the marker
+  that installs it, read per runtime (`runtimes`: CPython of python.cpython, PyPy of python.pypy
+  while supported) on each platform (`marker_env`) by `evaluate`, a PEP 508 reader with a third
+  answer, None: what depends on what the platform does not fix (a CPython known to its minor only,
+  `python_full_version >= '3.14.1'`; platform_release; a conflict's extra; an ordering of two
+  strings, where packaging 22-25 and 26 disagree) is vendored, to be safe. A Hypothesis test
+  compares every decided answer with packaging's for every patch release
+  (`test_vendor.test_markers_read_like_packaging`). For a needed package, `choose_wheels` keeps the
+  wheels of uv.lock that runtime loads there (`wheel_rank`: packaging's cpython_tags and
+  compatible_tags for one minor, PyPy's `pypy<XY>_pp73`, `PYPY_ABI`; `_PLATFORM_TAGS`, manylinux
+  only on Linux: glibc), one per oldest machine they serve (`PLATFORM_FLOORS`: what uv's Pythons
+  need, glibc 2.17, macOS 10.13/11.0) unless it ranks no better than an older one's, the pure
+  fallback only while some machine of the platform loads no native one, the smaller of a tie (a
+  thin arm64 wheel over universal2); else the sdist, unless `[tool.uv] no-build(-package)` forbids
+  it; `no-binary(-package)` takes the sdist. Git, URL and local sources are never vendored (notes).
+  A file of uv.lock named by `path =` (a local index) counts when it has a hash; a find-links
+  folder's files have none and are skipped.
+- `follow_lock` (`./pyt vendor` with `full`: sha256 too; the others by name and size: `state`):
+  downloads what is missing (urllib, `DOWNLOADS` at a time, each into a `.part` beside it and
+  `os.replace` only once its size and sha256 are uv.lock's; a body cut short is retried after
+  `common.DOWNLOAD_RETRIES`, a file with another hash never is: exit 1; a failure or Ctrl+C stops
+  the others at their next chunk, `_stop`, and removes what this run downloaded, `_drop_new`),
+  then removes the distribution files the lock no longer names (`DISTRIBUTIONS`, `.part`
+  leftovers; any other file is left, with a warning). A Git LFS pointer in place of a file is
+  named and downloaded again. `--dry-run` writes nothing.
+- Installing (`prepare`, called by `envs.uv` before every `uv run` and `uv sync` of the project:
+  `envs._installs`, never `--no-sync`, `--dry-run`, `--script`, `--no-project`, nor a copy of the
+  project such as mutation's; `PyEnv.vendored` carries the Config, `envs._vendored`): once per
+  uv.lock (`STAMP` in the environment: the lock's sha256, the platform, the request), it brings
+  this machine's folder in line (a pull that brought uv.lock without vendor/: a download, with a
+  warning), makes the environment when missing (`uv venv --allow-existing`) or again when it runs
+  another Python (`vendor.fits`, `uv venv --clear`: python.cpython moved, as uv sync would make it
+  again; installed into, it got the other minor's wheels), and `install`s the export's pins
+  (`pins`, with their hashes; exported `--frozen` for a `uv run --frozen`, the hook's ruff, which
+  a stale lock must not stop, else `--locked`) with `uv pip install --no-index --find-links
+  vendor/<platform> --offline --require-hashes --no-deps`; the `uv sync --locked` or `uv run`
+  that follows finds every package installed (measured: an empty cache, no network, "Checked").
+  A platform vendor/ does not serve (not listed, musl: `host_platform`, `why_not_host`) installs
+  from the index, and setup/sync say so once.
+- The lock changes: `cmd_env.ensure_lock` (mode, apply, rename), `cmd_lock` (its files put back
+  when vendor cannot follow) and `add`/`remove` (inside their put-back) call `follow_lock` for
+  every platform. Builds: `common.install_deps` takes `vendor.build_source` for a target of a
+  vendored platform (`--no-index --offline --find-links`, or only `--find-links` when the
+  requirements hold a local library, whose build backend comes from the index).
+- Checks: `verify` (after `./pyt vendor`, and `--check`) asks uv itself whether each folder
+  installs the lock there: an offline dry-run `uv pip install --target` for CPython with
+  `VERIFY_PLATFORMS` (the newest of each family, `MACOSX_DEPLOYMENT_TARGET=VERIFY_MACOS`), PyPy on
+  this machine only (uv reads a PyPy marker only on a real PyPy: 15.1). `backend_notes` reads each
+  vendored sdist's `[build-system] requires` (`build_requires`) and names a backend uv.lock lacks
+  (`./pyt add --group build X` vendors it). doctor (`vendor.doctor`), the hook (5.6) and the
+  generated ci.yml (`__CHECKOUT_LFS__`: `lfs: true` while vendoring) follow it.
+- `./pyt vendor [--platform P]... [--remove P]... [--off] [--check]` (`cmd_vendor`): no argument
+  with an empty list adds this machine's platform; the list is edited with `config.update_file`,
+  removed platforms lose their distribution files (`remove_platform`), and render runs at the end
+  (ci.yml). `.gitattributes` marks `vendor/**` binary; Git LFS is the user's choice (README:
+  Vendoring), and `LFS_HINT_SIZE` names it past 50 MB.
+
 ## 6. Configuration and generated files
 
 ### 6.1 `pytemplate.toml` (`config.py`)
@@ -2102,6 +2179,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   path` (`level` in `1..9|best|brute|ultra-brute`; `path` relative to the project root).
 - `[hooks]`: `pre_commit` (apply/setup install the git hook when true and remove pytemplate's
   own when false; section 5.6).
+- `[vendor]`: `platforms` (`config.VENDOR_PLATFORMS`, no duplicates; empty: nothing is vendored;
+  section 5.10).
 - Every `*.env` table (`tasks.X.env`, `deploy.portable.env`) takes string values only, and names
   a process environment can hold (not empty, no `=` or NUL; checked by the loader).
 - `[tasks.<name>]`: `cmd` (argv), `deps`, `env`, `backend`, `uv = true`, `cwd`, `help`,
@@ -2418,6 +2497,8 @@ Formats:
   whenever it runs with another `cwd` (a work dir with its own `pyproject.toml`, like the
   `flet build` stage, would otherwise become the project). Plain `envs.uv` calls with a `cwd`
   (nuitka, the stages without a pyproject) rely on the walk reaching `ROOT`.
+- With `[vendor] platforms` set, every `uv run` and `uv sync` of the project's environments
+  installs uv.lock's files from `vendor/<platform>/` first (`vendor.prepare`, section 5.10).
 - `git clean -fdx` is safe: only envs, the root's `.build/`, `dist/` and `build/`, caches and
   `.claude/` go (the .gitignore anchors the output folders at the root, `/dist`: named at any
   depth, a subpackage or test folder called build or dist was never committed, and this deleted
@@ -2956,6 +3037,9 @@ Formats:
   only when a path moves: every pyz and portable build of the project exports there, and a build
   started while another rewrote it in place read it empty or cut after some `[[packages]]`
   (`test_the_pylock_rebase_never_leaves_the_file_half_written`).
+- A target of a vendored platform installs from `vendor/<platform>/` instead of the pylock.toml
+  (`vendor.build_source`, section 5.10): the requirements.txt with its hashes, `--no-index
+  --offline --find-links` (only `--find-links` next to a local library).
 - `common.install_deps` (`uv pip install --link-mode copy --target --no-deps -r <pylock.toml>`:
   the folder is shipped, so its files are copies, never links into uv's cache, whatever link mode
   the user set, 15.1; `--reinstall-package <name>` for each local package of uv.lock,
@@ -3607,7 +3691,8 @@ Per method:
   to let it read the folder (`presets._git_refused`, `git_refusal_fix`: it said "not a git work
   tree" of a clone another user owns; install refuses with them, 5.9) (git runs with
   `LC_ALL=C`). Both skip (`presets._skipped`) `.git`, caches, `.flet`, `.venv*`,
-  `template-repo` at any depth; `.build/`, `dist/`, `build/`, `.claude/`, `README.md` and
+  `template-repo` at any depth; `.build/`, `dist/`, `build/`, `.claude/`, `vendor/` (the files
+  of this project's uv.lock: the new one locks its own), `README.md` and
   `LICENSE` at the root (`SKIP_AT_ROOT`: as `.gitignore` and render, only the root's own
   outputs are builds; a tracked `docs/dist/` or `tools/.build/` was left out of the new project
   without a word); and `.github/workflows/template-*` (template CI files MUST use that prefix; the CI
@@ -4413,6 +4498,12 @@ short temp tree and unset `NVIM_APPNAME`.
   pin, pure and mypyc wheels, and the extra C flags through a logging `CC` with a user
   `CFLAGS`: in every compile command of the stage and the wheel, the i64 wrap-around, and on
   Linux the inlined call (objdump; without the option gcc keeps the call)),
+  `test_vendor.py` (`./pyt vendor`, section 5.10: the marker reader against packaging's for every
+  patch release, Hypothesis, and the wheel tags against packaging.tags for every wheel of the
+  project's uv.lock on every platform; the plan, the downloads from file:// URLs, a hash or a size
+  that is not uv.lock's, LFS pointers, the prune, the build backends of sdists, prepare's stamp,
+  the hook in a real git repository, doctor, ci.yml, the options; one real offline install with uv
+  from a local package index and an empty cache),
   `test_removals.py` (no JIT key, env, launch config or `PYTHON_JIT` left;
   `./pyt init` exits 2 with its hint; `new` and the maintainer route through `__init`, for
   real in throwaway copies),
@@ -4650,7 +4741,11 @@ short temp tree and unset `NVIM_APPNAME`.
   `--full`: + nuitka, a `mode --supports +/-pypy` round trip (back to the preset's active
   backend) and a `[preset.*]` option edit (`e2e.OPTION_EDITS` with `config.set_value`, then
   `./pyt apply`: pyproject.toml and uv.lock must follow, `doctor` passes, a second `apply`
-  changes nothing). A round trip must give back the project's files (`project_state`: not
+  changes nothing), then a vendor round trip (`e2e.vendor_round_trip`: `vendor`, `vendor
+  --check`, then `do_offline`: `clean --envs`, `setup` and `test` with every proxy variable at
+  `e2e.DEAD_PROXY`, NO_PROXY dropped and an empty `UV_CACHE_DIR`, so only vendor/ serves them;
+  then `vendor --off`, a round trip too). A round trip must give back the project's files
+  (`project_state`: not
   `.git`, environments, builds, caches; each read as render reads a generated file, without a
   BOM and with CRLF as LF: a Windows checkout holds CRLF, and the generated files a `mode` round
   trip rewrote twice came back LF, the same files to git and the runner, which failed every
@@ -4865,8 +4960,9 @@ short temp tree and unset `NVIM_APPNAME`.
 ### 13.2 CI
 
 - `.github/workflows/ci.yml` is generated for every project (`render.ci_workflow` from
-  `templates/ci.yml`: placeholders `__HEADER__`, `__MATRIX__`, `__LINUX_DEPS__` (its line must
-  exist exactly), `__NAME__`, `__BUILD_BACKEND__`; action majors pinned: bump deliberately;
+  `templates/ci.yml`: placeholders `__HEADER__`, `__MATRIX__`, `__LINUX_DEPS__` and
+  `__CHECKOUT_LFS__` (their lines must exist exactly; the second gives the test job's checkout
+  `lfs: true` while `[vendor] platforms` is set), `__NAME__`, `__BUILD_BACKEND__`; action majors pinned: bump deliberately;
   `astral-sh/setup-uv` publishes no floating major tags since v8 (`@v10` does not resolve), so
   it is pinned to an exact release, `v10.2.0`, in every workflow; deleting the template
   disables CI generation; a placeholder left behind is a PytError). It triggers on pushes to
@@ -5520,6 +5616,20 @@ uv:
   `test_doctor_says_when_python_cpython_is_a_pre_release`,
   `test_cli_core.py::test_a_command_never_runs_on_a_prerelease_of_python_cpython`. Goes: never
   (a new minor comes after some uv every year).
+- **uv has no `pip download`, and `no-index` + `find-links` are no offline mirror** (LIMITATION,
+  uv 0.11.32 and 0.12.19, measured): with them in pyproject.toml (or on the command line) uv reads
+  a lock of the index as stale; locked again, each package names the folder with no hash, the lock
+  holds only the folder's platform, and a universal resolution fails on another platform's package
+  the folder lacks. Up: astral-sh/uv#3163 (`uv pip download`, open). Fix: `./pyt vendor` downloads
+  uv.lock's own files itself and installs them with `uv pip install --no-index --find-links
+  --require-hashes --offline` before uv syncs (`vendor.follow_lock`, `vendor.install`, 5.10).
+  Test: `test_vendor.py::test_an_environment_installs_from_vendor_with_the_real_uv_offline`.
+  Goes: never (uv.lock stays the index's lock either way).
+- **uv evaluates PyPy markers only on a real PyPy** (LIMITATION): `--python-platform` with
+  `--python-version` reads as CPython, so the offline check of a vendored folder cannot ask uv
+  about PyPy on another platform. Fix: `vendor.verify` checks PyPy on this machine only, through
+  `.venv-pypy`; the plan reads PyPy's markers itself (`vendor.evaluate`, 5.10). Test:
+  `test_vendor.py::test_a_pypy_project_vendors_for_both_interpreters`. Goes: never.
 - **The lock resolves for every future Python** (LIMITATION): uv resolved for 3.15+, where
   raylib has no wheels. Fix: `environments` bounded to the CPython and PyPy minors in
   `render.managed_block` (7). Test: `test_runner.py::test_managed_block_bounds_cpython_minor`,
@@ -7196,6 +7306,17 @@ macOS:
 ### 15.2 Our open issues and fragile points
 
 Behaviour:
+- Vendoring (5.10) covers uv.lock's packages only (the owner's choice, November 2026): Python
+  itself and uv, the tools outside the lock (basedpyright, Nuitka, UPX, the Flet client, flet
+  build's Flutter and pip), git and URL sources, and the build backend of a local library or of
+  an sdist that uv.lock does not hold still need the network or uv's cache. A private index that
+  needs credentials cannot be vendored (urllib sends none). Linux is glibc only (musl not served).
+  An environment the user changed by hand after its install from vendor/ (its STAMP still names
+  the lock) gets what uv itself installs, from the index. The wheel choice keeps one wheel per
+  oldest machine it serves (PLATFORM_FLOORS): a machine older than those floors (glibc below
+  2.17) installs nothing from vendor/, as uv's Pythons do not run there either. Untested on
+  Windows and macOS hosts (the cross downloads for them ran on Linux, and uv's offline dry-run
+  accepted each folder).
 - Platforms uv has no CPython builds for (Android/Termux, FreeBSD and the other BSDs) run
   `help`, `doctor`, `install` and `uninstall` only (on any Python 3.11+ there): every other
   command, `new` included, stops with exit 3 and why (`envs.no_download_problem`). By design
@@ -7416,6 +7537,13 @@ Editors:
   traceback, "adapter exited with 1").
 
 Code coupling (rename together):
+- `vendor` imports the private `envs._holds` (PEP 440 on final releases) and lazily
+  `methods.common` (`host_arch`, `this_libc`, `transient`, `DOWNLOAD_RETRIES`), which imports it
+  lazily back in `install_deps`; `envs.uv` imports it lazily (`prepare`), and `hooks.check_vendor`
+  too. `vendor.PYPY_ABI` (pp73) follows the python.pypy pin (a PyPy 8 pin: pp80);
+  `vendor.PLATFORM_FLOORS` follows what uv's interpreters need; `vendor._MACHINE` follows each
+  platform's `platform_machine`; `config.VENDOR_PLATFORMS` <-> `vendor.VERIFY_PLATFORMS`,
+  `_PLATFORM_TAGS`, `_MACHINE`, `PLATFORM_FLOORS` (one key each).
 - `hooks` imports the private `cmd_dev._profile_file` and `shells.launcher_problems`, and loads
   `.pytemplate/tests/test_no_spanish.py` by path (it needs `offending_lines`, `ALLOWED_PATHS`,
   `BINARY_SUFFIXES`, and only `pytest.mark` at module level); `rename` calls the private

@@ -322,7 +322,12 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
     # (UV_LINK_MODE, uv.toml, [tool.uv] link-mode): with "symlink" every file of lib/ was an
     # absolute link into this machine's cache, and the folder and its archive failed anywhere
     # else (or after `uv cache clean`) while the build passed its own smoke test
-    base: list[str | Path] = ["pip", "install", "--quiet", "--link-mode", "copy", "--target", dest, "--no-deps", "-r", pylock_path(requirements)]
+    # A target of a platform the project vendors takes uv.lock's files from vendor/<platform>
+    # (vendor.build_source: no index, offline), else each from the URL the pylock.toml names
+    from .. import vendor  # vendor imports this module lazily
+
+    source = vendor.build_source(cfg, target.os, target.arch, requirements) or ["-r", pylock_path(requirements)]
+    base: list[str | Path] = ["pip", "install", "--quiet", "--link-mode", "copy", "--target", dest, "--no-deps", *source]
     # A local library is built again from its folder: uv keys the wheel it built from a folder by
     # the folder's pyproject.toml, setup.py and setup.cfg only, so once the library's code changed
     # every build installed the cached wheel of the first one (./pyt run had the new code). Never

@@ -50,6 +50,7 @@ COMMANDS: dict[str, Command] = {
     "lock": Command("cmd_env", "cmd_lock", "Apply the managed parts of pyproject and re-lock uv.lock", "[--upgrade] [--upgrade-package PKG]", group="Environment"),
     "add": Command("cmd_env", "cmd_add", "Add dependencies (uv add)", "PKG... [--dev|--group G] [--cpython-only]", group="Environment"),
     "remove": Command("cmd_env", "cmd_remove", "Remove dependencies (uv remove)", "PKG... [--dev|--group G]", group="Environment"),
+    "vendor": Command("vendor", "cmd_vendor", "Keep the files of uv.lock in vendor/<platform>/: the environments install from there, offline", "[--platform P]... [--remove P]... [--off] [--check]", group="Environment"),
     "clean": Command("cmd_env", "cmd_clean", "Remove .build/ and dist/ (and the environments with --envs)", "[--envs]", render=False, group="Environment"),
     "hooks": Command("hooks", "cmd_hooks", "Install or remove the git pre-commit hook, or run its checks on the staged files", "[install [--force]|uninstall|run|status]", render=False, group="Environment"),
     # mode and template

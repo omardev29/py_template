@@ -94,6 +94,12 @@
       "group": "Environment"
     },
     {
+      "name": "vendor",
+      "usage": "[--platform P]... [--remove P]... [--off] [--check]",
+      "summary": "Keep the files of uv.lock in vendor/<platform>/: the environments install from there, offline",
+      "group": "Environment"
+    },
+    {
       "name": "clean",
       "usage": "[--envs]",
       "summary": "Remove .build/ and dist/ (and the environments with --envs)",

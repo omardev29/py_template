@@ -16,8 +16,10 @@ user's git configuration (isolate_git).
 - --quick:  one build per backend (its deploy.default method): what every push runs.
 - default:  every (backend, method) pair that cmd_build.COMPAT allows except nuitka (slow),
             `./pyt selftest` in the project, a usage error, and a rename round trip.
-- --full:   adds nuitka, a pypy round trip (`mode --supports +pypy`, test, and back) and a
-            [preset.*] option edit applied with `./pyt apply` (another version: network).
+- --full:   adds nuitka, a pypy round trip (`mode --supports +pypy`, test, and back), a
+            [preset.*] option edit applied with `./pyt apply` (another version: network), and a
+            vendor round trip: `./pyt vendor`, then clean --envs, setup and test with no network
+            and an empty uv cache, then `vendor --off` (vendor_round_trip).
 - `flet build` (Flutter SDK + Windows Developer Mode) is SKIP unless both are detected.
 
 Every step is one PASS/FAIL/SKIP row with its time; its output goes to
@@ -103,7 +105,12 @@ TIMEOUTS = {
     "usage": 120,
     "rename": 900,
     "smoke": 300,
+    "vendor": 900,
+    "offline": 3600,
 }
+# The network an --full vendor round trip leaves the project (OFFLINE_ENV): a proxy that refuses
+# every connection, for uv and for Python; with an empty uv cache, only vendor/ can serve it
+DEAD_PROXY = "http://127.0.0.1:9"
 BUILD_TIMEOUTS = {"exe": 1200, "portable": 1200, "pyz": 900, "wheel": 900, "nuitka": 3600, "flet": 3600}
 # How each preset's app ends on its own, and the text its output must contain. A preset
 # missing here runs with no arguments if it is a console app and is skipped if it is a GUI.
@@ -330,6 +337,20 @@ def option_edit(info: PresetInfo) -> list[Step]:
     ]
 
 
+def vendor_round_trip(info: PresetInfo) -> list[Step]:
+    """--full: `./pyt vendor` this platform, check it, set the project up again and test it with
+    no network and an empty uv cache (do_offline), then `vendor --off`, which must give back the
+    project's files."""
+    p = info.name
+    head = "vendor: this platform"
+    return [
+        _pyt(p, head, ("vendor",), snapshot=head),
+        _pyt(p, "vendor --check", ("vendor", "--check"), after=head),
+        Step(p, "vendor: clean --envs, setup and test, offline", "offline", timeout=TIMEOUTS["offline"], after=head),
+        _pyt(p, "vendor --off", ("vendor", "--off"), after=head, restores=head),
+    ]
+
+
 def host_gaps(info: PresetInfo, host: Host) -> dict[str, str]:
     """Return the preset's backends this host cannot install, with the reason."""
     gaps = HOST_GAPS.get((info.name, f"{host.os}-{host.arch}"), {})
@@ -398,6 +419,7 @@ def plan(info: PresetInfo, opts: Options, host: Host) -> list[Step]:
         steps += pypy_round_trip(info)
     if opts.full:
         steps += option_edit(info)
+        steps += vendor_round_trip(info)
     return steps
 
 
@@ -437,7 +459,7 @@ def parse_args(args: Sequence[str], available: Sequence[str]) -> Options:
     parser.add_argument("--methods", default="", help="only these build methods, e.g. exe,pyz (naming nuitka runs it without --full)")
     size = parser.add_mutually_exclusive_group()
     size.add_argument("--quick", action="store_true", help="one build per backend (its deploy.default method); no selftest or rename in the project")
-    size.add_argument("--full", action="store_true", help="also nuitka, a `mode --supports +pypy` round trip and a [preset.*] option edit")
+    size.add_argument("--full", action="store_true", help="also nuitka, a `mode --supports +pypy` round trip, a [preset.*] option edit and an offline vendor round trip")
     parser.add_argument("--gui", choices=("auto", "on", "off"), default="auto", help="GUI runs (raylib: 5 frames); auto skips them with no display or on a Windows/macOS CI runner")
     parser.add_argument("--keep", action="store_true", help="keep the base dir even when everything passes")
     parser.add_argument("--reuse", action="store_true", help="reuse <base>/<preset> kept by an earlier run instead of recreating it")
@@ -1081,6 +1103,29 @@ def do_option(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
     return (FAIL, "; ".join(problems)) if problems else (PASS, ", ".join(f"{n}=={v}" for n, v in sorted(after.items())))
 
 
+def offline_env(ctx: Context) -> dict[str, str]:
+    """The project's environment with no network (DEAD_PROXY for every scheme, nothing exempt)
+    and a uv cache of its own, made empty."""
+    cache = ctx.work / "uv-cache-offline"
+    if cache.exists():
+        rmtree(cache)
+    cache.mkdir(parents=True)
+    dead = {k: DEAD_PROXY for k in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")}
+    return {**{k: v for k, v in ctx.env.items() if k.upper() != "NO_PROXY"}, **dead, "UV_CACHE_DIR": str(cache)}
+
+
+def do_offline(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
+    """`clean --envs`, `setup` and `test` of a vendored project with no network at all and an
+    empty uv cache: the environments come from vendor/ alone (vendor.prepare)."""
+    env = offline_env(ctx)
+    for args in (("clean", "--envs"), ("setup",), ("test",)):
+        _log_note(log, f"$ ./pyt {' '.join(args)}   (no network: {DEAD_PROXY}; UV_CACHE_DIR={env['UV_CACHE_DIR']})")
+        status, detail = call(runner_argv(ctx.uv, ctx.project, args), ctx.project, env, log, step.timeout)
+        if status != PASS:
+            return status, f"./pyt {' '.join(args)}: {detail}"
+    return PASS, "setup and test with no network and an empty uv cache"
+
+
 def do_build(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
     from .methods.common import tree_bytes
 
@@ -1196,6 +1241,8 @@ def _execute(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
         return do_build(ctx, step, log)
     if step.kind == "smoke":
         return do_smoke(ctx, step, log)
+    if step.kind == "offline":
+        return do_offline(ctx, step, log)
     argv = [*step.wrap, *runner_argv(ctx.uv, ctx.project, step.args)]
     return call(argv, ctx.project, ctx.env, log, step.timeout, step.expect, step.expect_code)
 

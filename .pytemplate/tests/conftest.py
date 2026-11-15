@@ -127,6 +127,7 @@ __MATRIX__
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+__CHECKOUT_LFS__
 __LINUX_DEPS__
       - run: ./pyt sync ${{ matrix.backends }}
       - run: ./pyt build __BUILD_BACKEND__ --method pyz

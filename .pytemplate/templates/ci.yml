@@ -36,6 +36,7 @@ __MATRIX__
         shell: bash
     steps:
       - uses: actions/checkout@v7
+__CHECKOUT_LFS__
       - uses: astral-sh/setup-uv@v10.2.0
       # A pytemplate.toml edit committed without running ./pyt (no hook, the web editor)
       - name: Generated files match pytemplate.toml
