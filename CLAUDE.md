@@ -7016,6 +7016,21 @@ PowerShell (details: section 4.5):
   5.9). Test: `test_shells.py::test_doctor_counts_an_execution_policy_only_for_the_powershell_in_use`,
   `test_install.py::test_on_windows_install_and_doctor_note_a_powershell_that_blocks_pyt_ps1`.
   Goes: never.
+- **Two PowerShell 7 started at once corrupt their shared startup profile** (DEFECT, .NET 9 and
+  10: PowerShell 7.5.4 and 7.6.9). Each pwsh rewrites `StartupProfileData-NonInteractive` in its
+  cache folder (`~/.cache/powershell`, `%LOCALAPPDATA%\Microsoft\PowerShell`) at exit, with no
+  lock and no rename into place (`ProfileOptimization.StartProfile`). Once the file is cut short,
+  every later `pwsh -NonInteractive` aborts at start (exit 134, "An error has occurred that was
+  not properly handled", a truncated assembly name), until the file is deleted. On macOS
+  `shells._ps_policies` asked a `powershell` on PATH next to pwsh. That `powershell` is PowerShell
+  7 itself (the macOS runner image has one), so two pwsh ran at once. `./pyt selftest` then failed
+  every pwsh test after it, and left the user's own pwsh broken. Up: dotnet/runtime#121977.
+  Fix: `shells._ps_policies` asks Windows PowerShell 5.1 only on Windows, where it runs on
+  .NET Framework with a profile of its own; `selftest --shells` runs one pwsh at a time (one
+  shell's probes in turn). Every other pwsh of the runner and of the suite starts alone (4.9,
+  13.1). Test: `test_shells.py::test_ps_policies_never_start_a_second_powershell_7`,
+  `test_ps_policies_name_the_edition_pyt_ps1_reports`. Goes: never (one pwsh at a time stays
+  right).
 - **`Get-Command uv` may return an alias, a function or a `uv.cmd`/`uv.ps1` wrapper**
   (LIMITATION): a wrapper parses the arguments again. Fix: `-CommandType Application -All` and
   only a real `uv.exe` on Windows (the plugin: `uv.exe` in PATH's absolute folders; 4.1). Test:

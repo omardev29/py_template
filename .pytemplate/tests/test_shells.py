@@ -400,7 +400,25 @@ def test_ps_policies_answer_what_a_new_window_gets(tmp_path: Path, monkeypatch: 
             fake.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setenv("PSExecutionPolicyPreference", "Bypass")
-    assert shells._ps_policies() == [("Windows PowerShell 5.1", "Desktop", "Restricted"), ("PowerShell 7", "Core", "Restricted")]
+    windows = [("Windows PowerShell 5.1", "Desktop", "Restricted")] if IS_WINDOWS else []
+    assert shells._ps_policies() == [*windows, ("PowerShell 7", "Core", "Restricted")]
+
+
+def test_ps_policies_never_start_a_second_powershell_7(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Off Windows a `powershell` on PATH is PowerShell 7 itself (the macOS runner image has one):
+    asked next to pwsh, two PowerShell 7 started at once, their shared startup profile was
+    corrupted, and every later `pwsh -NonInteractive` aborted (exit 134; dotnet/runtime#121977).
+    It is never started there: Windows PowerShell 5.1 is Windows' only."""
+    if IS_WINDOWS:
+        pytest.skip("on Windows `powershell` is Windows PowerShell 5.1, on a runtime of its own")
+    for name in ("powershell", "pwsh"):
+        fake = tmp_path / name
+        fake.write_text(f'#!/bin/sh\n: > "{tmp_path}/{name}.ran"\nprintf "RemoteSigned\\n"\n', encoding="ascii")  # PATH holds no touch
+        fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert shells._ps_policies() == [("PowerShell 7", "Core", "RemoteSigned")]
+    assert (tmp_path / "pwsh.ran").is_file()
+    assert not (tmp_path / "powershell.ran").exists()
 
 
 def test_ps_policies_name_the_edition_pyt_ps1_reports() -> None:
@@ -411,6 +429,7 @@ def test_ps_policies_name_the_edition_pyt_ps1_reports() -> None:
     got = {label: edition for label, edition, _ in shells._ps_policies()}
     r = subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSEdition"], capture_output=True, text=True, timeout=120, check=False)
     assert got["PowerShell 7"] == r.stdout.strip() == "Core", (got, r.stdout, r.stderr)
+    assert IS_WINDOWS or list(got) == ["PowerShell 7"], got
 
 
 def test_launcher_problems() -> None:

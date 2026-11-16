@@ -175,8 +175,16 @@ def _ps_policies() -> list[tuple[str, str, str]]:
     """Return (label, edition, ExecutionPolicy) for Windows PowerShell 5.1 and PowerShell 7: the
     policy a new window gets. A session started with -ExecutionPolicy X (a way around a blocked
     pyt.ps1, the VS Code PowerShell console) hands its children PSExecutionPolicyPreference=X, its
-    Process scope, which then won over a Restricted CurrentUser or LocalMachine policy."""
-    found = [(label, edition, exe) for label, edition, name in PS_EDITIONS if (exe := proc.find_program(name))]
+    Process scope, which then won over a Restricted CurrentUser or LocalMachine policy.
+
+    Windows PowerShell 5.1 only on Windows: a `powershell` elsewhere is PowerShell 7 itself (a link
+    the macOS runner image has). Asked with pwsh, it made two PowerShell 7 start at once, and their
+    shared startup profile (~/.cache/powershell/StartupProfileData-NonInteractive) was corrupted.
+    After that, every `pwsh -NonInteractive` aborted at start (dotnet/runtime#121977, section 15.1).
+    On Windows the two run on different runtimes (.NET Framework and .NET), each with its own
+    profile, so they are asked at once."""
+    editions = [e for e in PS_EDITIONS if IS_WINDOWS or e[1] == "Core"]
+    found = [(label, edition, exe) for label, edition, name in editions if (exe := proc.find_program(name))]
     env = {k: v for k, v in os.environ.items() if k.upper() != "PSEXECUTIONPOLICYPREFERENCE"}
 
     def policy(exe: str) -> str:
